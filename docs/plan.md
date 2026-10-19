@@ -104,7 +104,7 @@ and files have their own events.
 `message_state` (phase 3): the latest event per message and endpoint, updated in the same
 transaction as the event.
 
-`bridge_tasks` (phase 3): for messages delivered through the Hermes bridge, `message_id`,
+`bridge_tasks` (phase 12): for messages delivered through the Hermes bridge, `message_id`,
 `a2a_task_id`, `context_id`, the peer (`machine/endpoint`) the task belongs to, and the task's last
 known state.
 
@@ -271,52 +271,19 @@ is what bounds its replay window, so it doesn't take the relay's value on trust.
 
 ## Phase 3: Daemon and MCP
 
-The point where PoniExp can replace agent-relay. Adds `message_events`, `message_state`,
-`bridge_tasks`, `endpoints`, `peer_endpoints` and `diagnostics` to the client database.
+Agents on different machines talk through their daemons, with MCP as the agents' interface. Adds
+`message_events`, `message_state`, `endpoints`, `peer_endpoints` and `diagnostics` to the client
+database. Pushing messages into Hermes (the Hermes bridge) is phase 12.
 
 - **`poniexp-client daemon`:** the machine's only connection to the server. It handles local
   routing to endpoints, the outbox, and the client database.
   - **Outbox:** a message sent while the router is unreachable waits in the outbox. One whose expiry
     passes before it is relayed is marked `expired` instead: its `createdOn` is signed and the
     recipient's clamp counts from it, so relaying it late would only get it refused.
-- **Local API** on a Unix socket or named pipe, used by the CLI, the MCP servers and the Hermes
-  bridge.
+- **Local API** on a Unix socket or named pipe, used by the CLI, the MCP servers and (phase 12) the
+  Hermes bridge.
 - **`poniexp-client mcp`** (stdio). Tools: `send`, `reply`, `ack`, `inbox`, `conversation`,
   `machines`, `status`; later `attach` and `fetch`.
-- **Hermes delivery:** the Hermes bridge pushes incoming messages into the local Hermes gateway
-  over A2A, since agents don't poll MCP. Hermes puts each A2A task into its live agent session,
-  so choosing the session is the gateway's job, not the bridge's.
-  - The bridge uses `message/stream` (SSE), not a blocking send, and turns the A2A task's state
-    changes into receipts and replies:
-
-    | A2A task state | PoniExp |
-    |---|---|
-    | `submitted` (the gateway took it) | nothing new; `received` was already sent |
-    | `working` (the agent has started on it) | `acknowledged` |
-    | `input-required` | a reply with `status: progress`, carrying the question |
-    | `completed` | a reply with `status: done`, carrying the agent's answer |
-    | `failed`, `rejected`, `canceled` | a reply with `status: failed` |
-
-  - The A2A `contextId` is derived from the peer (`machine/endpoint`) **and** the `conversationId`,
-    so a conversation stays one multi-turn exchange inside Hermes. The sender chooses the
-    `conversationId`, so using it alone would let another machine join someone else's conversation.
-  - The A2A message carries the PoniExp message id, sender (`machine/endpoint`) and conversation id
-    in its metadata, so the agent can use the MCP tools on it (e.g. `reply`).
-  - The A2A task id is stored in `bridge_tasks`. After a restart the bridge picks the task up again
-    (`tasks/subscribe`, or `tasks/get` for one that has already finished), so no receipt or reply
-    is lost.
-  - **Answering a question:** when the sender replies to an `input-required` question (its
-    `replyTo` is that progress reply), the bridge looks up the task in `bridge_tasks` and sends the
-    answer into the same A2A task, rather than starting a new one. An answer is accepted only from the
-    peer the task belongs to.
-  - The bridge sends the reply, from the task result. If the agent already replied to the same
-    message through the MCP `reply` tool, the bridge doesn't send another: one answer, never two.
-  - The agent doesn't need to call `ack` itself: the task state is set by Hermes, so it can't be
-    forgotten. `ack` remains for MCP agents that pull from their inbox.
-  - **To check first:** whether Hermes keeps a task `submitted` while the live session is busy with
-    another turn, and only moves it to `working` when the agent actually starts on it. If it marks
-    the task `working` as soon as it's injected, the bridge acknowledges on the first event the
-    agent produces for the task instead.
 - **Endpoint announcements:** an endpoint (an MCP server, the Hermes bridge, a CLI `listen`)
   registers with its daemon by name and keeps the registration alive with a heartbeat.
   - The daemon announces each change to every approved machine: an endpoint came **online**,
@@ -342,8 +309,7 @@ The point where PoniExp can replace agent-relay. Adds `message_events`, `message
     endpoint is online.
   - **`acknowledged`:** an agent has actually taken the message on. Fetching a message isn't
     enough; the agent acknowledges it explicitly (the MCP `ack` tool, or the local API). Replying
-    acknowledges too. For the Hermes bridge, the message is acknowledged when the A2A task
-    reaches `working` (see Hermes delivery).
+    acknowledges too. For the Hermes bridge, see phase 12.
   - **`rejected`:** the recipient's machine won't deliver it, with a reason (e.g. "unknown
     endpoint"). Sent instead of `received`.
 - **`poniexp-client doctor`:** checks reachability, the certificate pin, clock skew against the
@@ -358,22 +324,16 @@ The point where PoniExp can replace agent-relay. Adds `message_events`, `message
 - **`diagnostics`:** connection, signature, version and delivery problems are recorded, and shown by
   `doctor`.
 - **Done when:**
-  - Hermes on one machine, through MCP, holds a conversation with an agent on another.
+  - An agent on one machine, through MCP, holds a conversation with an agent on another.
   - Tests show an endpoint's online, left and timed-out states reaching another machine, a machine
     that was offline catching up on reconnect, and a message to an unknown endpoint getting a
     `rejected` receipt, before and after it is retired.
   - Tests show a replayed or late announcement with a lower counter being ignored, a message whose
     expiry passes in the outbox being marked `expired` and never relayed, and nothing automatic sent
     in reply to something automatic.
-  - Tests show two peers using the same `conversationId` landing in different A2A contexts, and an
-    answer to another peer's question being refused.
   - Tests show `received` arriving while the recipient endpoint is offline, `acknowledged`
     arriving only after the agent acknowledges or replies (not when it merely fetches), and no
     second `received` for a duplicate.
-  - Against a live Hermes gateway: a message sent while the session is busy is acknowledged only
-    when the agent starts on it; the reply arrives once, from the task result; an answer to an
-    `input-required` question continues the same task; and a bridge restart mid-task still
-    delivers the acknowledgement and the reply.
 
 ## Phase 4: Server foundations
 
@@ -538,6 +498,76 @@ from any machine, instead of `docker exec` on Wojtek.
   from before a rotation are still recognised as its own.
 - Revocation signed by the owner, for a lost or stolen machine.
 - What happens to messages, files and jobs waiting for a revoked machine.
+
+## Phase 12: Hermes bridge (workshop)
+
+Comes after everything else, and starts with a deep dive into how Hermes handles A2A, then a design
+discussion. Until then agents on Hermes use PoniExp through MCP like any other. Adds `bridge_tasks`
+to the client database.
+
+**Draft, written before the deep dive:**
+
+The Hermes bridge pushes incoming messages into the local Hermes gateway
+over A2A, since agents don't poll MCP. Hermes puts each A2A task into its live agent session,
+so choosing the session is the gateway's job, not the bridge's.
+- The bridge uses `message/stream` (SSE), not a blocking send, and turns the A2A task's state
+  changes into receipts and replies:
+
+  | A2A task state | PoniExp |
+  |---|---|
+  | `submitted` (the gateway took it) | nothing new; `received` was already sent |
+  | `working` (the agent has started on it) | `acknowledged` |
+  | `input-required` | a reply with `status: progress`, carrying the question |
+  | `completed` | a reply with `status: done`, carrying the agent's answer |
+  | `failed`, `rejected`, `canceled` | a reply with `status: failed` |
+
+- The A2A `contextId` is derived from the peer (`machine/endpoint`) **and** the `conversationId`,
+  so a conversation stays one multi-turn exchange inside Hermes. The sender chooses the
+  `conversationId`, so using it alone would let another machine join someone else's conversation.
+- The A2A message carries the PoniExp message id, sender (`machine/endpoint`) and conversation id
+  in its metadata, so the agent can use the MCP tools on it (e.g. `reply`).
+- The A2A task id is stored in `bridge_tasks`. After a restart the bridge picks the task up again
+  (`tasks/subscribe`, or `tasks/get` for one that has already finished), so no receipt or reply
+  is lost.
+- **Answering a question:** when the sender replies to an `input-required` question (its
+  `replyTo` is that progress reply), the bridge looks up the task in `bridge_tasks` and sends the
+  answer into the same A2A task, rather than starting a new one. An answer is accepted only from the
+  peer the task belongs to.
+- The bridge sends the reply, from the task result. If the agent already replied to the same
+  message through the MCP `reply` tool, the bridge doesn't send another: one answer, never two.
+- The agent doesn't need to call `ack` itself: the task state is set by Hermes, so it can't be
+  forgotten. `ack` remains for MCP agents that pull from their inbox.
+- **To check first:** whether Hermes keeps a task `submitted` while the live session is busy with
+  another turn, and only moves it to `working` when the agent actually starts on it. If it marks
+  the task `working` as soon as it's injected, the bridge acknowledges on the first event the
+  agent produces for the task instead.
+
+**Found in Hermes' A2A adapter (`plugins/platforms/a2a/`), October 2026:**
+- It sends `submitted` and then `working` the moment it hands a task to the session, even while the
+  session is busy with another turn; nothing later says the agent has started. **Decided:**
+  `acknowledged` is sent on `working`, meaning the message has been handed to the agent's session and
+  will be worked on in turn.
+- Every incoming message is a new task; an answer to `input-required` can't continue the task that
+  asked. It can only go into the same `contextId` as a new task, linked through `bridge_tasks`.
+- Tasks are kept in memory only. A bridge restart can reattach (`tasks/subscribe`, `tasks/get`) while
+  the gateway is up; a gateway restart loses them. **Decided:** a message whose task is lost gets a
+  reply with `status: failed` and the reason "Hermes restarted"; the sender can retry (idempotent
+  through `operationId`, phase 5).
+- A task the agent hasn't answered within `A2A_REPLY_TIMEOUT` (default 300 seconds, orphan ceiling
+  24 hours) fails, so the bridge's setup has to raise it.
+- At most `A2A_MAX_PINGPONG_TURNS` incoming messages per `contextId` (default 5, at most 20), so a long
+  conversation is refused partway. **Open:** how the bridge handles it.
+- The agent sees text only; data parts are rendered into it as JSON, so the PoniExp ids travel as a
+  data part.
+- Each conversation (`contextId`) is its own Hermes session. A gateway can also serve other profiles
+  (`a2a_served_agents`), but through a one-shot `hermes chat` per turn, not a live session; hence one
+  gateway per profile.
+- Callers are identified by per-peer tokens (`A2A_PEER_TOKENS`); the bridge's token is one of these.
+- **Done when** (draft): against a live Hermes gateway, the reply arrives once, from the task result;
+  an answer to an `input-required` question lands in the same context; a bridge restart mid-task
+  still delivers the acknowledgement and the reply; a gateway restart mid-task produces a `failed`
+  reply; two peers using the same `conversationId` land in different contexts; and an answer to
+  another peer's question is refused.
 
 ## Alongside
 
