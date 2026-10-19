@@ -171,6 +171,14 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
         var (envelope, content) = (message.Envelope, message.Content);
         switch (content.Type)
         {
+            case MessageType.Message when RoomAddress.TryParse(envelope.ToMachine, out var roomId):
+                OnRoomMessage(tx, envelope, content, roomId);
+                break;
+
+            case MessageType.Room: // between daemons: membership, applied if an admin sent it
+                OnRoomSnapshot(tx, envelope, content);
+                break;
+
             case MessageType.Message:
                 var endpoint = content.ToEndpoint == Address.DaemonEndpoint ? null : tx.GetEndpoint(content.ToEndpoint);
                 if (endpoint is { RetiredOn: null })
@@ -291,7 +299,15 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
     private Task OnDeliveredAsync(ReceivedMessage message)
     {
         var content = message.Content;
-        if (content.Type == MessageType.Message)
+        if (content.Type == MessageType.Message && RoomAddress.TryParse(message.Envelope.ToMachine, out var roomId))
+        {
+            if (Store.GetState(message.Envelope.FromMachine, message.Envelope.Id, MessageDirection.In) == MessageEvents.Received
+                && Store.GetRoom(roomId) is { } room)
+            {
+                PushToRoom(room.Snapshot, Store.GetRoomMessages(MachineId, roomId, null).Single(m => m.Id == message.Envelope.Id), MessageDirection.In);
+            }
+        }
+        else if (content.Type == MessageType.Message)
         {
             if (_sessions.Get(content.ToEndpoint) is { } session
                 && Store.GetState(message.Envelope.FromMachine, message.Envelope.Id, MessageDirection.In) == MessageEvents.Stored)
@@ -401,6 +417,7 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
         IReadOnlyList<string>? files = null)
     {
         var from = message.FromEndpoint ?? Address.DefaultEndpoint;
+        to = await ResolveAddressesAsync(to, from, cancellationToken);
         if (files is { Count: > 0 })
         {
             // Uploaded once, shared with exactly the machines these messages go to.
@@ -432,11 +449,11 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
     // ---- the endpoint registry ----
 
     /// <summary>Records a local endpoint's new state and announces the endpoint list to every online machine.</summary>
-    internal async Task SetEndpointStateAsync(string name, EndpointState state)
+    internal async Task SetEndpointStateAsync(string name, EndpointState state, IReadOnlyList<string>? roles = null)
     {
         Store.Transact(Now, tx =>
         {
-            tx.SetEndpointState(name, state);
+            tx.SetEndpointState(name, state, roles);
             if (!Stopping)
             {
                 ComposeAnnouncements(tx, null);
@@ -488,7 +505,7 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
         var announcement = new EndpointAnnouncement(tx.NextCounter(AnnouncementCounter), [.. tx.GetEndpoints()
             .Where(e => e.RetiredOn is null)
             .Select(e => new AnnouncedEndpoint(e.Name, _sessions.IsOnline(e.Name) ? EndpointState.Online : e.State == EndpointState.Online
-                ? EndpointState.TimedOut : e.State, e.ChangedOn))]);
+                ? EndpointState.TimedOut : e.State, e.ChangedOn, e.Roles is { Count: > 0 } r ? r : null))]);
         var body = JsonSerializer.Serialize(announcement, WireProtocol.Json);
         foreach (var machine in targets)
         {
@@ -538,8 +555,9 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
     {
         content ??= _relay.Open(stored.Envelope!);
         var incoming = direction == MessageDirection.In;
-        return new LocalMessage(stored.Id, stored.FromMachine, $"{NameOf(stored.FromMachine)}/{content.FromEndpoint}",
-            $"{NameOf(stored.ToMachine)}/{content.ToEndpoint}", incoming ? "in" : "out", content.ConversationId, content.ReplyTo, content.OperationId,
+        var to = RoomAddress.TryParse(stored.ToMachine, out var roomId) ? $"room:{Store.GetRoom(roomId)?.Snapshot.Name ?? roomId.ToString()}"
+            : $"{NameOf(stored.ToMachine)}/{content.ToEndpoint}";
+        return new LocalMessage(stored.Id, stored.FromMachine, $"{NameOf(stored.FromMachine)}/{content.FromEndpoint}", to, incoming ? "in" : "out", content.ConversationId, content.ReplyTo, content.OperationId,
             content.Status is { } s ? WireProtocol.NameOf(s) : null, content.Subject, WireProtocol.NameOf(content.Type), content.ContentType,
             content.Metadata, content.Body, content.CreatedOn, stored.ExpiresOn, stored.State, stored.StateDetail,
             content.Attachments is { Count: > 0 } ? AttachmentsOf(stored, direction) : null);

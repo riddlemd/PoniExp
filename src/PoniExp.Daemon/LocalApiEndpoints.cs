@@ -56,7 +56,7 @@ public static class LocalApiEndpoints
             var announced = d.Store.GetPeerEndpoints().ToLookup(e => e.Machine);
             return Task.FromResult(Results.Ok(d.Relay.Machines.Where(m => m.Id != d.MachineId).OrderBy(m => m.Name).Select(m =>
                 new LocalMachine(m.Id, m.Name, m.Online, m.LastSeenOn, m.Description.OperatingSystem, [.. announced[m.Id].Select(e =>
-                    new LocalPeerEndpoint(e.Endpoint, m.Online ? WireProtocol.NameOf(e.State) : "offline", e.ChangedOn))])).ToList()));
+                    new LocalPeerEndpoint(e.Endpoint, m.Online ? WireProtocol.NameOf(e.State) : "offline", e.ChangedOn, e.Roles))])).ToList()));
         }));
 
         app.MapPost("/send", (Daemon d, LocalSendRequest request, CancellationToken ct) => Handle(async () =>
@@ -159,6 +159,40 @@ public static class LocalApiEndpoints
             return Results.Ok(new LocalOk(true));
         }));
 
+        app.MapGet("/rooms", (Daemon d, string? endpoint) => Results.Ok(d.Rooms(endpoint)));
+
+        app.MapPost("/rooms", (Daemon d, LocalRoomCreate request, CancellationToken ct) => Handle(async () =>
+        {
+            RequireEndpoint(request.Endpoint);
+            return Results.Ok(d.ToLocalRoom(await d.CreateRoomAsync(request.Endpoint, request.Name, request.Members ?? [], ct)));
+        }));
+
+        app.MapPost("/rooms/{room}/change", (Daemon d, string room, LocalRoomChange request, CancellationToken ct) => Handle(async () =>
+        {
+            RequireEndpoint(request.Endpoint);
+            return Results.Ok(d.ToLocalRoom(await d.ChangeRoomAsync(request.Endpoint, room, request.Change, ct)));
+        }));
+
+        app.MapPost("/rooms/{room}/send", (Daemon d, string room, LocalRoomSend request, CancellationToken ct) => Handle(async () =>
+        {
+            RequireEndpoint(request.Endpoint);
+            var sent = await d.SendToRoomAsync(request.Endpoint, room, new OutgoingMessage(request.Body ?? throw new ArgumentException("a body is required"))
+            {
+                ReplyTo = request.ReplyTo,
+                Subject = request.Subject,
+                ContentType = request.ContentType ?? "text/plain",
+                Metadata = request.Metadata,
+            }, ct);
+            return Results.Ok(new LocalSent(sent.Id, $"room:{d.RequireRoom(room).Snapshot.Name}", sent.ConversationId, sent.Sequence, sent.ExpiresOn,
+                sent.State is { } s ? WireProtocol.NameOf(s) : "outbox"));
+        }));
+
+        app.MapGet("/rooms/{room}/messages", (Daemon d, string room, string endpoint, DateTimeOffset? since, int? limit) => Handle(() =>
+        {
+            RequireEndpoint(endpoint);
+            return Task.FromResult(Results.Ok(d.ReadRoom(endpoint, room, since, limit ?? 200)));
+        }));
+
         app.MapGet("/endpoints", (Daemon d) => Results.Ok(Endpoints(d)));
 
         app.MapPost("/endpoints/{endpoint}/retire", (Daemon d, string endpoint) => Handle(async () =>
@@ -229,9 +263,15 @@ public static class LocalApiEndpoints
     /// </summary>
     private static async Task StreamAsync(HttpContext http, Daemon d, string endpoint, IOptionsMonitor<DaemonOptions> options)
     {
+        IReadOnlyList<string> roles;
         try
         {
             RequireEndpoint(endpoint);
+            roles = http.Request.Query["roles"].ToString() is { Length: > 0 } text ? text.Split(',') : [];
+            if (roles.Count > Limits.MaxRoles || roles.Any(r => !Limits.IsValidEndpoint(r)))
+            {
+                throw new ArgumentException($"at most {Limits.MaxRoles} roles, each {Limits.EndpointRule}");
+            }
         }
         catch (ArgumentException e)
         {
@@ -249,7 +289,7 @@ public static class LocalApiEndpoints
         using var done = CancellationTokenSource.CreateLinkedTokenSource(http.RequestAborted, session.Ended);
         try
         {
-            await d.SetEndpointStateAsync(endpoint, EndpointState.Online);
+            await d.SetEndpointStateAsync(endpoint, EndpointState.Online, roles);
             http.Response.ContentType = "text/event-stream";
             http.Response.Headers.CacheControl = "no-cache";
             await WriteAsync(http, new LocalEvent(LocalEventKinds.Registered), done.Token);
@@ -304,7 +344,7 @@ public static class LocalApiEndpoints
     private static List<LocalEndpointInfo> Endpoints(Daemon d) =>
         [.. d.Store.GetEndpoints().Select(e => new LocalEndpointInfo(e.Name,
             e.RetiredOn is not null ? "retired" : d.Sessions.IsOnline(e.Name) ? "online" : WireProtocol.NameOf(e.State == EndpointState.Online
-                ? EndpointState.TimedOut : e.State), e.ChangedOn, e.RetiredOn))];
+                ? EndpointState.TimedOut : e.State), e.ChangedOn, e.RetiredOn, e.Roles))];
 
     private static void RequireEndpoint(string? endpoint)
     {
@@ -313,9 +353,9 @@ public static class LocalApiEndpoints
             throw new ArgumentException($"an endpoint must be {Limits.EndpointRule}");
         }
 
-        if (endpoint == Address.DaemonEndpoint)
+        if (endpoint is Address.DaemonEndpoint or RoomAddress.Endpoint)
         {
-            throw new ArgumentException($"'{Address.DaemonEndpoint}' is the daemon's own endpoint");
+            throw new ArgumentException($"'{endpoint}' is reserved (the daemon's own endpoint, or a room's)");
         }
     }
 

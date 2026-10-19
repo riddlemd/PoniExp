@@ -24,7 +24,8 @@ public sealed class PoniExpTools(McpEndpoint me)
         "Send a message to one or more agents. Each recipient gets its own message (and starts its own conversation " +
         "unless conversationId is given, which needs a single recipient). Recipients are 'machine' or 'machine/endpoint'.")]
     public async Task<string> SendAsync(
-        [Description("Recipients: 'machine' (its default endpoint) or 'machine/endpoint'.")] string[] to,
+        [Description("Recipients: 'machine' (its default endpoint), 'machine/endpoint', 'role:<role>' (any one agent with that role), " +
+                     "'role:<role>/all' (every one) or 'group:<name>' (the owner's list).")] string[] to,
         [Description("The message text.")] string body,
         [Description("A short title (optional).")] string? subject = null,
         [Description("Continue this conversation (one recipient only).")] string? conversationId = null,
@@ -105,6 +106,30 @@ public sealed class PoniExpTools(McpEndpoint me)
     public async Task<string> MessageAsync([Description("The message id.")] string messageId, CancellationToken cancellationToken = default) =>
         Json(await me.Api.MessageAsync(me.Endpoint, ParseId(messageId) ?? throw new ArgumentException("messageId is required"), cancellationToken));
 
+    [McpServerTool(Name = "rooms", ReadOnly = true), Description(
+        "The rooms you're a member of: standing conversations with several agents, who see each other's messages. Each with its members and admins.")]
+    public async Task<string> RoomsAsync(CancellationToken cancellationToken = default) => Json(await me.Api.RoomsAsync(me.Endpoint, cancellationToken));
+
+    [McpServerTool(Name = "room", ReadOnly = true), Description(
+        "Read a room's messages, oldest first (the most recent 200, or those after 'since'). New ones also arrive as you go; there's no ack in rooms.")]
+    public async Task<string> RoomAsync([Description("The room's id or name.")] string room,
+        [Description("Only messages created after this time (ISO 8601), e.g. the last one you saw.")] string? since = null,
+        CancellationToken cancellationToken = default) =>
+        Json(await me.Api.ReadRoomAsync(room, me.Endpoint, since is null ? null : DateTimeOffset.Parse(since, System.Globalization.CultureInfo.InvariantCulture),
+            ct: cancellationToken));
+
+    [McpServerTool(Name = "room_send"), Description("Say something in a room: every member sees it. Set replyTo to answer a message in it.")]
+    public async Task<string> RoomSendAsync([Description("The room's id or name.")] string room, [Description("The message text.")] string body,
+        [Description("The id of the message you are answering (optional).")] string? replyTo = null, CancellationToken cancellationToken = default) =>
+        Json(await me.Api.SendToRoomAsync(room, new LocalRoomSend(me.Endpoint, body, ParseId(replyTo)), cancellationToken));
+
+    [McpServerTool(Name = "room_create"), Description(
+        "Create a room with you as its admin. Members are 'machine/endpoint', 'role:<role>/all' or 'group:<name>'. Members who join later " +
+        "see only what is said after they join.")]
+    public async Task<string> RoomCreateAsync([Description("A name for the room.")] string name, [Description("Its members besides you.")] string[] members,
+        CancellationToken cancellationToken = default) =>
+        Json(await me.Api.CreateRoomAsync(new LocalRoomCreate(me.Endpoint, name, members), cancellationToken));
+
     [McpServerTool(Name = "machines", ReadOnly = true), Description("The other machines, whether they're online, and their endpoints (agents) and their states.")]
     public async Task<string> MachinesAsync(CancellationToken cancellationToken = default) => Json(await me.Api.MachinesAsync(cancellationToken));
 
@@ -147,9 +172,9 @@ public static class McpServer
     /// Runs the MCP server on stdin/stdout as <paramref name="endpoint"/>, registered with the daemon (online)
     /// for as long as it runs. Logs go to stderr: stdout is the protocol.
     /// </summary>
-    public static async Task RunAsync(LocalApiClient api, string endpoint, CancellationToken cancellationToken)
+    public static async Task RunAsync(LocalApiClient api, string endpoint, CancellationToken cancellationToken, IReadOnlyList<string>? roles = null)
     {
-        if (!Limits.IsValidEndpoint(endpoint) || endpoint == Address.DaemonEndpoint)
+        if (!Limits.IsValidEndpoint(endpoint) || endpoint is Address.DaemonEndpoint or RoomAddress.Endpoint)
         {
             throw new ArgumentException($"an endpoint must be {Limits.EndpointRule}, and not '{Address.DaemonEndpoint}'");
         }
@@ -160,7 +185,7 @@ public static class McpServer
         }
 
         await using var connection = new EndpointConnection(api, endpoint, _ => Task.CompletedTask,
-            onError: e => Console.Error.WriteLine($"poniexp: endpoint connection: {e.Message}"));
+            onError: e => Console.Error.WriteLine($"poniexp: endpoint connection: {e.Message}"), roles: roles);
         var builder = Host.CreateApplicationBuilder();
         builder.Logging.ClearProviders();
         builder.Logging.AddConsole(o => o.LogToStandardErrorThreshold = LogLevel.Trace);

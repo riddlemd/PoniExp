@@ -13,7 +13,7 @@ namespace PoniExp.Server.Machines;
 /// </summary>
 public sealed class RouterStore
 {
-    private const int SchemaVersion = 3;
+    private const int SchemaVersion = 4;
 
     private static readonly JsonSerializerOptions Json = WireProtocol.Configure(new JsonSerializerOptions(JsonSerializerDefaults.Web));
 
@@ -58,6 +58,10 @@ public sealed class RouterStore
                 expires_on TEXT NOT NULL,
                 record     TEXT NOT NULL
             ) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS groups (
+                name    TEXT PRIMARY KEY,
+                members TEXT NOT NULL
+            ) WITHOUT ROWID;
             CREATE TABLE IF NOT EXISTS router_state (
                 name  TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -99,15 +103,15 @@ public sealed class RouterStore
             command.Parameters.AddWithValue("$record", JsonSerializer.Serialize(m, Json));
         });
 
-    public void SaveQueue(IReadOnlyDictionary<Guid, MessageQueue.QueuedEnvelope> before, IReadOnlyDictionary<Guid, MessageQueue.QueuedEnvelope> after) =>
+    public void SaveQueue(IReadOnlyDictionary<string, MessageQueue.QueuedEnvelope> before, IReadOnlyDictionary<string, MessageQueue.QueuedEnvelope> after) =>
         Save(before, after, "DELETE FROM queue WHERE id = $id;", (command, q) =>
         {
             command.CommandText = """
                 INSERT INTO queue (id, to_machine, queued_on, expires_on, entry) VALUES ($id, $to, $queued, $expires, $entry)
                 ON CONFLICT (id) DO UPDATE SET entry = $entry, expires_on = $expires;
                 """;
-            command.Parameters.AddWithValue("$id", q.Envelope.Id.ToString("D"));
-            command.Parameters.AddWithValue("$to", q.Envelope.ToMachine);
+            command.Parameters.AddWithValue("$id", q.Key);
+            command.Parameters.AddWithValue("$to", q.RecipientMachine);
             command.Parameters.AddWithValue("$queued", Signatures.Stamp(q.QueuedOn));
             command.Parameters.AddWithValue("$expires", Signatures.Stamp(q.ExpiresOn));
             command.Parameters.AddWithValue("$entry", JsonSerializer.Serialize(q, Json));
@@ -137,6 +141,33 @@ public sealed class RouterStore
         using var command = connection.CreateCommand();
         command.CommandText = "DELETE FROM blobs WHERE id = $id;";
         command.Parameters.AddWithValue("$id", id.ToString("D"));
+        command.ExecuteNonQuery();
+    }
+
+    public IReadOnlyList<GroupInfo> LoadGroups()
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT name, members FROM groups ORDER BY name;";
+        using var r = command.ExecuteReader();
+        var groups = new List<GroupInfo>();
+        while (r.Read())
+        {
+            groups.Add(new GroupInfo(r.GetString(0), JsonSerializer.Deserialize<List<string>>(r.GetString(1), Json) ?? []));
+        }
+
+        return groups;
+    }
+
+    /// <summary>Sets a group's members; none deletes it.</summary>
+    public void SaveGroup(string name, IReadOnlyList<string> members)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = members.Count == 0 ? "DELETE FROM groups WHERE name = $name;"
+            : "INSERT INTO groups (name, members) VALUES ($name, $members) ON CONFLICT (name) DO UPDATE SET members = $members;";
+        command.Parameters.AddWithValue("$name", name);
+        command.Parameters.AddWithValue("$members", JsonSerializer.Serialize(members, Json));
         command.ExecuteNonQuery();
     }
 
@@ -253,7 +284,7 @@ public sealed class RouterStore
             using var command = connection.CreateCommand();
             command.Transaction = transaction;
             command.CommandText = delete;
-            command.Parameters.AddWithValue("$id", key is Guid g ? g.ToString("D") : key.ToString());
+            command.Parameters.AddWithValue("$id", key.ToString());
             command.ExecuteNonQuery();
         }
 
@@ -275,8 +306,8 @@ public sealed class RouterStore
         if (File.Exists(queueFile))
         {
             var queue = JsonSerializer.Deserialize<List<MessageQueue.QueuedEnvelope>>(File.ReadAllText(queueFile), Json) ?? [];
-            SaveQueue(new Dictionary<Guid, MessageQueue.QueuedEnvelope>(),
-                queue.Where(q => q.Envelope?.Ciphertext is not null).ToDictionary(q => q.Envelope.Id)); // older formats can't be delivered
+            SaveQueue(new Dictionary<string, MessageQueue.QueuedEnvelope>(),
+                queue.Where(q => q.Envelope?.Ciphertext is not null).ToDictionary(q => q.Key)); // older formats can't be delivered
             File.Move(queueFile, queueFile + ".imported", overwrite: true);
         }
     }

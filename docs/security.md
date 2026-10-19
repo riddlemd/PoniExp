@@ -2,7 +2,7 @@
 
 What each party can and can't do, as built. Updated each phase (see `docs/plan.md`).
 
-**Current state: phase 6** (encrypted files: uploaded once, verified on download, file receipts, limits).
+**Current state: phase 7** (roles, groups, rooms).
 
 ## Parties
 
@@ -83,6 +83,23 @@ Endpoints, conversation, subject, type, metadata, body and `createdOn` are encry
 
 - TLS with a self-signed certificate pinned by SHA-256 on every client: no public CA, and a man in the
   middle is refused.
+
+## Roles, groups and rooms
+
+- **Roles** are declared by each machine for its own endpoints, in its signed announcements: the router
+  can't add or hide a holder, but any approved machine can claim any role for its endpoints until
+  phase 9 restricts them.
+- **Groups** are the owner's lists, served by the router: a compromised router could point a group
+  at another approved machine (still encrypted to that machine, so only it could read). Owner-signed
+  lists come with phase 9.
+- **Rooms:** each message's key is wrapped only for the machines of the members its sender knows of,
+  so a removed member can't read later messages and the router can't add a reader. Membership
+  snapshots count only from an admin (by machine signature and sender endpoint), or a member removing
+  themselves; a machine that first hears of a room trusts the snapshot's own admin list, as for a
+  new room. The router sees a room's id, its member machines (it fans out to them) and message sizes,
+  never its name, members' endpoints or contents. A member machine stores the room's history; a
+  machine whose endpoints are all removed stops accepting its messages.
+- A message sent by a member whose machine hasn't yet heard of a change goes to the old member set.
 
 ## Files
 

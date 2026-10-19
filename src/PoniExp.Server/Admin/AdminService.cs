@@ -14,6 +14,7 @@ public sealed class AdminService(
     MessageQueue queue,
     PresenceTracker presence,
     ConnectionGate gate,
+    RouterStore store,
     Blobs.BlobRegistry blobs,
     IHubContext<RelayHub> hub,
     IOptionsMonitor<RouterOptions> options,
@@ -110,6 +111,56 @@ public sealed class AdminService(
         }
 
         return [.. forgotten.Select(m => View(m) with { Status = MembershipStatus.Unknown })];
+    }
+
+    public IReadOnlyList<GroupInfo> Groups() => store.LoadGroups();
+
+    /// <summary>
+    /// Sets a group (<c>poniexp admin group set</c>): members are <c>machine/endpoint</c> (an approved machine, by name)
+    /// or <c>role:x</c> / <c>role:x/all</c>. Groups don't nest. No members removes it.
+    /// </summary>
+    public GroupInfo SetGroup(string name, IReadOnlyList<string> members)
+    {
+        if (!Limits.IsValidEndpoint(name))
+        {
+            throw new RouterException($"A group name is {Limits.EndpointRule}.");
+        }
+
+        if (members.Count > 256)
+        {
+            throw new RouterException("A group has at most 256 members.");
+        }
+
+        foreach (var member in members)
+        {
+            Indirect? indirect;
+            try
+            {
+                indirect = Address.ParseIndirect(member);
+                if (indirect is null)
+                {
+                    var address = Address.Parse(member);
+                    if (registry.List().All(m => m.Name != address.Machine || m.Status != MembershipStatus.Approved))
+                    {
+                        throw new RouterException($"'{member}': no approved machine '{address.Machine}'.");
+                    }
+                }
+            }
+            catch (FormatException e)
+            {
+                throw new RouterException(e.Message);
+            }
+
+            if (indirect is { Kind: IndirectKind.Group })
+            {
+                throw new RouterException($"'{member}': groups don't nest; list its members (or use a role).");
+            }
+        }
+
+        var group = new GroupInfo(name, [.. members.Distinct()]);
+        store.SaveGroup(name, group.Members);
+        logger.LogInformation("Group {Name}: {Members}", name, group.Members.Count == 0 ? "removed" : string.Join(", ", group.Members));
+        return group;
     }
 
     /// <summary>Every blob, with machine names (<c>poniexp admin blobs</c>).</summary>

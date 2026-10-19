@@ -56,6 +56,23 @@ public static class Signatures
         return unsigned with { Signature = sender.Sign(EnvelopePayload(unsigned)) };
     }
 
+    /// <summary>
+    /// Seals a room message once: addressed to <c>room:&lt;id&gt;</c>, its content key wrapped for every reader (each
+    /// member machine's verified encryption key) and the sender. The router fans it out to the machines it's wrapped for.
+    /// </summary>
+    public static Envelope SealRoomEnvelope(MachineKeys sender, Guid id, Guid roomId, IEnumerable<MessageCrypto.Reader> readers, long sequence,
+        DateTimeOffset expiresOn, MessageContent content)
+    {
+        var normalisedExpiry = Truncate(expiresOn);
+        var normalised = content with { CreatedOn = Truncate(content.CreatedOn) };
+        var to = RoomAddress.Of(roomId);
+        var sealedContent = MessageCrypto.Seal(normalised, id, sender.MachineId, to, sequence, normalisedExpiry,
+            [.. readers, new(sender.MachineId, sender.EncryptionPublicKey)]);
+        var unsigned = new Envelope(id, sender.MachineId, to, normalisedExpiry, sequence, sealedContent.Size, sealedContent.Ciphertext, sealedContent.Wraps,
+            string.Empty);
+        return unsigned with { Signature = sender.Sign(EnvelopePayload(unsigned)) };
+    }
+
     public static bool VerifyJoin(JoinRequest request) =>
         PublicKeys.Verify(request.PublicKey, JoinPayload(request), request.Signature)
         && PublicKeys.VerifyEncryptionKey(request.PublicKey, request.EncryptionKey, request.EncryptionKeySignature);

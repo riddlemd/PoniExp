@@ -11,7 +11,8 @@ public static class WireProtocol
     /// </summary>
     /// 4: Hello returns the router's time and clock-skew tolerance; receipt and endpoint message bodies.
     /// 5: attachments (encrypted blobs) and file receipts.
-    public const int Version = 5;
+    /// 6: roles in announcements, rooms (fanned-out room envelopes, room snapshots), groups.
+    public const int Version = 6;
 
     /// <summary>Enums travel as kebab-case names ("file-receipt"), on the wire and in files.</summary>
     public static JsonSerializerOptions Configure(JsonSerializerOptions options)

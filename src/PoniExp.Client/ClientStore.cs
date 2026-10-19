@@ -17,7 +17,7 @@ namespace PoniExp.Client;
 /// </summary>
 public sealed class ClientStore
 {
-    private const int SchemaVersion = 4;
+    private const int SchemaVersion = 6;
 
     private const string Schema = """
         PRAGMA journal_mode = WAL;
@@ -164,6 +164,14 @@ public sealed class ClientStore
             detail       TEXT
         );
         CREATE INDEX IF NOT EXISTS attachment_events_message ON attachment_events (from_machine, message_id);
+        CREATE TABLE IF NOT EXISTS rooms (
+            id         TEXT PRIMARY KEY,
+            snapshot   TEXT NOT NULL,
+            version    INTEGER NOT NULL,
+            changed_by TEXT NOT NULL,
+            changed_on TEXT NOT NULL,
+            joined_on  TEXT NOT NULL
+        ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS diagnostics (
             occurred_on  TEXT NOT NULL,
             level        TEXT NOT NULL,
@@ -205,10 +213,27 @@ public sealed class ClientStore
 
         using var connection = Open();
         Execute(connection, null, Schema);
+        AddColumn(connection, "endpoints", "roles", "TEXT"); // schema 5
+        AddColumn(connection, "peer_endpoints", "roles", "TEXT");
         Execute(connection, null, $"PRAGMA user_version = {SchemaVersion};");
     }
 
     public string Path { get; }
+
+    /// <summary>Adds a column an older database lacks (CREATE TABLE IF NOT EXISTS doesn't).</summary>
+    private static void AddColumn(SqliteConnection connection, string table, string column, string type)
+    {
+        var columns = Query(connection, null, $"PRAGMA table_info({table});", r => r.GetString(1));
+        if (!columns.Contains(column))
+        {
+            Execute(connection, null, $"ALTER TABLE {table} ADD COLUMN {column} {type};");
+        }
+    }
+
+    internal static IReadOnlyList<string> ReadRoles(SqliteDataReader r, int i) =>
+        r.IsDBNull(i) || r.GetString(i).Length == 0 ? [] : r.GetString(i).Split(',');
+
+    internal static string? RolesText(IReadOnlyList<string>? roles) => roles is null ? null : string.Join(',', roles.Distinct().Order());
 
     /// <summary>Runs <paramref name="work"/> in one IMMEDIATE transaction: all of it is stored, or none.</summary>
     public T Transact<T>(DateTimeOffset now, Func<StoreTransaction, T> work)
@@ -312,11 +337,11 @@ public sealed class ClientStore
             """, ReadMessage, ("$me", me), ("$endpoint", endpoint), ("$conversation", Id(conversationId)));
 
     public IReadOnlyList<LocalEndpointRecord> GetEndpoints() =>
-        Query("SELECT name, state, registered_on, last_seen_on, changed_on, retired_on FROM endpoints ORDER BY name;", ReadEndpoint);
+        Query("SELECT name, state, registered_on, last_seen_on, changed_on, retired_on, roles FROM endpoints ORDER BY name;", ReadEndpoint);
 
     public IReadOnlyList<PeerEndpoint> GetPeerEndpoints() =>
-        Query("SELECT machine, endpoint, state, counter, changed_on FROM peer_endpoints ORDER BY machine, endpoint;",
-            r => new PeerEndpoint(r.GetString(0), r.GetString(1), ParseState(r.GetString(2)), r.GetInt64(3), Parse(r.GetString(4))));
+        Query("SELECT machine, endpoint, state, counter, changed_on, roles FROM peer_endpoints ORDER BY machine, endpoint;",
+            r => new PeerEndpoint(r.GetString(0), r.GetString(1), ParseState(r.GetString(2)), r.GetInt64(3), Parse(r.GetString(4)), ReadRoles(r, 5)));
 
     public IReadOnlyList<Diagnostic> GetDiagnostics(int limit = 50) =>
         Query("""
@@ -375,6 +400,30 @@ public sealed class ClientStore
             r.GetString(4), r.GetString(5), r.GetInt64(6), r.GetString(7), r.GetInt64(8) == 1, r.IsDBNull(9) ? null : Parse(r.GetString(9)),
             r.IsDBNull(10) ? null : r.GetString(10), r.IsDBNull(11) ? null : r.GetString(11), r.IsDBNull(12) ? null : r.GetString(12),
             r.IsDBNull(13) ? null : r.GetString(13));
+
+    public IReadOnlyList<RoomRecord> GetRooms() =>
+        Query("SELECT snapshot, changed_by, changed_on, joined_on FROM rooms ORDER BY changed_on DESC;", ReadRoom);
+
+    public RoomRecord? GetRoom(Guid id) =>
+        Query("SELECT snapshot, changed_by, changed_on, joined_on FROM rooms WHERE id = $id;", ReadRoom, ("$id", Id(id))).FirstOrDefault();
+
+    /// <summary>A room's messages on this machine (sent and accepted), oldest first: the most recent <paramref name="limit"/> since <paramref name="since"/>.</summary>
+    public IReadOnlyList<StoredMessage> GetRoomMessages(string me, Guid roomId, DateTimeOffset? since, int limit = 200)
+    {
+        var rows = Query($"""
+            SELECT {MessageColumns} FROM messages m
+            LEFT JOIN message_state s ON s.from_machine = m.from_machine AND s.message_id = m.id
+                AND s.direction = CASE WHEN m.from_machine = $me THEN 'out' ELSE 'in' END
+            WHERE m.to_machine = $room AND m.type = 'message' AND coalesce(s.event, '') NOT IN ('rejected', 'failed', 'expired')
+                AND ($since IS NULL OR m.created_on > $since)
+            ORDER BY m.created_on DESC, m.stored_on DESC LIMIT $limit;
+            """, ReadMessage, ("$me", me), ("$room", RoomAddress.Of(roomId)), ("$since", since is { } s ? Stamp(s) : null), ("$limit", limit));
+        rows.Reverse();
+        return rows;
+    }
+
+    internal static RoomRecord ReadRoom(SqliteDataReader r) =>
+        new(JsonSerializer.Deserialize<RoomSnapshot>(r.GetString(0), WireProtocol.Json)!, r.GetString(1), Parse(r.GetString(2)), Parse(r.GetString(3)));
 
     /// <summary>The conversations local endpoints have had, most recent first.</summary>
     public IReadOnlyList<ConversationRecord> GetConversations(string? endpoint = null, int limit = 100) =>
@@ -504,7 +553,7 @@ public sealed class ClientStore
 
     internal static LocalEndpointRecord ReadEndpoint(SqliteDataReader r) =>
         new(r.GetString(0), ParseState(r.GetString(1)), Parse(r.GetString(2)), Parse(r.GetString(3)), Parse(r.GetString(4)),
-            r.IsDBNull(5) ? null : Parse(r.GetString(5)));
+            r.IsDBNull(5) ? null : Parse(r.GetString(5)), ReadRoles(r, 6));
 
     private List<T> Query<T>(string sql, Func<SqliteDataReader, T> read, params (string Name, object? Value)[] parameters)
     {
@@ -624,8 +673,10 @@ public sealed class StoreTransaction
             return false;
         }
 
-        Execute("INSERT INTO sequences (peer_machine) VALUES ($peer) ON CONFLICT DO NOTHING;", ("$peer", envelope.FromMachine));
-        var last = (long)Scalar("SELECT last_incoming FROM sequences WHERE peer_machine = $peer;", ("$peer", envelope.FromMachine))!;
+        // A room's messages are numbered per sender and room, apart from the sender's messages to this machine.
+        var peer = RoomAddress.TryParse(envelope.ToMachine, out _) ? $"{envelope.FromMachine}|{envelope.ToMachine}" : envelope.FromMachine;
+        Execute("INSERT INTO sequences (peer_machine) VALUES ($peer) ON CONFLICT DO NOTHING;", ("$peer", peer));
+        var last = (long)Scalar("SELECT last_incoming FROM sequences WHERE peer_machine = $peer;", ("$peer", peer))!;
         if (envelope.Sequence > last + 1)
         {
             Count(envelope.FromMachine, ClientMetrics.SequenceGap, envelope.Sequence - last - 1);
@@ -636,8 +687,8 @@ public sealed class StoreTransaction
         }
 
         Execute("UPDATE sequences SET last_incoming = max(last_incoming, $seq) WHERE peer_machine = $peer;",
-            ("$seq", envelope.Sequence), ("$peer", envelope.FromMachine));
-        if (envelope.FromMachine != me)
+            ("$seq", envelope.Sequence), ("$peer", peer));
+        if (envelope.FromMachine != me && envelope.ToMachine == me)
         {
             Converse(content, content.ToEndpoint, envelope.FromMachine, content.FromEndpoint, startedBy: "peer");
         }
@@ -707,7 +758,7 @@ public sealed class StoreTransaction
     /// </summary>
     private void Converse(MessageContent c, string localEndpoint, string peerMachine, string peerEndpoint, string startedBy)
     {
-        if (c.Type != MessageType.Message)
+        if (c.Type != MessageType.Message || RoomAddress.TryParse(peerMachine, out _)) // a room is its own conversation
         {
             return;
         }
@@ -785,6 +836,18 @@ public sealed class StoreTransaction
     public void MarkBlobReleasedOnRouter(Guid blobId) =>
         Execute("UPDATE blobs SET released_on = $now WHERE blob_id = $id AND released_on IS NULL;", ("$id", ClientStore.Id(blobId)), ("$now", ClientStore.Stamp(Now)));
 
+    public RoomRecord? GetRoom(Guid id) =>
+        ClientStore.Query(_connection, _transaction, "SELECT snapshot, changed_by, changed_on, joined_on FROM rooms WHERE id = $id;", ClientStore.ReadRoom,
+            ("$id", ClientStore.Id(id))).FirstOrDefault();
+
+    /// <summary>Stores a room's newest membership snapshot (the caller has checked it may replace the last).</summary>
+    public void SaveRoom(RoomSnapshot snapshot, string changedBy) =>
+        Execute("""
+            INSERT INTO rooms (id, snapshot, version, changed_by, changed_on, joined_on) VALUES ($id, $snapshot, $version, $by, $now, $now)
+            ON CONFLICT (id) DO UPDATE SET snapshot = $snapshot, version = $version, changed_by = $by, changed_on = $now;
+            """, ("$id", ClientStore.Id(snapshot.RoomId)), ("$snapshot", JsonSerializer.Serialize(snapshot, WireProtocol.Json)), ("$version", snapshot.Version),
+            ("$by", changedBy), ("$now", ClientStore.Stamp(Now)));
+
     /// <summary>The record of an operation a sender endpoint asked of this machine, unless it has expired.</summary>
     public OperationRecord? GetOperation(string fromMachine, string fromEndpoint, Guid operationId) =>
         ClientStore.Query(_connection, _transaction, $"""
@@ -824,22 +887,25 @@ public sealed class StoreTransaction
 
     public LocalEndpointRecord? GetEndpoint(string name) =>
         ClientStore.Query(_connection, _transaction,
-            "SELECT name, state, registered_on, last_seen_on, changed_on, retired_on FROM endpoints WHERE name = $name;",
+            "SELECT name, state, registered_on, last_seen_on, changed_on, retired_on, roles FROM endpoints WHERE name = $name;",
             ClientStore.ReadEndpoint, ("$name", name)).FirstOrDefault();
 
     public IReadOnlyList<LocalEndpointRecord> GetEndpoints() =>
         ClientStore.Query(_connection, _transaction,
-            "SELECT name, state, registered_on, last_seen_on, changed_on, retired_on FROM endpoints ORDER BY name;", ClientStore.ReadEndpoint);
+            "SELECT name, state, registered_on, last_seen_on, changed_on, retired_on, roles FROM endpoints ORDER BY name;", ClientStore.ReadEndpoint);
 
-    /// <summary>Records an endpoint's state; registering (going online) brings a retired endpoint back.</summary>
-    public void SetEndpointState(string name, EndpointState state)
+    /// <summary>
+    /// Records an endpoint's state; registering (going online) brings a retired endpoint back. <paramref name="roles"/>,
+    /// if given, replaces the roles it declares (null leaves them).
+    /// </summary>
+    public void SetEndpointState(string name, EndpointState state, IReadOnlyList<string>? roles = null)
     {
         var stamp = ClientStore.Stamp(Now);
         Execute("""
-            INSERT INTO endpoints (name, state, registered_on, last_seen_on, changed_on) VALUES ($name, $state, $now, $now, $now)
-            ON CONFLICT (name) DO UPDATE SET state = $state, last_seen_on = $now, changed_on = $now,
+            INSERT INTO endpoints (name, state, registered_on, last_seen_on, changed_on, roles) VALUES ($name, $state, $now, $now, $now, $roles)
+            ON CONFLICT (name) DO UPDATE SET state = $state, last_seen_on = $now, changed_on = $now, roles = coalesce($roles, roles),
                 retired_on = CASE WHEN $state = 'online' THEN NULL ELSE retired_on END;
-            """, ("$name", name), ("$state", WireProtocol.NameOf(state)), ("$now", stamp));
+            """, ("$name", name), ("$state", WireProtocol.NameOf(state)), ("$now", stamp), ("$roles", ClientStore.RolesText(roles)));
     }
 
     /// <summary>Retires an endpoint: from now on its messages get a <c>rejected</c> receipt. False if it isn't registered.</summary>
@@ -867,10 +933,12 @@ public sealed class StoreTransaction
         foreach (var e in announcement.Endpoints)
         {
             Execute("""
-                INSERT INTO peer_endpoints (machine, endpoint, state, counter, changed_on) VALUES ($machine, $endpoint, $state, $counter, $changed)
+                INSERT INTO peer_endpoints (machine, endpoint, state, counter, changed_on, roles)
+                VALUES ($machine, $endpoint, $state, $counter, $changed, $roles)
                 ON CONFLICT (machine, endpoint) DO NOTHING;
                 """, ("$machine", machine), ("$endpoint", e.Name), ("$state", WireProtocol.NameOf(e.State)), ("$counter", announcement.Counter),
-                ("$changed", ClientStore.Stamp(e.ChangedOn)));
+                ("$changed", ClientStore.Stamp(e.ChangedOn)),
+                ("$roles", ClientStore.RolesText(e.Roles?.Where(Limits.IsValidEndpoint).Take(Limits.MaxRoles).ToList())));
         }
 
         return true;
@@ -990,10 +1058,11 @@ public sealed record MessageEvent(MessageDirection Direction, string Endpoint, s
 
 /// <summary>An endpoint registered with this machine's daemon (the endpoint registry).</summary>
 public sealed record LocalEndpointRecord(string Name, EndpointState State, DateTimeOffset RegisteredOn, DateTimeOffset LastSeenOn,
-    DateTimeOffset ChangedOn, DateTimeOffset? RetiredOn);
+    DateTimeOffset ChangedOn, DateTimeOffset? RetiredOn, IReadOnlyList<string>? Roles = null);
 
 /// <summary>An endpoint another machine has announced.</summary>
-public sealed record PeerEndpoint(string Machine, string Endpoint, EndpointState State, long Counter, DateTimeOffset ChangedOn);
+public sealed record PeerEndpoint(string Machine, string Endpoint, EndpointState State, long Counter, DateTimeOffset ChangedOn,
+    IReadOnlyList<string>? Roles = null);
 
 /// <summary>
 /// One message's attachment. <see cref="LastEvent"/> is the file track's latest event (see <see cref="AttachmentEvents"/>);
@@ -1025,6 +1094,9 @@ public static class AttachmentEvents
 }
 
 /// <summary>A conversation as one local endpoint sees it. <see cref="State"/> is open or finished.</summary>
+/// <summary>A room as this machine knows it: its latest accepted snapshot, who changed it last, and when this machine first heard of it.</summary>
+public sealed record RoomRecord(RoomSnapshot Snapshot, string ChangedBy, DateTimeOffset ChangedOn, DateTimeOffset JoinedOn);
+
 public sealed record ConversationRecord(Guid Id, string LocalEndpoint, string PeerMachine, string PeerEndpoint, string? Subject, string StartedBy,
     DateTimeOffset StartedOn, DateTimeOffset LastActivityOn, string State);
 

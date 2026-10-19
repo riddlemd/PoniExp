@@ -6,6 +6,9 @@ public static partial class Limits
 {
     public const int MaxBodyBytes = 256 * 1024;
     public const int MaxAttachments = 16;
+    public const int MaxRoles = 16;
+    public const int MaxRoomMembers = 64;
+    public const int MaxRoomMachines = 32;
     public const int MaxFileNameLength = 255;
     public const int MaxDescriptionField = 256;
     public const int MaxSubjectLength = 256;

@@ -30,6 +30,8 @@ public enum MessageType
     Receipt,
     FileReceipt,
     Endpoint,
+    /// <summary>A room's membership snapshot, daemon to daemon (see <see cref="RoomSnapshot"/>).</summary>
+    Room,
 }
 
 /// <summary>The outcome of the work a message asked for, carried on replies. Anything but Failed is the success path.</summary>
@@ -204,7 +206,8 @@ public enum EndpointState
     TimedOut,
 }
 
-public sealed record AnnouncedEndpoint(string Name, EndpointState State, DateTimeOffset ChangedOn);
+/// <summary>An endpoint as its daemon announces it, with the roles it declared (see docs/plan.md, Roles).</summary>
+public sealed record AnnouncedEndpoint(string Name, EndpointState State, DateTimeOffset ChangedOn, IReadOnlyList<string>? Roles = null);
 
 /// <summary>
 /// The body of a <see cref="MessageType.Endpoint"/> message (JSON): the announcing daemon's complete list of
@@ -212,3 +215,31 @@ public sealed record AnnouncedEndpoint(string Name, EndpointState State, DateTim
 /// receiver keeps the newest list and ignores a replayed or late one.
 /// </summary>
 public sealed record EndpointAnnouncement(long Counter, IReadOnlyList<AnnouncedEndpoint> Endpoints);
+
+/// <summary>An owner-defined group: a named list of addresses (<c>machine/endpoint</c> or <c>role:...</c>), by machine name.</summary>
+public sealed record GroupInfo(string Name, IReadOnlyList<string> Members);
+
+/// <summary>
+/// The body of a <see cref="MessageType.Room"/> message (JSON): a room's complete membership as of
+/// <see cref="Version"/>. Members and admins are <c>machineId/endpoint</c>. A machine applies it only if it is
+/// newer than what it has and comes from an admin of the room as it knows it (or is a member leaving).
+/// </summary>
+public sealed record RoomSnapshot(Guid RoomId, string Name, long Version, IReadOnlyList<string> Members, IReadOnlyList<string> Admins, bool Closed = false);
+
+/// <summary>How a room envelope is addressed: <c>room:&lt;id&gt;</c> in <see cref="Envelope.ToMachine"/>, signed like every header field.</summary>
+public static class RoomAddress
+{
+    public const string Prefix = "room:";
+
+    /// <summary>The endpoint a room message's content names: the room as a whole.</summary>
+    public const string Endpoint = "room";
+
+    public static string Of(Guid roomId) => Prefix + roomId.ToString("D");
+
+    public static bool TryParse(string? toMachine, out Guid roomId)
+    {
+        roomId = Guid.Empty;
+        return toMachine is not null && toMachine.StartsWith(Prefix, StringComparison.Ordinal) && Guid.TryParse(toMachine[Prefix.Length..], out roomId)
+               && roomId != Guid.Empty;
+    }
+}

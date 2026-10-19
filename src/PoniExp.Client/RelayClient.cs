@@ -246,6 +246,10 @@ public sealed class RelayClient : IAsyncDisposable
         return (await RelayComposedAsync([envelope], cancellationToken))[0];
     }
 
+    /// <summary>The owner's groups (named lists of addresses), as the router serves them.</summary>
+    public async Task<IReadOnlyList<GroupInfo>> GetGroupsAsync(CancellationToken cancellationToken = default) =>
+        await _connection.InvokeAsync<IReadOnlyList<GroupInfo>>(HubMethods.GetGroups, cancellationToken);
+
     // ---- files ----
 
     /// <summary>
@@ -555,6 +559,35 @@ public sealed class RelayClient : IAsyncDisposable
     }
 
     /// <summary>
+    /// Builds, seals and stores one room message inside <paramref name="tx"/>, as <c>queued</c>: its content key wrapped
+    /// for every machine in <paramref name="machines"/> (each key checked as for any message) and this one. The router fans
+    /// it out; nothing leaves until <see cref="FlushOutboxAsync"/>.
+    /// </summary>
+    public Envelope ComposeRoom(StoreTransaction tx, Guid roomId, IReadOnlyCollection<MachineInfo> machines, OutgoingMessage message)
+    {
+        if (message.Attachments is { Count: > 0 })
+        {
+            throw new ArgumentException("room messages don't carry files yet; send them to the members directly");
+        }
+
+        var readers = machines.Where(m => m.Id != _keys.MachineId).Select(m => new MessageCrypto.Reader(m.Id, VerifiedEncryptionKey(m))).ToList();
+        var settings = _messaging.CurrentValue;
+        var lifetime = message.ExpiresIn is { } e && e > TimeSpan.Zero && e < settings.MaxExpiry ? e : settings.DefaultExpiry;
+        var now = tx.Now;
+        var id = Guid.NewGuid();
+        var content = new MessageContent(message.FromEndpoint ?? Address.DefaultEndpoint, RoomAddress.Endpoint, roomId, message.ReplyTo, message.OperationId ?? id,
+            message.Status, string.IsNullOrEmpty(message.Subject) ? null : message.Subject, MessageType.Message, message.ContentType,
+            message.Metadata ?? new Dictionary<string, string>(), message.Body, now);
+        if (MessageRules.CheckContent(content) is { } problem)
+        {
+            throw new ArgumentException(problem, nameof(message));
+        }
+
+        return tx.ReserveOutgoing(RoomAddress.Of(roomId), content,
+            sequence => Signatures.SealRoomEnvelope(_keys, id, roomId, readers, sequence, now + lifetime, content));
+    }
+
+    /// <summary>
     /// Relays everything in the outbox, oldest first. A message whose expiry has passed is marked
     /// <c>expired</c> and never relayed: the recipient would only refuse it. One the router refuses is
     /// <c>failed</c>. Without a connection, messages stay queued for the next flush (after a reconnect).
@@ -796,7 +829,8 @@ public sealed class RelayClient : IAsyncDisposable
     private async Task OnReceiveAsync(Delivery delivery)
     {
         var envelope = delivery.Envelope;
-        if (envelope?.Ciphertext is null || envelope.ToMachine != _keys.MachineId)
+        if (envelope?.Ciphertext is null || (envelope.ToMachine != _keys.MachineId
+                && !(RoomAddress.TryParse(envelope.ToMachine, out _) && envelope.Wraps?.Any(w => w.Machine == _keys.MachineId) == true)))
         {
             MessageRejected?.Invoke(envelope!, "addressed to another machine");
             return;

@@ -18,6 +18,7 @@ public sealed class RelayHub(
     PresenceTracker presence,
     ConnectionGate gate,
     TrafficLog traffic,
+    RouterStore store,
     PoniExp.Server.Blobs.BlobRegistry blobs,
     TimeProvider time,
     IOptionsSnapshot<RouterOptions> options,
@@ -191,10 +192,27 @@ public sealed class RelayHub(
             throw Refuse($"The encrypted content must be at most {Limits.MaxContentBytes} bytes.", me, envelope);
         }
 
-        if (envelope.Wraps is null || envelope.Wraps.Count is 0 or > 2 || envelope.Wraps.All(w => w.Machine != envelope.ToMachine)
-            || envelope.Wraps.Any(w => w.Machine != envelope.ToMachine && w.Machine != me))
+        // A room envelope goes to every machine its key is wrapped for; a message to its one recipient.
+        var isRoom = RoomAddress.TryParse(envelope.ToMachine, out _);
+        List<string> recipients;
+        if (isRoom)
         {
-            throw Refuse("The content key must be wrapped for the recipient (and at most the sender too).", me, envelope);
+            recipients = [.. (envelope.Wraps ?? []).Select(w => w.Machine).Where(m => m != me).Distinct()];
+            if (recipients.Count is 0 or > Limits.MaxRoomMachines || envelope.Wraps!.Count != recipients.Count + envelope.Wraps.Count(w => w.Machine == me)
+                || envelope.Wraps.Count(w => w.Machine == me) > 1)
+            {
+                throw Refuse($"A room envelope is wrapped once for each of 1-{Limits.MaxRoomMachines} other machines (and at most once for the sender).",
+                    me, envelope);
+            }
+        }
+        else
+        {
+            recipients = [envelope.ToMachine];
+            if (envelope.Wraps is null || envelope.Wraps.Count is 0 or > 2 || envelope.Wraps.All(w => w.Machine != envelope.ToMachine)
+                || envelope.Wraps.Any(w => w.Machine != envelope.ToMachine && w.Machine != me))
+            {
+                throw Refuse("The content key must be wrapped for the recipient (and at most the sender too).", me, envelope);
+            }
         }
 
         if (!Signatures.VerifyEnvelope(envelope, registry.Get(me)!.PublicKey))
@@ -207,26 +225,33 @@ public sealed class RelayHub(
             throw Refuse("The envelope has already expired; check this machine's clock.", me, envelope);
         }
 
-        if (registry.Get(envelope.ToMachine) is not { Status: MembershipStatus.Approved })
+        foreach (var recipient in recipients)
         {
-            throw Refuse("The recipient isn't an approved machine.", me, envelope);
+            if (registry.Get(recipient) is not { Status: MembershipStatus.Approved })
+            {
+                throw Refuse(isRoom ? $"{recipient[..Math.Min(8, recipient.Length)]} isn't an approved machine." : "The recipient isn't an approved machine.",
+                    me, envelope);
+            }
+
+            var queued = queue.QueuedBytesFor(recipient);
+            if (queued + envelope.Size > options.Value.MaxQueuedBytesPerRecipient && queue.ExpiryOf(envelope.Id) is null)
+            {
+                throw Refuse($"Refused: {registry.Get(recipient)!.Name} has {PoniExp.Server.Blobs.BlobRegistry.Gb(queued)} of messages waiting, " +
+                             $"the most the router holds for one machine; it must come online and fetch them first.", me, envelope);
+            }
         }
 
-        var queued = queue.QueuedBytesFor(envelope.ToMachine);
-        if (queued + envelope.Size > options.Value.MaxQueuedBytesPerRecipient && queue.ExpiryOf(envelope.Id) is null)
+        var online = recipients.Where(presence.IsOnline).ToList();
+        if (await queue.EnqueueAsync(envelope, isRoom ? recipients : null) is { } delivery)
         {
-            throw Refuse($"Refused: {registry.Get(envelope.ToMachine)!.Name} has {PoniExp.Server.Blobs.BlobRegistry.Gb(queued)} of messages waiting, " +
-                         $"the most the router holds for one machine; it must come online and fetch them first.", me, envelope);
+            foreach (var recipient in online)
+            {
+                traffic.Delivered(envelope); // before the push: the recipient may confirm before SendAsync returns
+                await Clients.Group(MachineGroup(recipient)).SendAsync(HubMethods.Receive, delivery);
+            }
         }
 
-        var online = presence.IsOnline(envelope.ToMachine);
-        if (await queue.EnqueueAsync(envelope) is { } delivery && online)
-        {
-            traffic.Delivered(envelope); // before the push: the recipient may confirm before SendAsync returns
-            await Clients.Group(MachineGroup(envelope.ToMachine)).SendAsync(HubMethods.Receive, delivery);
-        }
-
-        return new SendResult(envelope.Id, online ? DeliveryState.Pushed : DeliveryState.Queued);
+        return new SendResult(envelope.Id, online.Count == recipients.Count ? DeliveryState.Pushed : DeliveryState.Queued);
     }
 
     /// <summary>The recipient has stored the envelope: drop it from the queue.</summary>
@@ -297,6 +322,14 @@ public sealed class RelayHub(
         {
             throw Refuse(e.Message, me);
         }
+    }
+
+    /// <summary>The owner's groups. Senders' daemons resolve them; the router never fans a message out to a group.</summary>
+    [HubMethodName(HubMethods.GetGroups)]
+    public IReadOnlyList<GroupInfo> GetGroups()
+    {
+        RequireMember();
+        return store.LoadGroups();
     }
 
     [HubMethodName(HubMethods.GetMachines)]

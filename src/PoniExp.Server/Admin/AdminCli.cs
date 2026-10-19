@@ -89,6 +89,20 @@ public static class AdminCli
                     }
 
                     return 0;
+                case ["groups"]:
+                    var groups = await http.GetFromJsonAsync<List<GroupInfo>>("admin/groups", Json) ?? [];
+                    output.WriteLine(groups.Count == 0 ? "no groups" : string.Join("\n", groups.Select(g => $"{g.Name,-20} {string.Join(" ", g.Members)}")));
+                    return 0;
+                case ["group", "set", var group, .. var members] when members.Count > 0:
+                    var setGroup = await ReadAsync<GroupInfo>(await http.PutAsJsonAsync($"admin/groups/{Uri.EscapeDataString(group)}",
+                        new GroupInfo(group, members), Json), output);
+                    output.WriteLine(setGroup is null ? "" : $"group {setGroup.Name}: {string.Join(" ", setGroup.Members)}");
+                    return setGroup is null ? 1 : 0;
+                case ["group", "remove", var group]:
+                    var removed = await ReadAsync<GroupInfo>(await http.PutAsJsonAsync($"admin/groups/{Uri.EscapeDataString(group)}",
+                        new GroupInfo(group, []), Json), output);
+                    output.WriteLine(removed is null ? "" : $"removed group {group}");
+                    return removed is null ? 1 : 0;
                 case ["blobs"]:
                     var all = await http.GetFromJsonAsync<List<AdminBlobView>>("admin/blobs", Json) ?? [];
                     if (all.Count == 0)
@@ -158,6 +172,7 @@ public static class AdminCli
                 default:
                     output.WriteLine("usage: poniexp admin [list | approve <id|name> | reject <id|name> | remove <id|name> | clear-pending | certificate\n" +
                                      "                      | backup <path|-> | restore <path|-> | blobs [clear --for <machine>]\n" +
+                                     "                      | groups | group set <name> <machine/endpoint|role:x[/all]>... | group remove <name>\n" +
                                      "                      | traffic-log [on | off | status | show [--since 2h|date] [--machine name] [--limit n] [--json]]] [--url URL]");
                     return 2;
             }

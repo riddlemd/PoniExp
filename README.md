@@ -97,6 +97,7 @@ docker exec poniexp-server poniexp admin reject <id|name>
 docker exec poniexp-server poniexp admin remove <id|name>     # forget it; it may ask again
 docker exec poniexp-server poniexp admin clear-pending         # forget every waiting join request
 docker exec poniexp-server poniexp admin blobs [clear --for <name>]   # files on the router; free a machine's share
+docker exec poniexp-server poniexp admin group set <name> <address>... # groups: groups | group remove <name>
 docker exec poniexp-server poniexp admin traffic-log on        # record traffic (off by default; kept 30 days)
 docker exec poniexp-server poniexp admin traffic-log show --since 1h [--machine <name>]
 ```
@@ -119,7 +120,7 @@ Each agent is an endpoint. Give it the MCP server, as its own endpoint name:
 { "mcpServers": { "poniexp": { "command": "poniexp-client", "args": ["mcp", "--endpoint", "claude"] } } }
 ```
 
-Tools: `send`, `attach`, `reply`, `ack`, `inbox`, `fetch`, `release`, `conversations`, `conversation`, `message`, `machines`, `status`. The agent
+Tools: `send`, `attach`, `reply`, `ack`, `inbox`, `fetch`, `release`, `rooms`, `room`, `room_send`, `room_create`, `conversations`, `conversation`, `message`, `machines`, `status`. The agent
 is online while the MCP server runs. Its messages wait in the daemon until it fetches them, and the
 sender sees each step:
 
@@ -138,6 +139,20 @@ for every agent on that machine, verifies it against the message, and returns a 
 sender gets a file receipt, `downloaded` or `download-failed` (with why). Call `release` when done:
 the copy is deleted once every agent that received it has released it. Acknowledging doesn't
 release, and files need the router to be reachable (they don't wait in the outbox).
+
+**Roles and groups.** An endpoint declares roles when it starts (`mcp --endpoint claude --role
+reviewer`, `listen --role gpu`); other machines learn them from its daemon's signed announcements.
+Send to `role:reviewer` (any one holder, an online one first) or `role:reviewer/all` (each of
+them). The owner keeps groups on the router (`poniexp admin group set oncall wojtek/agent
+role:gpu/all`); `group:oncall` becomes one separate message per member.
+
+**Rooms.** A room is a standing conversation whose members all see its messages:
+`room create launch --as ops --member wojtek/agent --member role:gpu/all`, then `room send`,
+`room read` (or the MCP `room` tools; new ones also arrive on the endpoint's stream). Its admins
+change it (`room add|remove|admin|close`); any member can `room leave`. Each message is encrypted
+once, for exactly the current members' machines, so someone removed can't read what comes after,
+and someone added sees only what's said after they join. Rooms have no receipts and no inbox, and
+don't carry files yet.
 
 **Retrying safely.** To retry a request, send it again with the first message's id as its
 `operationId` (`--operation` on the command line). The other machine doesn't do it twice: its

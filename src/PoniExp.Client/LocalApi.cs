@@ -196,6 +196,23 @@ public sealed class LocalApiClient : IDisposable
 
     public async Task CancelBlobAsync(Guid blobId, CancellationToken ct = default) => await PostAsync<LocalOk>($"blobs/{blobId}/cancel", new { }, ct);
 
+    /// <summary>Rooms with a member here (or just <paramref name="endpoint"/>'s).</summary>
+    public Task<List<LocalRoom>> RoomsAsync(string? endpoint = null, CancellationToken ct = default) =>
+        GetAsync<List<LocalRoom>>("rooms" + (endpoint is null ? "" : "?endpoint=" + Uri.EscapeDataString(endpoint)), ct);
+
+    public Task<LocalRoom> CreateRoomAsync(LocalRoomCreate request, CancellationToken ct = default) => PostAsync<LocalRoom>("rooms", request, ct);
+
+    public Task<LocalRoom> ChangeRoomAsync(string room, LocalRoomChange request, CancellationToken ct = default) =>
+        PostAsync<LocalRoom>($"rooms/{Uri.EscapeDataString(room)}/change", request, ct);
+
+    public Task<LocalSent> SendToRoomAsync(string room, LocalRoomSend request, CancellationToken ct = default) =>
+        PostAsync<LocalSent>($"rooms/{Uri.EscapeDataString(room)}/send", request, ct);
+
+    /// <summary>A room's messages, oldest first: the most recent <paramref name="limit"/>, after <paramref name="since"/> if given.</summary>
+    public Task<List<LocalMessage>> ReadRoomAsync(string room, string endpoint, DateTimeOffset? since = null, int? limit = null, CancellationToken ct = default) =>
+        GetAsync<List<LocalMessage>>($"rooms/{Uri.EscapeDataString(room)}/messages?endpoint={Uri.EscapeDataString(endpoint)}" +
+                                     (since is { } s ? "&since=" + Uri.EscapeDataString(s.ToString("O")) : "") + (limit is { } l ? $"&limit={l}" : ""), ct);
+
     public Task<List<LocalEndpointInfo>> EndpointsAsync(CancellationToken ct = default) => GetAsync<List<LocalEndpointInfo>>("endpoints", ct);
 
     public Task<LocalEndpointInfo> RetireAsync(string endpoint, CancellationToken ct = default) =>
@@ -231,9 +248,11 @@ public sealed class LocalApiClient : IDisposable
     /// and receipts for what it sent. Messages not yet acknowledged are delivered again on each registration.
     /// Keep it alive with <see cref="HeartbeatAsync"/>, or use <see cref="EndpointConnection"/>.
     /// </summary>
-    public async IAsyncEnumerable<LocalEvent> StreamAsync(string endpoint, [EnumeratorCancellation] CancellationToken ct = default)
+    public async IAsyncEnumerable<LocalEvent> StreamAsync(string endpoint, [EnumeratorCancellation] CancellationToken ct = default,
+        IReadOnlyList<string>? roles = null)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get, $"endpoints/{endpoint}/stream");
+        using var request = new HttpRequestMessage(HttpMethod.Get,
+            $"endpoints/{endpoint}/stream{(roles is { Count: > 0 } ? "?roles=" + Uri.EscapeDataString(string.Join(',', roles)) : "")}");
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         await EnsureAsync(response, ct);
         await using var body = await response.Content.ReadAsStreamAsync(ct);
@@ -309,15 +328,19 @@ public sealed class EndpointConnection : IAsyncDisposable
     private readonly CancellationTokenSource _stop = new();
     private readonly Task _run;
 
+    /// <param name="roles">The roles this endpoint declares (announced to the other machines); null keeps what it declared before.</param>
     public EndpointConnection(LocalApiClient api, string endpoint, Func<LocalEvent, Task> onEvent, TimeSpan? heartbeat = null,
-        Action<Exception>? onError = null)
+        Action<Exception>? onError = null, IReadOnlyList<string>? roles = null)
     {
         _api = api;
         Endpoint = endpoint;
+        _roles = roles;
         _run = Task.Run(() => RunAsync(onEvent, heartbeat ?? TimeSpan.FromSeconds(15), onError));
     }
 
     public string Endpoint { get; }
+
+    private readonly IReadOnlyList<string>? _roles;
 
     /// <summary>Completes once the endpoint is registered (each time after a reconnect it is set again).</summary>
     public Task Registered => _registered.Task;
@@ -367,7 +390,7 @@ public sealed class EndpointConnection : IAsyncDisposable
             });
             try
             {
-                await foreach (var e in _api.StreamAsync(Endpoint, session.Token))
+                await foreach (var e in _api.StreamAsync(Endpoint, session.Token, _roles))
                 {
                     if (e.Kind == LocalEventKinds.Registered)
                     {
@@ -423,6 +446,8 @@ public static class LocalEventKinds
     public const string Message = "message";
     /// <summary>A delivery receipt for a message the endpoint sent.</summary>
     public const string Receipt = "receipt";
+    /// <summary>A message in a room the endpoint is a member of.</summary>
+    public const string RoomMessage = "room-message";
     /// <summary>A file receipt (downloaded, download-failed) for a file the endpoint sent.</summary>
     public const string FileReceipt = "file-receipt";
 }
@@ -513,9 +538,9 @@ public sealed record LocalLogEntry(Guid Id, string From, string To, string Direc
 /// <summary>A message sent: to <c>machine-name/endpoint</c>; <see cref="State"/> is pushed, queued (by the router) or outbox (not relayed yet).</summary>
 public sealed record LocalSent(Guid Id, string To, Guid ConversationId, long Sequence, DateTimeOffset ExpiresOn, string State);
 
-public sealed record LocalEndpointInfo(string Name, string State, DateTimeOffset ChangedOn, DateTimeOffset? RetiredOn);
+public sealed record LocalEndpointInfo(string Name, string State, DateTimeOffset ChangedOn, DateTimeOffset? RetiredOn, IReadOnlyList<string>? Roles = null);
 
-public sealed record LocalPeerEndpoint(string Name, string State, DateTimeOffset ChangedOn);
+public sealed record LocalPeerEndpoint(string Name, string State, DateTimeOffset ChangedOn, IReadOnlyList<string>? Roles = null);
 
 /// <summary>An approved machine and its announced endpoints (all offline when the machine is).</summary>
 public sealed record LocalMachine(string Id, string Name, bool Online, DateTimeOffset? LastSeenOn, string OperatingSystem,
@@ -543,3 +568,18 @@ public sealed record LocalJoinRequest(string Name, string? Notes);
 public sealed record LocalJoinResult(string Membership, string? Name, string MachineId, string JoinCode);
 
 public sealed record LocalOk(bool Ok);
+
+/// <summary>A room as a member machine knows it. Members and admins are <c>machine-name/endpoint</c>.</summary>
+public sealed record LocalRoom(Guid Id, string Name, long Version, IReadOnlyList<string> Members, IReadOnlyList<string> Admins, bool Closed);
+
+public sealed record LocalRoomCreate(string Endpoint, string Name, IReadOnlyList<string>? Members = null);
+
+/// <summary>A change to a room by one of its admins (or <see cref="RoomChange.Leave"/> by any member).</summary>
+public sealed record LocalRoomChange(string Endpoint, RoomChange Change);
+
+/// <summary>What to change. Addresses may be <c>machine/endpoint</c>, roles or groups (resolved when the change is made).</summary>
+public sealed record RoomChange(IReadOnlyList<string>? Add = null, IReadOnlyList<string>? Remove = null, IReadOnlyList<string>? AddAdmins = null,
+    IReadOnlyList<string>? RemoveAdmins = null, string? Name = null, bool? Close = null, bool Leave = false);
+
+public sealed record LocalRoomSend(string Endpoint, string Body, Guid? ReplyTo = null, string? Subject = null, string? ContentType = null,
+    IReadOnlyDictionary<string, string>? Metadata = null);

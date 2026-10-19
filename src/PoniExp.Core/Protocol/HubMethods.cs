@@ -17,6 +17,7 @@ public static class HubMethods
     /// <summary>"I have stored this message; drop it from the queue." Not the agent's acknowledgement.</summary>
     public const string Confirm = nameof(Confirm);
     public const string GetMachines = nameof(GetMachines);
+    public const string GetGroups = nameof(GetGroups);
 
     // files (the chunks themselves go over HTTP, under BlobsPath, with a ticket)
     public const string BlobsPath = "/blobs";

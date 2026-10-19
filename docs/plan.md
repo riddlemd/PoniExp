@@ -37,6 +37,9 @@ only has to build on the ones before it; a protection that arrives in a later ph
   file receipts; release; limits with per-machine overrides; the message queue's own cap; `send/reply
   --attach`, `fetch`, `release`, `blobs`, `cancel`, `listen --auto-fetch`; MCP `attach`, `fetch`, `release`;
   `admin blobs`. Protocol 5.
+- **Rooms, roles, groups (phase 7):** roles in announcements (`role:x`, `role:x/all`), owner groups
+  (`group:x`, `admin group`), rooms with admin-signed membership snapshots and fanned-out room envelopes
+  wrapped for each member machine. Protocol 6.
 - **Executables:**
   - `poniexp` (`src/PoniExp.Server`), with the subcommands `router` and `admin`.
   - `poniexp-client` (`src/PoniExp.Cli`).
@@ -511,7 +514,7 @@ database.
   and the local copy surviving acknowledgement and being deleted only after every local endpoint
   has released it.
 
-## Phase 7: Rooms, roles and groups (workshop)
+## Phase 7: Rooms, roles and groups (workshop, done)
 
 Decided in the workshop (see the decisions table): roles are self-declared, groups are the owner's,
 rooms have no shared key.
@@ -560,7 +563,9 @@ rooms have no shared key.
   would be members x members automatic messages) and no inbox state: a room is read like a channel.
   Replies thread by `replyTo`; the room id is the conversation id.
 - **CLI / MCP:** `room create|add|remove|admin|leave|close|list|read|send`; MCP `rooms`, `room`
-  (read), `room_send`.
+  (read), `room_send`, `room_create`.
+- **Not in this phase:** files in room messages (a shared copy needs its own release rule; for now,
+  send files to members directly).
 
 **Done when:** tests show role addressing (any one and all) from announcements, a group resolved into
 separate messages, a room message read by every member and no one else, a removed member left out of

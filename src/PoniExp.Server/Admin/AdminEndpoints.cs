@@ -1,3 +1,4 @@
+using PoniExp.Core.Protocol;
 using PoniExp.Server.Machines;
 using System.Net;
 using PoniExp.Server.Security;
@@ -36,6 +37,18 @@ public static class AdminEndpoints
                 e.FromMachine is { } f ? names.GetValueOrDefault(f, f[..Math.Min(8, f.Length)]) : null,
                 e.ToMachine is { } t ? names.GetValueOrDefault(t, t[..Math.Min(8, t.Length)]) : null,
                 e.MessageId, e.Size, e.Sequence, e.Address, e.Detail)).ToList());
+        });
+        admin.MapGet("/groups", (AdminService service) => Results.Ok(service.Groups()));
+        admin.MapPut("/groups/{name}", (string name, GroupInfo body, AdminService service) =>
+        {
+            try
+            {
+                return Results.Ok(service.SetGroup(name, body.Members ?? []));
+            }
+            catch (RouterException e)
+            {
+                return Results.Problem(e.Message, statusCode: StatusCodes.Status400BadRequest);
+            }
         });
         admin.MapGet("/blobs", (AdminService service) => Results.Ok(service.Blobs()));
         admin.MapPost("/blobs/clear/{selector}", (string selector, AdminService service) =>
