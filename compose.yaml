@@ -1,0 +1,21 @@
+# docker compose up -d --build   (Rancher Desktop / moby)
+services:
+  router:
+    build:
+      context: .
+      dockerfile: src/PoniExp.Router/Dockerfile
+    image: poniexp-router:local
+    container_name: poniexp-router
+    restart: unless-stopped
+    ports:
+      - "5443:5443"
+    volumes:
+      - poniexp-data:/data
+    environment:
+      Logging__Console__FormatterName: simple
+      Logging__Console__FormatterOptions__SingleLine: "true"
+      Logging__Console__FormatterOptions__TimestampFormat: "yyyy-MM-dd HH:mm:ss "
+    mem_limit: 256m
+
+volumes:
+  poniexp-data:

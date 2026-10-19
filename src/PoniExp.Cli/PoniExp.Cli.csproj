@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>PoniExp.Cli</RootNamespace>
+    <AssemblyName>poniexp</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../PoniExp.Client/PoniExp.Client.csproj" />
+  </ItemGroup>
+</Project>
