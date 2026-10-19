@@ -39,6 +39,10 @@ only has to build on the ones before it; a protection that arrives in a later ph
 | Success path | A message is assumed to be going fine unless the recipient returns a failure. Replies carry `progress`, `done` or `failed`; there is no "accepted". |
 | Separate tracks | Three things are tracked separately and never share a field: **delivery** of a message (receipts `received`, `acknowledged`, `rejected`), the **outcome** of the work it asked for (a reply's `status`), and **file transfer** (file receipts `downloaded`, `download-failed`). A reply's `status` is only ever about the work. |
 | Message types | `type` is protocol level and hard-coded: a closed C# enum (`message`, `receipt`, `file-receipt`, `endpoint`, later `job`, `room`) that only PoniExp defines, because it decides how the daemon handles a message. Higher-level protocols between agents are not types: they ride on `type: message`, defined by its `contentType`, `metadata` and `body`, which agents are free to fill as they like. There is no reply type: a reply is a `message` with `replyTo` set. |
+| Endpoint registry | Every endpoint that has ever registered with a daemon is remembered (`endpoints`). Registered but not connected is **offline**: its messages wait until it returns or they expire. Never registered, or retired with `poniexp-client endpoint retire <name>`, is **unknown**: the message gets a `rejected` receipt. |
+| Automatic messages | `receipt`, `file-receipt` and `endpoint` are automatic. Nothing automatic is ever sent in response to something automatic; they expire after a short time (default 1 hour, a setting) and aren't retried after that; at most one goes out per message per event. They get rows in `messages` (so duplicates and sequence numbers work as for any message) but are never shown to agents. An expired message sends nothing back: the sender marks it `expired` by its own clock. |
+| Hermes bridge | The bridge has its own A2A token, registered with Hermes and kept in PoniExp's secret store. The gateway URL is per-machine configuration. |
+| Daemon start-up | Two modes. **User mode** runs at logon as the user: a logon scheduled task (Windows), a LaunchAgent (macOS), a systemd user unit (Linux). **System mode** runs at boot: a Windows service under its own virtual account `NT SERVICE\PoniExp` (keys in that account's DPAPI, data in `%ProgramData%\PoniExp`, the local pipe restricted to the owning user; never a "do not store password" task), a macOS LaunchDaemon (keys in the System keychain), a systemd user unit with `loginctl enable-linger` (Linux). |
 | Local trust | Every local process running as the machine's user is trusted; it could read the user's keys anyway. The daemon scopes what each endpoint is shown, but that is convenience, not a security boundary. |
 | Storage | SQLite, bundled in the app (`Microsoft.Data.Sqlite`). Nothing for the user to install. |
 | Client database | One SQLite database per machine (see Client database below). Each table is created by the phase that first needs it. |
@@ -92,7 +96,7 @@ each was last seen.
 and files have their own events.
 - `message_id`, `endpoint`, `event`, `occurred_on`, `detail`
 - Inbound: `stored` (`received` sent) → `fetched` → `acknowledged` (sent), or `rejected` (sent,
-  with a reason) / `expired` (nothing sent; see Open questions).
+  with a reason) / `expired` (nothing sent; see Automatic messages).
 - Outbound: `queued` → `relayed` → `received` → `acknowledged`, or `rejected` (by the recipient,
   with its reason) / `failed` (the server refused it) / `expired`. `relayed` is the server's word;
   `received`, `acknowledged` and `rejected` are the recipient's signed receipts.
@@ -101,7 +105,19 @@ and files have their own events.
 transaction as the event.
 
 `bridge_tasks` (phase 3): for messages delivered through the Hermes bridge, `message_id`,
-`a2a_task_id` and the task's last known state.
+`a2a_task_id`, `context_id`, the peer (`machine/endpoint`) the task belongs to, and the task's last
+known state.
+
+`endpoints` (phase 3): every endpoint that has registered with this daemon: `name`, `registered_on`,
+`last_seen_on`, `retired_on`. The endpoint registry (see Endpoint registry).
+
+`peer_endpoints` (phase 3): what other machines have announced: `machine`, `endpoint`, `state`
+(online, left, timed out), `counter` (the announcing daemon's), `changed_on`. Only a higher counter
+replaces a row.
+
+`diagnostics` (phase 3)
+- `occurred_on`, `level`, `category` (connection, signature, version, delivery), `detail`, and the
+  related message or machine.
 
 `conversations` (phase 5)
 - `id`, `subject`, `local_endpoint`, `peer` (the one `machine/endpoint` on the other side),
@@ -111,10 +127,6 @@ transaction as the event.
 - Keyed by `(from_machine, from_endpoint, operation_id)`.
 - `state` (running or done), `result_message_id`, `keep_until`.
 - A retry while running gets "still running"; a retry after it's done gets the stored result.
-
-`diagnostics` (phase 5)
-- `occurred_on`, `level`, `category` (connection, signature, version, delivery), `detail`, and the
-  related message or machine.
 
 `blobs` (phase 6): one row per blob on this machine, however many local messages refer to it.
 - `blob_id`, `size`, `local_path`, `fetched_on`, `released_on` (released on the server),
@@ -259,11 +271,14 @@ is what bounds its replay window, so it doesn't take the relay's value on trust.
 
 ## Phase 3: Daemon and MCP
 
-The point where PoniExp can replace agent-relay. Adds `message_events`, `message_state` and
-`bridge_tasks` to the client database.
+The point where PoniExp can replace agent-relay. Adds `message_events`, `message_state`,
+`bridge_tasks`, `endpoints`, `peer_endpoints` and `diagnostics` to the client database.
 
 - **`poniexp-client daemon`:** the machine's only connection to the server. It handles local
   routing to endpoints, the outbox, and the client database.
+  - **Outbox:** a message sent while the router is unreachable waits in the outbox. One whose expiry
+    passes before it is relayed is marked `expired` instead: its `createdOn` is signed and the
+    recipient's clamp counts from it, so relaying it late would only get it refused.
 - **Local API** on a Unix socket or named pipe, used by the CLI, the MCP servers and the Hermes
   bridge.
 - **`poniexp-client mcp`** (stdio). Tools: `send`, `reply`, `ack`, `inbox`, `conversation`,
@@ -282,14 +297,18 @@ The point where PoniExp can replace agent-relay. Adds `message_events`, `message
     | `completed` | a reply with `status: done`, carrying the agent's answer |
     | `failed`, `rejected`, `canceled` | a reply with `status: failed` |
 
-  - A PoniExp `conversationId` maps to the A2A `contextId`, so a conversation stays one multi-turn
-    exchange inside Hermes.
+  - The A2A `contextId` is derived from the peer (`machine/endpoint`) **and** the `conversationId`,
+    so a conversation stays one multi-turn exchange inside Hermes. The sender chooses the
+    `conversationId`, so using it alone would let another machine join someone else's conversation.
+  - The A2A message carries the PoniExp message id, sender (`machine/endpoint`) and conversation id
+    in its metadata, so the agent can use the MCP tools on it (e.g. `reply`).
   - The A2A task id is stored in `bridge_tasks`. After a restart the bridge picks the task up again
     (`tasks/subscribe`, or `tasks/get` for one that has already finished), so no receipt or reply
     is lost.
   - **Answering a question:** when the sender replies to an `input-required` question (its
     `replyTo` is that progress reply), the bridge looks up the task in `bridge_tasks` and sends the
-    answer into the same A2A task, rather than starting a new one.
+    answer into the same A2A task, rather than starting a new one. An answer is accepted only from the
+    peer the task belongs to.
   - The bridge sends the reply, from the task result. If the agent already replied to the same
     message through the MCP `reply` tool, the bridge doesn't send another: one answer, never two.
   - The agent doesn't need to call `ack` itself: the task state is set by Hermes, so it can't be
@@ -304,15 +323,17 @@ The point where PoniExp can replace agent-relay. Adds `message_events`, `message
     **left** (unregistered cleanly), or **timed out** (missed its heartbeat).
   - Announcements are messages of type `endpoint`, encrypted and signed like any other, one per
     machine (endpoint names are encrypted, so the server can't carry them in its presence list).
-    They expire quickly, aren't receipted and aren't kept in the log.
+    They are automatic (see Automatic messages).
+  - Each carries the announcing daemon's counter, which only ever increases. A receiver keeps only
+    the newest per machine (`peer_endpoints`), so a replayed or late "left" can't override a newer
+    "online".
   - When the server reports another machine coming online, the daemon sends it its full current
     endpoint list, so a machine that was away catches up.
   - When a machine goes offline, all its endpoints count as offline.
   - The MCP `machines` tool shows each machine's endpoints and their state.
   - A message for an endpoint that is offline is held by the recipient's daemon until the endpoint
-    returns or the message expires. A message for an endpoint that was never registered gets a
-    `rejected` receipt ("unknown endpoint"). How the daemon tells the two apart, and how an
-    endpoint is retired, is still open (see Open questions).
+    returns or the message expires. A message for an unknown endpoint (never registered, or retired
+    with `poniexp-client endpoint retire <name>`) gets a `rejected` receipt ("unknown endpoint").
 - **Receipts:** delivery only, each sent by the recipient as a signed, encrypted message of type
   `receipt`, so the server can't fake any of them. The outcome of the work comes back separately,
   as a reply with a `status`.
@@ -330,15 +351,22 @@ The point where PoniExp can replace agent-relay. Adds `message_events`, `message
 - **`status`** (CLI and MCP) also shows the `metrics` counters.
 - **Self-contained builds** for Windows, macOS and Linux, with no .NET install needed. The bundled
   SQLite library must unpack correctly from the single-file build; test it on each OS.
-- **Running as a service:** the daemon starts automatically on each machine, **as the user**: a
-  logon scheduled task on Windows (a LocalSystem service can't read user-scope DPAPI), a launchd
-  user agent on macOS, a systemd user unit on Linux. Whether to offer a boot-time service as well
-  is still open (see Open questions).
+- **Running as a service:** `poniexp-client service install [--system]` sets the daemon up to start
+  automatically, in user mode (at logon) or system mode (at boot); see Daemon start-up.
+  `service uninstall` and `service status` go with it. In system mode the daemon owns the keys
+  (they are created under its account), and the CLI only ever talks to it over the local API.
+- **`diagnostics`:** connection, signature, version and delivery problems are recorded, and shown by
+  `doctor`.
 - **Done when:**
   - Hermes on one machine, through MCP, holds a conversation with an agent on another.
   - Tests show an endpoint's online, left and timed-out states reaching another machine, a machine
     that was offline catching up on reconnect, and a message to an unknown endpoint getting a
-    `rejected` receipt.
+    `rejected` receipt, before and after it is retired.
+  - Tests show a replayed or late announcement with a lower counter being ignored, a message whose
+    expiry passes in the outbox being marked `expired` and never relayed, and nothing automatic sent
+    in reply to something automatic.
+  - Tests show two peers using the same `conversationId` landing in different A2A contexts, and an
+    answer to another peer's question being refused.
   - Tests show `received` arriving while the recipient endpoint is offline, `acknowledged`
     arriving only after the agent acknowledges or replies (not when it merely fetches), and no
     second `received` for a duplicate.
@@ -361,7 +389,7 @@ The point where PoniExp can replace agent-relay. Adds `message_events`, `message
 
 ### Client log
 
-Completes the client database as a log. Adds `conversations`, `operations` and `diagnostics`.
+Completes the client database as a log. Adds `conversations` and `operations`.
 
 What it's for:
 - history
@@ -531,24 +559,4 @@ from any machine, instead of `docker exec` on Wojtek.
      list (losing it means re-approving everyone), via `poniexp admin backup`.
    - **Don't back up:** queued messages, files and the traffic log.
    - **Decide in phase 8:** the job board.
-3. **Endpoint registry:** how a daemon tells an offline endpoint (hold its messages) from an
-   unknown one (a `rejected` receipt), whether it remembers every endpoint that ever registered, and
-   how an endpoint is retired.
-4. **Message types:** settled that `type` is a closed enum and that a reply is a `message` with
-   `replyTo` (see Message types). Still open: which types count as automatic, and whether
-   automatic types get rows in `messages` (needed for
-   duplicate detection) or only events.
-5. **Automatic messages** (receipts, file receipts, endpoint announcements).
-   Proposal: nothing automatic is sent in response to an automatic message; they get a short
-   expiry and no retry after it; at most one receipt per message per event.
-6. **Hermes bridge setup:** where its A2A token comes from (its own token registered with Hermes,
-   Hermes' `.env`, or Hermes trusting localhost), per-machine gateway URL, and whether there is one
-   endpoint for Hermes or one per Hermes profile.
-7. **Daemon before login:** run-as-user only, or an optional boot-time service (on Windows a
-   service under its own virtual account `NT SERVICE\PoniExp`; on macOS a LaunchDaemon using the
-   System keychain; on Linux a user unit with `loginctl enable-linger`) for machines that must
-   receive while logged out.
-8. **Expired messages send no receipt:** when the recipient rejects a message as expired, nothing
-   goes back. The sender only learns of it by reaching the (signed, so agreed) expiry on its own
-   clock and marking the message `expired`. Either state that this is enough, or send a
-   `rejected` receipt with the reason "expired".
+3. **Hermes endpoints:** one endpoint for Hermes as a whole, or one per Hermes profile.
