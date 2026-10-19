@@ -48,6 +48,8 @@ only has to build on the ones before it; a protection that arrives in a later ph
 | Automatic messages | `receipt`, `file-receipt` and `endpoint` are automatic. Nothing automatic is ever sent in response to something automatic; they expire after a short time (default 1 hour, a setting) and aren't retried after that; at most one goes out per message per event. They get rows in `messages` (so duplicates and sequence numbers work as for any message) but are never shown to agents. An expired message sends nothing back: the sender marks it `expired` by its own clock. |
 | Hermes bridge | One endpoint per Hermes profile, named `hermes-<profile>` (e.g. `wojtek/hermes-default`), since each profile has its own memory, skills and gateway. Each has its own gateway URL (configuration) and its own A2A token, registered with that profile's Hermes and kept in PoniExp's secret store. |
 | Daemon start-up | Two modes. **User mode** runs at logon as the user: the per-user `Run` registry key (Windows; a logon task would need admin), a LaunchAgent (macOS), a systemd user unit (Linux). **System mode** runs at boot: a Windows service under its own virtual account `NT SERVICE\PoniExp` (keys in that account's DPAPI, data in `%ProgramData%\PoniExp`, the local pipe restricted to the owning user; never a "do not store password" task), a macOS LaunchDaemon (keys in the System keychain), a systemd user unit with `loginctl enable-linger` (Linux). |
+| Connection limits | By what a connection has proved, because behind port forwarding (Rancher Desktop) every client arrives from the same address. A connection that hasn't proved a key, or whose key is neither approved nor pending, must authenticate within 10 s, and at most 20 such connections exist at once. An approved or pending machine may hold at most 5 connections. At most 10 new join requests per hour across the router. Per-address limits (10 unauthenticated connections, 5 join requests an hour) apply on top, except to `SharedAddresses`: addresses known to stand for many clients, such as the port forwarder's. All of these are settings. |
+| Backups | `poniexp admin backup` writes the TLS certificate (with its private key) and the approved machines to one owner-only file, or to stdout, for the owner to keep (e.g. as a Bitwarden attachment). `admin restore` puts them back. Queued messages, files and the traffic log aren't backed up. |
 | Local trust | Every local process running as the machine's user is trusted; it could read the user's keys anyway. The daemon scopes what each endpoint is shown, but that is convenience, not a security boundary. |
 | Storage | SQLite, bundled in the app (`Microsoft.Data.Sqlite`). Nothing for the user to install. |
 | Client database | One SQLite database per machine (see Client database below). Each table is created by the phase that first needs it. |
@@ -56,7 +58,7 @@ only has to build on the ones before it; a protection that arrives in a later ph
 | Configuration | Every tunable value (expiry defaults and maximums, skew tolerance, retention, limits, timeouts) is a setting with a default, bound to an options class. Singletons and hosted services read it through `IOptionsMonitor<T>` (`CurrentValue` at the point of use, so changes apply without a restart); scoped services through `IOptionsSnapshot<T>`. Plain `IOptions<T>` isn't used for these. Options are validated at startup (`ValidateOnStart`). |
 | Sequence gaps | Counted as a metric, not reported as warnings. A gap is normal when an expired message is dropped, and can't be told apart from a deliberate drop. |
 | Join requests | Expire after a configurable time. |
-| Relay data | Short-lived by design. What, if anything, outlives the volume is still open (see Open questions). |
+| Relay data | Short-lived by design. Only the certificate and the approved machines are backed up (see Backups). |
 | File limits | A quota per sender **and** a cap per recipient, plus limits per file and for the whole relay. No per-sender share of a recipient's cap. Files are something machines fetch deliberately; normal messages must always get through. |
 | File sharing | A blob is shared only with the machines named when it is uploaded. Sending the file to anyone later means uploading it again as a new blob. |
 | Reaching the server | Over the VPN for now. A router port forward is only considered after phase 4's hardening. |
@@ -353,13 +355,27 @@ database. Pushing messages into Hermes (the Hermes bridge) is phase 12.
 
 ## Phase 4: Server foundations
 
-- **SQLite** replaces the JSON files: machines, queue, and later files and jobs.
-- **Hardening before the port faces the internet** (required before any port forward):
-  - connection and join limits per IP address
-  - join requests that expire after a configurable time
-  - `poniexp admin clear-pending`
-- **`/health` endpoint** and a Docker health check.
-- **Backups:** depends on the open question below.
+- **SQLite** (`data/router.db`) replaces `machines.json` and `queue.json`, which are imported on first
+  start and kept as `*.imported`. Files and jobs are added to it later.
+- **Hardening before the port faces the internet** (required before any port forward), as in
+  Connection limits:
+  - a deadline to authenticate, a cap on unauthenticated connections, a cap per machine;
+  - a router-wide join-request rate, with per-address limits except for `SharedAddresses`;
+  - join requests that expire (`JoinRequestExpiry`, 24 h), and `poniexp admin clear-pending`;
+  - a Kestrel connection cap as a backstop.
+- **`/health`** and a Docker health check (`poniexp health`, against the loopback admin listener).
+- **Backups:** `poniexp admin backup [path|-]` and `admin restore <path|->` (see Backups). Restoring
+  a different certificate takes effect after a restart.
+- **Done when:**
+  - The router's state survives a restart from SQLite, and an existing `machines.json`/`queue.json`
+    is imported once.
+  - Tests show a connection that doesn't authenticate being dropped after the deadline; the
+    unauthenticated cap; the per-machine cap; the join rate (router-wide and per address); a shared
+    address exempt from per-address limits; a join request expiring (and its waiting client told);
+    `clear-pending`.
+  - A backup restored into an empty router gives the same certificate SHA-256 and approved machines.
+  - Live: the container reports healthy; existing data is migrated; a backup taken with `docker exec`
+    restores.
 
 ## Phase 5: History and logs
 
@@ -600,8 +616,4 @@ so choosing the session is the gateway's job, not the bridge's.
    `acknowledged` (agent). Still open:
    - Whether to chain events by hash so edits show (leaning no).
    - Whether the traffic log's fields cover what it's needed for.
-2. **Backups:** relay data is meant to be short-lived. Proposal:
-   - **Back up:** the TLS certificate (losing it breaks every client's pin) and the approved-machine
-     list (losing it means re-approving everyone), via `poniexp admin backup`.
-   - **Don't back up:** queued messages, files and the traffic log.
-   - **Decide in phase 8:** the job board.
+2. **Backups of the job board:** decide in phase 8.
