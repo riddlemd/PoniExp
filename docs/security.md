@@ -153,7 +153,9 @@ Endpoints, conversation, subject, type, metadata, body and `createdOn` are encry
 
 - A member machine can only send as itself: the router checks the envelope's sender against the key
   the connection proved, and the recipient checks the signature again.
-- Any approved machine can message any endpoint on any other (permissions are phase 9).
+- Any approved machine can message any endpoint on any other. Phase 9 permissions are per machine; endpoint
+  names are never a security boundary (any local process can use any name), so agents that must not
+  impersonate each other belong on separate machines or containers.
 - Private keys are kept in the OS's secret store: DPAPI (current user) on Windows, the login keychain
   on macOS, owner-only (0600) files on Linux, where disk encryption protects them at rest.
 - In system mode (a boot-time service) the daemon has its own keys, under its own account (Windows:

@@ -68,7 +68,8 @@ only has to build on the ones before it; a protection that arrives in a later ph
 | Doing a request once | A retry is a message with the same `operationId` from the same sender endpoint. The recipient's daemon handles it, and the agent never sees a duplicate. While the first is still running (no `done` or `failed` reply yet), the daemon answers with a `progress` reply, "still running". Once it's finished, it re-sends a copy of the final reply. `operationId` defaults to the message id, so only deliberate retries are deduplicated. The record is kept for the maximum expiry plus skew. |
 | Log export | `poniexp-client log --export` writes metadata only; `--bodies` decrypts bodies into it (they are then on disk in the clear). |
 | Traffic log | Off by default (`poniexp admin traffic-log on`), kept 30 days. Besides what the server can see about each message (time, sender and recipient machine, id, size, sequence), it records the event (relayed, delivered, confirmed, expired, refused) and refusals with their reason (bad signature, limits, join requests), so delays and attacks show. |
-| Roles | Self-declared per endpoint, carried in the signed endpoint announcements (phase 7). Phase 9 permissions may restrict them. |
+| Roles | Self-declared per endpoint, carried in the signed endpoint announcements (phase 7). Labels for addressing only: permissions are per machine (phase 9). |
+| Permission level | Machines only. No per-endpoint keys or permissions: an endpoint is a name any local process may use, so separating agents takes separate machines (or containers, each its own machine). |
 | Rooms | Named (unique on the router while live), created by any agent; members invite, invitees accept, members leave; no admins, no removals. Membership is a log of signed events the router keeps and orders and can see (endpoints included); each message's key is wrapped for exactly the current members' machines, checked by the router. A room collapses when empty or idle (`RoomIdleExpiry`); the router then keeps only stats (no subjects or bodies). |
 | Groups | Owner-defined lists of addresses on the router (`admin group`), resolved by the sender's daemon into separate messages. |
 | Local trust | Every local process running as the machine's user is trusted; it could read the user's keys anyway. The daemon scopes what each endpoint is shown, but that is convenience, not a security boundary. |
@@ -606,8 +607,10 @@ Open:
 
 ## Phase 9: Permissions and approval cards (workshop)
 
-- Deny by default, Cotal-style: who may send what to which machine, room or role, and who may post
-  or claim which jobs.
+- Deny by default, Cotal-style: which machines may send to which machines, and which may post or
+  claim which jobs. **Permissions are per machine only.** Endpoints have no keys, and any local
+  process can use any endpoint name (local processes are trusted), so a rule about endpoints or
+  roles couldn't be enforced. Endpoint names and roles stay labels for addressing, logs and stats.
 - **Approval cards** are part of the permission logic: a request outside the rules is held, and a
   card goes to wherever you're active, approved with Touch ID using the owner key.
 - This phase introduces the owner identity.
