@@ -53,6 +53,10 @@ only has to build on the ones before it; a protection that arrives in a later ph
 | Daemon start-up | Two modes. **User mode** runs at logon as the user: the per-user `Run` registry key (Windows; a logon task would need admin), a LaunchAgent (macOS), a systemd user unit (Linux). **System mode** runs at boot: a Windows service under its own virtual account `NT SERVICE\PoniExp` (keys in that account's DPAPI, data in `%ProgramData%\PoniExp`, the local pipe restricted to the owning user; never a "do not store password" task), a macOS LaunchDaemon (keys in the System keychain), a systemd user unit with `loginctl enable-linger` (Linux). |
 | Connection limits | By what a connection has proved, because behind port forwarding (Rancher Desktop) every client arrives from the same address. A connection that hasn't proved a key, or whose key is neither approved nor pending, must authenticate within 10 s, and at most 20 such connections exist at once. An approved or pending machine may hold at most 5 connections. At most 10 new join requests per hour across the router. Per-address limits (10 unauthenticated connections, 5 join requests an hour) apply on top, except to `SharedAddresses`: addresses known to stand for many clients, such as the port forwarder's. All of these are settings. |
 | Backups | `poniexp admin backup` writes the TLS certificate (with its private key) and the approved machines to one owner-only file, or to stdout, for the owner to keep (e.g. as a Bitwarden attachment). `admin restore` puts them back. Queued messages, files and the traffic log aren't backed up. |
+| Event integrity | Client events aren't hash-chained: a local process could rewrite a whole chain anyway (Local trust), and the signed envelopes already prove what was said. |
+| Doing a request once | A retry is a message with the same `operationId` from the same sender endpoint. The recipient's daemon handles it, and the agent never sees a duplicate. While the first is still running (no `done` or `failed` reply yet), the daemon answers with a `progress` reply, "still running". Once it's finished, it re-sends a copy of the final reply. `operationId` defaults to the message id, so only deliberate retries are deduplicated. The record is kept for the maximum expiry plus skew. |
+| Log export | `poniexp-client log --export` writes metadata only; `--bodies` decrypts bodies into it (they are then on disk in the clear). |
+| Traffic log | Off by default (`poniexp admin traffic-log on`), kept 30 days. Besides what the server can see about each message (time, sender and recipient machine, id, size, sequence), it records the event (relayed, delivered, confirmed, expired, refused) and refusals with their reason (bad signature, limits, join requests), so delays and attacks show. |
 | Local trust | Every local process running as the machine's user is trusted; it could read the user's keys anyway. The daemon scopes what each endpoint is shown, but that is convenience, not a security boundary. |
 | Storage | SQLite, bundled in the app (`Microsoft.Data.Sqlite`). Nothing for the user to install. |
 | Client database | One SQLite database per machine (see Client database below). Each table is created by the phase that first needs it. |
@@ -398,13 +402,26 @@ What it's for:
 
 | What | Default |
 |---|---|
-| `operations` | Until they can no longer matter: server retention + longest expiry + clock skew. |
+| `operations` | The maximum expiry plus skew: no retry can arrive after that. |
 | Envelopes | 90 days, then the envelope is dropped and the metadata kept. |
 | Metadata and events | 1 year. Must always be longer than a message can be accepted (maximum expiry plus skew), so duplicate detection holds; startup validation refuses settings that break this. |
 | Diagnostics | 30 days. |
-| Size cap | e.g. 1 GB; the oldest envelopes are dropped first. |
+| Size cap | 1 GB; the oldest envelopes are dropped first. |
 
-**CLI:** `poniexp-client log` by conversation, operation or peer, with a JSONL export.
+A conversation's `state` is derived: `open`, or `finished` once its last message is a reply with
+status `done` or `failed` (a later message reopens it).
+
+**CLI:** `poniexp-client log` by conversation, operation, peer or endpoint, with a JSONL export
+(`--export`, metadata only unless `--bodies`).
+
+**Done when:**
+- A restarted agent gets its conversation back (`conversation`, `log`).
+- Tests show a retry while the first is running getting "still running", a retry after it's done
+  getting the final reply again, the agent seeing neither, and a retry after the record expired being
+  treated as new.
+- Tests show each retention rule (envelopes, metadata, diagnostics, operations, the size cap) and
+  settings that would break duplicate detection refusing to start.
+- Tests show the traffic log recording each event and refusal only while it's on, and pruning.
 
 ### Server traffic log
 
@@ -614,9 +631,4 @@ so choosing the session is the gateway's job, not the bridge's.
 
 ## Open questions
 
-1. **Client database:** review the draft before building on it. Settled: one database per
-   machine; envelopes stored instead of decrypted bodies; two receipts, `received` (machine) and
-   `acknowledged` (agent). Still open:
-   - Whether to chain events by hash so edits show (leaning no).
-   - Whether the traffic log's fields cover what it's needed for.
-2. **Backups of the job board:** decide in phase 8.
+1. **Backups of the job board:** decide in phase 8.
