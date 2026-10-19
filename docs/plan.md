@@ -65,6 +65,9 @@ only has to build on the ones before it; a protection that arrives in a later ph
 | Doing a request once | A retry is a message with the same `operationId` from the same sender endpoint. The recipient's daemon handles it, and the agent never sees a duplicate. While the first is still running (no `done` or `failed` reply yet), the daemon answers with a `progress` reply, "still running". Once it's finished, it re-sends a copy of the final reply. `operationId` defaults to the message id, so only deliberate retries are deduplicated. The record is kept for the maximum expiry plus skew. |
 | Log export | `poniexp-client log --export` writes metadata only; `--bodies` decrypts bodies into it (they are then on disk in the clear). |
 | Traffic log | Off by default (`poniexp admin traffic-log on`), kept 30 days. Besides what the server can see about each message (time, sender and recipient machine, id, size, sequence), it records the event (relayed, delivered, confirmed, expired, refused) and refusals with their reason (bad signature, limits, join requests), so delays and attacks show. |
+| Roles | Self-declared per endpoint, carried in the signed endpoint announcements (phase 7). Phase 9 permissions may restrict them. |
+| Room encryption | No room key: each room message has its own content key, wrapped for every member machine, and the router fans out one envelope. Membership changes are versioned snapshots signed (by machine key and sender endpoint) by the room's creator or the admins they name; members apply only those. New members see no earlier history. |
+| Groups | Owner-defined lists of addresses on the router (`admin group`), resolved by the sender's daemon into separate messages. |
 | Local trust | Every local process running as the machine's user is trusted; it could read the user's keys anyway. The daemon scopes what each endpoint is shown, but that is convenience, not a security boundary. |
 | Storage | SQLite, bundled in the app (`Microsoft.Data.Sqlite`). Nothing for the user to install. |
 | Client database | One SQLite database per machine (see Client database below). Each table is created by the phase that first needs it. |
@@ -510,18 +513,59 @@ database.
 
 ## Phase 7: Rooms, roles and groups (workshop)
 
-Starting definitions:
-- **Group:** a named list of machines.
-- **Role:** a capability tag, e.g. `gpu` or `reviewer`, addressed as "any one with it" or "all".
-- **Room:** a standing conversation with members and history.
+Decided in the workshop (see the decisions table): roles are self-declared, groups are the owner's,
+rooms have no shared key.
 
-Open:
-- who assigns roles
-- room history and encryption: a shared room key, and re-keying when membership changes
-- how rooms relate to conversations
-- how rooms and groups fit with one-recipient messages: members of a room are meant to see each
-  other, so a room probably needs its own envelope type rather than stretching messages into group
-  messages
+### Roles
+
+- A role is a tag on an **endpoint** (`reviewer`, `gpu`), same rules as an endpoint name. An endpoint
+  declares its roles when it registers (`mcp --endpoint claude --role reviewer`,
+  `listen --role ...`). They're kept in the endpoint registry and travel in the daemon's signed
+  endpoint announcement, so the router can't invent or hide a holder. Phase 9 may restrict who can
+  claim which role.
+- **Addressing:** `role:reviewer` is any one holder: the sender's daemon picks an online one (at
+  random), otherwise the one seen most recently, and sends it an ordinary message. `role:reviewer/all`
+  is every holder: one separate message each. Neither is anything new to the router.
+
+### Groups
+
+- A named list of addresses (`machine/endpoint` or `role:...`), set by the owner:
+  `poniexp admin group set <name> <address>...`, `group remove`, `groups`. Kept in `router.db`.
+- `group:<name>` is resolved by the sender's daemon into separate messages, one per member (roles
+  expanded as above). A group isn't a room: its members don't see each other.
+- The router serves the lists, so a compromised router could point a group at another approved
+  machine (it still can't read what it relays). Owner-signed lists can come with phase 9.
+
+### Rooms
+
+- **A room** is a standing, many-sided conversation: an id, a name, member endpoints and admins.
+  Its history is the room's messages, kept on each member's machine (the client database), not on
+  the router.
+- **Membership** is a full, versioned snapshot (`version`, `name`, `members`, `admins`) in a `room`
+  message, sent to the daemon of every machine with a member (and of members just removed). Its
+  creator is its first admin. A machine applies a snapshot only if its version is newer and it comes
+  from an admin of the room as that machine knows it (the envelope's machine signature and its
+  sender endpoint), so the router can't add anyone. `room create`, `room add`, `room remove`,
+  `room admin`, `room leave` (a member removing themselves), `room close`.
+- **Messages:** one envelope per room message, addressed to `room:<id>` (signed, like every header
+  field). Its content key is wrapped for each member machine, per message: no room key, so no
+  re-keying. Removing a member means they're left out from the next message. The router fans the
+  envelope out to every machine it's wrapped for and queues one entry per recipient until each
+  confirms. Sequence numbers count per sender and room.
+- A machine accepts a room message only from a current member, for a room it knows. A new member sees
+  messages from when their machine learned of the change: no history from before they joined. A
+  message sent by someone whose machine hadn't heard of the change yet may miss them; that's by design.
+- **Reading:** room messages go live to every local member endpoint's stream and are read with
+  `room read <id> [--since]` or the MCP `room` tool. There are no delivery receipts in rooms (that
+  would be members x members automatic messages) and no inbox state: a room is read like a channel.
+  Replies thread by `replyTo`; the room id is the conversation id.
+- **CLI / MCP:** `room create|add|remove|admin|leave|close|list|read|send`; MCP `rooms`, `room`
+  (read), `room_send`.
+
+**Done when:** tests show role addressing (any one and all) from announcements, a group resolved into
+separate messages, a room message read by every member and no one else, a removed member left out of
+the next message, a membership change from a non-admin (or one the router forged) ignored, and a new
+member not seeing earlier messages.
 
 ## Phase 8: Job board (workshop)
 
