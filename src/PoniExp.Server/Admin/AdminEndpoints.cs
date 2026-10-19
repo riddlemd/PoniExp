@@ -1,3 +1,4 @@
+using PoniExp.Server.Machines;
 using System.Net;
 using PoniExp.Server.Security;
 
@@ -21,6 +22,21 @@ public static class AdminEndpoints
         admin.MapPost("/machines/{selector}/reject", (string selector, AdminService service) => RunAsync(() => service.RejectAsync(selector)));
         admin.MapPost("/machines/{selector}/remove", (string selector, AdminService service) => RunAsync(() => service.RemoveAsync(selector)));
         admin.MapGet("/certificate", (RouterCertificateInfo certificate) => Results.Ok(certificate));
+        admin.MapGet("/traffic-log/status", (TrafficLog log) => Results.Ok(new TrafficLogStatus(log.Enabled)));
+        admin.MapPost("/traffic-log/{state:regex(^(on|off)$)}", (string state, TrafficLog log) =>
+        {
+            log.SetEnabled(state == "on");
+            return Results.Ok(new TrafficLogStatus(log.Enabled));
+        });
+        admin.MapGet("/traffic-log", (TrafficLog log, MachineRegistry registry, DateTimeOffset? since, string? machine, int? limit) =>
+        {
+            var id = machine is null ? null : registry.List().FirstOrDefault(m => m.Name == machine || m.Id == machine)?.Id ?? machine;
+            var names = registry.List().ToDictionary(m => m.Id, m => m.Name);
+            return Results.Ok(log.Read(since, id, limit ?? 1000).Select(e => new AdminTrafficEntry(e.OccurredOn, e.Event,
+                e.FromMachine is { } f ? names.GetValueOrDefault(f, f[..Math.Min(8, f.Length)]) : null,
+                e.ToMachine is { } t ? names.GetValueOrDefault(t, t[..Math.Min(8, t.Length)]) : null,
+                e.MessageId, e.Size, e.Sequence, e.Address, e.Detail)).ToList());
+        });
         admin.MapPost("/clear-pending", async (AdminService service) => Results.Ok(await service.ClearPendingAsync()));
         admin.MapGet("/backup", (AdminService service, RouterCertificateInfo certificate) => Results.Ok(service.Backup(certificate)));
         admin.MapPost("/restore", async (RouterBackup backup, AdminService service, RouterCertificateInfo certificate) =>
@@ -54,3 +70,9 @@ public static class AdminEndpoints
         }
     }
 }
+
+public sealed record TrafficLogStatus(bool Enabled);
+
+/// <summary>A traffic log row with machine names (removed machines show their short id).</summary>
+public sealed record AdminTrafficEntry(DateTimeOffset OccurredOn, string Event, string? From, string? To, Guid? MessageId, int? Size, long? Sequence,
+    string? Address, string? Detail);

@@ -29,6 +29,9 @@ only has to build on the ones before it; a protection that arrives in a later ph
 - **Server (phase 4):** SQLite storage (imported from the JSON files), connection and join limits by
   what a connection proved, join expiry, `clear-pending`, `/health` and the Docker health check,
   backup and restore.
+- **History (phase 5):** conversations (open or finished), doing a request once (retries answered by
+  the daemon), `log` with filters and JSONL export, retention with a size cap, the router's traffic
+  log (`admin traffic-log`).
 - **Executables:**
   - `poniexp` (`src/PoniExp.Server`), with the subcommands `router` and `admin`.
   - `poniexp-client` (`src/PoniExp.Cli`).
@@ -384,7 +387,7 @@ database. Pushing messages into Hermes (the Hermes bridge) is phase 12.
   - Live: the container reports healthy; existing data is migrated; a backup taken with `docker exec`
     restores.
 
-## Phase 5: History and logs
+## Phase 5: History and logs (done)
 
 ### Client log
 

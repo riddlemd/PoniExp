@@ -27,11 +27,13 @@ public sealed class Daemon : BackgroundService, IIncomingHandler
     private readonly EndpointSessions _sessions;
     private readonly IOptionsMonitor<DaemonOptions> _options;
     private readonly IOptionsMonitor<MessagingOptions> _messaging;
+    private readonly IOptionsMonitor<RetentionOptions> _retention;
+    private DateTimeOffset _lastRetention = DateTimeOffset.MinValue;
     private readonly TimeProvider _time;
     private readonly ILogger<Daemon> _logger;
 
     public Daemon(DaemonContext context, RelayClient relay, EndpointSessions sessions, IOptionsMonitor<DaemonOptions> options,
-        IOptionsMonitor<MessagingOptions> messaging, TimeProvider time, ILogger<Daemon> logger, IHostApplicationLifetime lifetime)
+        IOptionsMonitor<MessagingOptions> messaging, IOptionsMonitor<RetentionOptions> retention, TimeProvider time, ILogger<Daemon> logger, IHostApplicationLifetime lifetime)
     {
         // End the endpoints' streams first, so the server isn't left waiting for them to drain.
         lifetime.ApplicationStopping.Register(() =>
@@ -47,6 +49,7 @@ public sealed class Daemon : BackgroundService, IIncomingHandler
         _sessions = sessions;
         _options = options;
         _messaging = messaging;
+        _retention = retention;
         _time = time;
         _logger = logger;
         relay.IncomingHandler = this;
@@ -133,7 +136,28 @@ public sealed class Daemon : BackgroundService, IIncomingHandler
         var skew = _messaging.CurrentValue.ClockSkew;
         Store.Transact(Now, tx => tx.ExpireIncoming(skew));
         await _relay.FlushOutboxAsync(cancellationToken);
+        var retention = _retention.CurrentValue;
+        if (Now - _lastRetention >= retention.Interval)
+        {
+            _lastRetention = Now;
+            ApplyRetention(retention);
+        }
     }
+
+    internal RetentionResult ApplyRetention(RetentionOptions? retention = null)
+    {
+        var result = Store.ApplyRetention(retention ?? _retention.CurrentValue, Now);
+        if (result is not { EnvelopesDropped: 0, MessagesDeleted: 0, DiagnosticsDeleted: 0, OperationsDeleted: 0 })
+        {
+            _logger.LogInformation("Retention: dropped {Envelopes} envelopes, deleted {Messages} messages, {Diagnostics} diagnostics, {Operations} operations",
+                result.EnvelopesDropped, result.MessagesDeleted, result.DiagnosticsDeleted, result.OperationsDeleted);
+        }
+
+        return result;
+    }
+
+    /// <summary>How long an operation record is kept: no retry can be accepted after that.</summary>
+    private TimeSpan OperationWindow => _messaging.CurrentValue.MaxExpiry + _messaging.CurrentValue.ClockSkew;
 
     // ---- incoming ----
 
@@ -147,8 +171,18 @@ public sealed class Daemon : BackgroundService, IIncomingHandler
                 var endpoint = content.ToEndpoint == Address.DaemonEndpoint ? null : tx.GetEndpoint(content.ToEndpoint);
                 if (endpoint is { RetiredOn: null })
                 {
+                    if (content.ReplyTo is null && tx.GetOperation(envelope.FromMachine, content.FromEndpoint, content.OperationId) is { } operation)
+                    {
+                        AnswerRetry(tx, envelope, content, operation);
+                        break;
+                    }
+
                     tx.AddEvent(envelope.FromMachine, envelope.Id, MessageDirection.In, content.ToEndpoint, MessageEvents.Stored);
                     ComposeReceipt(tx, envelope, content, new ReceiptBody(ReceiptKind.Received));
+                    if (content.ReplyTo is null)
+                    {
+                        tx.StartOperation(envelope.FromMachine, content.FromEndpoint, content.OperationId, content.ToEndpoint, envelope.Id, Now + OperationWindow);
+                    }
                 }
                 else
                 {
@@ -196,6 +230,52 @@ public sealed class Daemon : BackgroundService, IIncomingHandler
                 tx.Diagnose("info", "delivery", $"ignored a {WireProtocol.NameOf(content.Type)} message (not handled yet)", envelope.FromMachine, envelope.Id);
                 break;
         }
+    }
+
+    /// <summary>
+    /// A retry of an operation this machine already has: the agent never sees it. The daemon takes it on
+    /// (an <c>acknowledged</c> receipt) and answers for the agent: "still running" while the first is, or
+    /// a copy of the final reply once it's finished.
+    /// </summary>
+    private void AnswerRetry(StoreTransaction tx, Envelope envelope, MessageContent content, OperationRecord operation)
+    {
+        var detail = $"retry of operation {operation.OperationId} (first message {operation.FirstMessageId}); answered by the daemon";
+        tx.AddEvent(envelope.FromMachine, envelope.Id, MessageDirection.In, content.ToEndpoint, MessageEvents.Acknowledged, detail);
+        ComposeReceipt(tx, envelope, content, new ReceiptBody(ReceiptKind.Acknowledged));
+        if (_relay.Machine(envelope.FromMachine) is not { } sender)
+        {
+            return;
+        }
+
+        OutgoingMessage answer;
+        if (operation is { State: "done", ResultMessageId: { } result } && tx.GetEnvelope(MachineId, result) is { } final)
+        {
+            var copy = _relay.Open(final);
+            answer = new OutgoingMessage(copy.Body)
+            {
+                ContentType = copy.ContentType,
+                Metadata = copy.Metadata,
+                Status = copy.Status,
+                Subject = copy.Subject,
+            };
+        }
+        else if (operation.State == "done")
+        {
+            tx.Diagnose("warning", "delivery", $"a retry of operation {operation.OperationId}, whose final reply is no longer stored",
+                envelope.FromMachine, envelope.Id);
+            answer = new OutgoingMessage("This operation has finished, but its result is no longer stored.") { Status = ReplyStatus.Failed };
+        }
+        else
+        {
+            answer = new OutgoingMessage("still running") { Status = ReplyStatus.Progress };
+        }
+
+        tx.Diagnose("info", "delivery", detail, envelope.FromMachine, envelope.Id);
+        _relay.Compose(tx, sender, content.FromEndpoint, RelayClient.ReplyTo(envelope.Id, content, answer with
+        {
+            FromEndpoint = content.ToEndpoint,
+            OperationId = content.OperationId,
+        }));
     }
 
     /// <summary>After the transaction: hand the message to its endpoint if it's online; tell a sender endpoint about its receipts.</summary>
@@ -281,6 +361,10 @@ public sealed class Daemon : BackgroundService, IIncomingHandler
         var envelope = Store.Transact(Now, tx =>
         {
             var sent = _relay.Compose(tx, target, content.FromEndpoint, RelayClient.ReplyTo(id, content, reply with { FromEndpoint = endpoint }));
+            if (content.ReplyTo is null && reply.Status is ReplyStatus.Done or ReplyStatus.Failed)
+            {
+                tx.FinishOperation(stored.FromMachine, content.FromEndpoint, content.OperationId, sent.Id, Now + OperationWindow);
+            }
             if (!MessageEvents.IsFinal(tx.GetState(stored.FromMachine, stored.Id, MessageDirection.In)))
             {
                 Acknowledge(tx, stored);
@@ -295,6 +379,12 @@ public sealed class Daemon : BackgroundService, IIncomingHandler
     internal async Task<IReadOnlyList<SentMessage>> SendAsync(IReadOnlyCollection<string> to, OutgoingMessage message, CancellationToken cancellationToken)
     {
         var from = message.FromEndpoint ?? Address.DefaultEndpoint;
+        if (message is { OperationId: { } operation, ConversationId: null }
+            && Store.GetLog(MachineId, new LogQuery(Operation: operation, Endpoint: from, Limit: 1)).FirstOrDefault() is { } earlier)
+        {
+            message = message with { ConversationId = earlier.ConversationId }; // a retry stays in the first attempt's conversation
+        }
+
         Store.Transact(Now, tx =>
         {
             if (tx.GetEndpoint(from) is null)

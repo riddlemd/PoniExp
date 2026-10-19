@@ -16,6 +16,28 @@ namespace PoniExp.Daemon;
 /// </summary>
 public static class LocalApiEndpoints
 {
+    private static LocalLogEntry ToLog(Daemon d, LogEntry e, bool bodies)
+    {
+        var m = e.Message;
+        var incoming = m.ToMachine == d.MachineId && m.FromMachine != d.MachineId;
+        MessageContent? content = null;
+        if (bodies && m.Envelope is { } envelope)
+        {
+            try
+            {
+                content = d.Relay.Open(envelope);
+            }
+            catch (Exception ex) when (ex is System.Security.Cryptography.CryptographicException or InvalidOperationException)
+            {
+                // Shown without its body; the metadata stands.
+            }
+        }
+
+        return new LocalLogEntry(m.Id, $"{d.NameOf(m.FromMachine)}/{m.FromEndpoint}", $"{d.NameOf(m.ToMachine)}/{m.ToEndpoint}", incoming ? "in" : "out",
+            m.Type, e.ConversationId, e.ReplyTo, e.OperationId, e.Status, e.Subject, e.ContentType, e.Sequence, m.CreatedOn, m.StoredOn, m.ExpiresOn,
+            m.State, m.StateDetail, m.Envelope is null, content?.Body, content?.Metadata);
+    }
+
     public static void MapLocalApi(this WebApplication app)
     {
         app.MapGet("/health", () => Results.Ok(new { ok = true }));
@@ -99,6 +121,22 @@ public static class LocalApiEndpoints
             RequireEndpoint(endpoint);
             return Task.FromResult(Results.Ok(d.Store.GetConversation(d.MachineId, endpoint, id)
                 .Select(m => d.ToLocal(m, m.ToMachine == d.MachineId && m.ToEndpoint == endpoint ? MessageDirection.In : MessageDirection.Out)).ToList()));
+        }));
+
+        app.MapGet("/endpoints/{endpoint}/conversations", (Daemon d, string endpoint) => Handle(() =>
+        {
+            RequireEndpoint(endpoint);
+            return Task.FromResult(Results.Ok(d.Store.GetConversations(endpoint).Select(c => new LocalConversation(c.Id,
+                $"{d.NameOf(c.PeerMachine)}/{c.PeerEndpoint}", c.Subject, c.StartedBy, c.StartedOn, c.LastActivityOn, c.State)).ToList()));
+        }));
+
+        app.MapGet("/log", (Daemon d, Guid? conversation, Guid? operation, string? peer, string? endpoint, DateTimeOffset? since, int? limit,
+            bool? automatic, bool? bodies) => Handle(() =>
+        {
+            var peerId = peer is null ? null
+                : d.Relay.Machines.FirstOrDefault(m => m.Name == peer || m.Id == peer)?.Id ?? throw new KeyNotFoundException($"no machine '{peer}'");
+            var entries = d.Store.GetLog(d.MachineId, new LogQuery(conversation, operation, peerId, endpoint, since, automatic ?? false, limit ?? 1000));
+            return Task.FromResult(Results.Ok(entries.Select(e => ToLog(d, e, bodies ?? false)).ToList()));
         }));
 
         app.MapGet("/endpoints", (Daemon d) => Results.Ok(Endpoints(d)));

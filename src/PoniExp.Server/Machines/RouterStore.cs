@@ -13,7 +13,7 @@ namespace PoniExp.Server.Machines;
 /// </summary>
 public sealed class RouterStore
 {
-    private const int SchemaVersion = 1;
+    private const int SchemaVersion = 2;
 
     private static readonly JsonSerializerOptions Json = WireProtocol.Configure(new JsonSerializerOptions(JsonSerializerDefaults.Web));
 
@@ -51,6 +51,22 @@ public sealed class RouterStore
                 expires_on TEXT NOT NULL,
                 entry      TEXT NOT NULL
             ) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS router_state (
+                name  TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            ) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS traffic_log (
+                occurred_on  TEXT NOT NULL,
+                event        TEXT NOT NULL,
+                from_machine TEXT,
+                to_machine   TEXT,
+                message_id   TEXT,
+                size         INTEGER,
+                sequence     INTEGER,
+                address      TEXT,
+                detail       TEXT
+            );
+            CREATE INDEX IF NOT EXISTS traffic_log_occurred_on ON traffic_log (occurred_on);
             """);
         Execute(connection, null, $"PRAGMA user_version = {SchemaVersion};");
         ImportJson(dataDirectory);
@@ -89,6 +105,81 @@ public sealed class RouterStore
             command.Parameters.AddWithValue("$expires", Signatures.Stamp(q.ExpiresOn));
             command.Parameters.AddWithValue("$entry", JsonSerializer.Serialize(q, Json));
         });
+
+    public string? GetState(string name)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT value FROM router_state WHERE name = $name;";
+        command.Parameters.AddWithValue("$name", name);
+        return command.ExecuteScalar() as string;
+    }
+
+    public void SetState(string name, string value)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "INSERT INTO router_state (name, value) VALUES ($name, $value) ON CONFLICT (name) DO UPDATE SET value = $value;";
+        command.Parameters.AddWithValue("$name", name);
+        command.Parameters.AddWithValue("$value", value);
+        command.ExecuteNonQuery();
+    }
+
+    public void AppendTraffic(TrafficEntry e)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO traffic_log (occurred_on, event, from_machine, to_machine, message_id, size, sequence, address, detail)
+            VALUES ($on, $event, $from, $to, $id, $size, $sequence, $address, $detail);
+            """;
+        command.Parameters.AddWithValue("$on", Signatures.Stamp(e.OccurredOn));
+        command.Parameters.AddWithValue("$event", e.Event);
+        command.Parameters.AddWithValue("$from", (object?)e.FromMachine ?? DBNull.Value);
+        command.Parameters.AddWithValue("$to", (object?)e.ToMachine ?? DBNull.Value);
+        command.Parameters.AddWithValue("$id", e.MessageId is { } id ? id.ToString("D") : DBNull.Value);
+        command.Parameters.AddWithValue("$size", (object?)e.Size ?? DBNull.Value);
+        command.Parameters.AddWithValue("$sequence", (object?)e.Sequence ?? DBNull.Value);
+        command.Parameters.AddWithValue("$address", (object?)e.Address ?? DBNull.Value);
+        command.Parameters.AddWithValue("$detail", (object?)e.Detail ?? DBNull.Value);
+        command.ExecuteNonQuery();
+    }
+
+    /// <summary>The most recent <paramref name="limit"/> entries since <paramref name="since"/> (involving <paramref name="machine"/> if given), oldest first.</summary>
+    public IReadOnlyList<TrafficEntry> ReadTraffic(DateTimeOffset? since, string? machine, int limit)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT occurred_on, event, from_machine, to_machine, message_id, size, sequence, address, detail FROM traffic_log
+            WHERE ($since IS NULL OR occurred_on >= $since) AND ($machine IS NULL OR from_machine = $machine OR to_machine = $machine)
+            ORDER BY rowid DESC LIMIT $limit;
+            """;
+        command.Parameters.AddWithValue("$since", since is { } s ? Signatures.Stamp(s) : DBNull.Value);
+        command.Parameters.AddWithValue("$machine", (object?)machine ?? DBNull.Value);
+        command.Parameters.AddWithValue("$limit", limit);
+        using var r = command.ExecuteReader();
+        var rows = new List<TrafficEntry>();
+        while (r.Read())
+        {
+            rows.Add(new TrafficEntry(DateTimeOffset.Parse(r.GetString(0), System.Globalization.CultureInfo.InvariantCulture), r.GetString(1),
+                r.IsDBNull(2) ? null : r.GetString(2), r.IsDBNull(3) ? null : r.GetString(3), r.IsDBNull(4) ? null : Guid.Parse(r.GetString(4)),
+                r.IsDBNull(5) ? null : r.GetInt32(5), r.IsDBNull(6) ? null : r.GetInt64(6), r.IsDBNull(7) ? null : r.GetString(7),
+                r.IsDBNull(8) ? null : r.GetString(8)));
+        }
+
+        rows.Reverse();
+        return rows;
+    }
+
+    public int PruneTraffic(DateTimeOffset before)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM traffic_log WHERE occurred_on < $before;";
+        command.Parameters.AddWithValue("$before", Signatures.Stamp(before));
+        return command.ExecuteNonQuery();
+    }
 
     /// <summary>True if the database can be read (for <c>/health</c>).</summary>
     public bool IsHealthy()

@@ -19,10 +19,12 @@ public sealed class MessageQueue
     private readonly RouterStore _store;
     private readonly IOptionsMonitor<RouterOptions> _options;
     private readonly TimeProvider _time;
+    private readonly TrafficLog _traffic;
     private ImmutableDictionary<Guid, QueuedEnvelope> _queue;
 
-    public MessageQueue(RouterStore store, IOptionsMonitor<RouterOptions> options, TimeProvider time)
+    public MessageQueue(RouterStore store, IOptionsMonitor<RouterOptions> options, TimeProvider time, TrafficLog traffic)
     {
+        _traffic = traffic;
         _store = store;
         _options = options;
         _time = time;
@@ -32,11 +34,7 @@ public sealed class MessageQueue
     }
 
     /// <summary>Drops what the router no longer delivers (past its expiry).</summary>
-    public Task PruneAsync()
-    {
-        var now = _time.GetUtcNow();
-        return UpdateAsync(queue => queue.RemoveRange(queue.Values.Where(q => q.ExpiresOn <= now).Select(q => q.Envelope.Id)));
-    }
+    public Task PruneAsync() => UpdateAsync(Prune);
 
     public int Count => _queue.Count;
 
@@ -70,25 +68,70 @@ public sealed class MessageQueue
         AddAsync(envelope, deliverUntil, _time.GetUtcNow());
 
     /// <summary>Only the recipient can confirm (and so remove) an envelope.</summary>
-    public Task ConfirmAsync(string machineId, Guid id) =>
-        UpdateAsync(queue => queue.TryGetValue(id, out var q) && q.Envelope.ToMachine == machineId ? queue.Remove(id) : queue);
+    public async Task ConfirmAsync(string machineId, Guid id)
+    {
+        Envelope? confirmed = null;
+        await UpdateAsync(queue =>
+        {
+            if (queue.TryGetValue(id, out var q) && q.Envelope.ToMachine == machineId)
+            {
+                confirmed = q.Envelope;
+                return queue.Remove(id);
+            }
 
-    public Task DropForAsync(string machineId) =>
-        UpdateAsync(queue => queue.RemoveRange(queue.Values
-            .Where(q => q.Envelope.ToMachine == machineId || q.Envelope.FromMachine == machineId).Select(q => q.Envelope.Id)));
+            return queue;
+        });
+        if (confirmed is not null)
+        {
+            _traffic.Confirmed(confirmed);
+        }
+    }
+
+    public async Task DropForAsync(string machineId)
+    {
+        List<Envelope> dropped = [];
+        await UpdateAsync(queue =>
+        {
+            dropped = [.. queue.Values.Where(q => q.Envelope.ToMachine == machineId || q.Envelope.FromMachine == machineId).Select(q => q.Envelope)];
+            return queue.RemoveRange(dropped.Select(e => e.Id));
+        });
+        foreach (var e in dropped)
+        {
+            _traffic.Dropped(e, "its sender or recipient was removed");
+        }
+    }
+
+    /// <summary>Removes what has expired (inside an update), logging each.</summary>
+    private ImmutableDictionary<Guid, QueuedEnvelope> Prune(ImmutableDictionary<Guid, QueuedEnvelope> queue)
+    {
+        var now = _time.GetUtcNow();
+        var expired = queue.Values.Where(q => q.ExpiresOn <= now).ToList();
+        if (expired.Count == 0)
+        {
+            return queue;
+        }
+
+        foreach (var q in expired)
+        {
+            _traffic.Expired(q.Envelope);
+        }
+
+        return queue.RemoveRange(expired.Select(q => q.Envelope.Id));
+    }
 
     private async Task<Delivery?> AddAsync(Envelope envelope, DateTimeOffset expiresOn, DateTimeOffset now)
     {
         Delivery? added = null;
         await UpdateAsync(queue =>
         {
-            var pruned = queue.RemoveRange(queue.Values.Where(q => q.ExpiresOn <= now).Select(q => q.Envelope.Id));
+            var pruned = Prune(queue);
             if (pruned.ContainsKey(envelope.Id))
             {
                 return pruned;
             }
 
             added = new Delivery(envelope, now);
+            _traffic.Relayed(envelope);
             return pruned.Add(envelope.Id, new QueuedEnvelope(envelope, now, expiresOn));
         });
         return added;

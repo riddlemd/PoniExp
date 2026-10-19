@@ -17,7 +17,7 @@ namespace PoniExp.Client;
 /// </summary>
 public sealed class ClientStore
 {
-    private const int SchemaVersion = 2;
+    private const int SchemaVersion = 3;
 
     private const string Schema = """
         PRAGMA journal_mode = WAL;
@@ -102,6 +102,31 @@ public sealed class ClientStore
             name  TEXT PRIMARY KEY,
             value INTEGER NOT NULL
         ) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS conversations (
+            id               TEXT NOT NULL,
+            local_endpoint   TEXT NOT NULL,
+            peer_machine     TEXT NOT NULL,
+            peer_endpoint    TEXT NOT NULL,
+            subject          TEXT,
+            started_by       TEXT NOT NULL,
+            started_on       TEXT NOT NULL,
+            last_activity_on TEXT NOT NULL,
+            state            TEXT NOT NULL,
+            PRIMARY KEY (id, local_endpoint)
+        ) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS operations (
+            from_machine      TEXT NOT NULL,
+            from_endpoint     TEXT NOT NULL,
+            operation_id      TEXT NOT NULL,
+            to_endpoint       TEXT NOT NULL,
+            first_message_id  TEXT NOT NULL,
+            state             TEXT NOT NULL,
+            result_message_id TEXT,
+            keep_until        TEXT NOT NULL,
+            PRIMARY KEY (from_machine, from_endpoint, operation_id)
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS messages_operation ON messages (operation_id);
+        CREATE INDEX IF NOT EXISTS messages_stored_on ON messages (stored_on);
         CREATE TABLE IF NOT EXISTS diagnostics (
             occurred_on  TEXT NOT NULL,
             level        TEXT NOT NULL,
@@ -262,6 +287,125 @@ public sealed class ClientStore
             """, r => new Diagnostic(Parse(r.GetString(0)), r.GetString(1), r.GetString(2), r.GetString(3),
             r.IsDBNull(4) ? null : r.GetString(4), r.IsDBNull(5) ? null : Guid.Parse(r.GetString(5))), ("$limit", limit));
 
+    /// <summary>The conversations local endpoints have had, most recent first.</summary>
+    public IReadOnlyList<ConversationRecord> GetConversations(string? endpoint = null, int limit = 100) =>
+        Query("""
+            SELECT id, local_endpoint, peer_machine, peer_endpoint, subject, started_by, started_on, last_activity_on, state FROM conversations
+            WHERE $endpoint IS NULL OR local_endpoint = $endpoint ORDER BY last_activity_on DESC LIMIT $limit;
+            """, r => new ConversationRecord(Guid.Parse(r.GetString(0)), r.GetString(1), r.GetString(2), r.GetString(3),
+            r.IsDBNull(4) ? null : r.GetString(4), r.GetString(5), Parse(r.GetString(6)), Parse(r.GetString(7)), r.GetString(8)),
+            ("$endpoint", endpoint), ("$limit", limit));
+
+    public IReadOnlyList<OperationRecord> GetOperations() =>
+        Query($"SELECT {OperationColumns} FROM operations ORDER BY keep_until;", ReadOperation);
+
+    /// <summary>
+    /// The log: the most recent <see cref="LogQuery.Limit"/> stored messages matching every filter, returned
+    /// oldest first, each with its state (incoming if sent to this machine, else outgoing). Automatic
+    /// messages (receipts, announcements) only when <see cref="LogQuery.Automatic"/>.
+    /// </summary>
+    public IReadOnlyList<LogEntry> GetLog(string me, LogQuery q)
+    {
+        var rows = Query($"""
+            SELECT {MessageColumns}, m.conversation_id, m.reply_to, m.operation_id, m.status, m.subject, m.content_type, m.sequence FROM messages m
+            LEFT JOIN message_state s ON s.from_machine = m.from_machine AND s.message_id = m.id
+                AND s.direction = CASE WHEN m.to_machine = $me AND m.from_machine <> $me THEN 'in' ELSE 'out' END
+            WHERE ($automatic = 1 OR m.type = 'message')
+                AND ($conversation IS NULL OR m.conversation_id = $conversation)
+                AND ($operation IS NULL OR m.operation_id = $operation)
+                AND ($peer IS NULL OR m.from_machine = $peer OR m.to_machine = $peer)
+                AND ($endpoint IS NULL OR (m.to_machine = $me AND m.to_endpoint = $endpoint) OR (m.from_machine = $me AND m.from_endpoint = $endpoint))
+                AND ($since IS NULL OR m.stored_on >= $since)
+            ORDER BY m.stored_on DESC, m.sequence DESC LIMIT $limit;
+            """, r => new LogEntry(ReadMessage(r), Guid.Parse(r.GetString(14)), r.IsDBNull(15) ? null : Guid.Parse(r.GetString(15)),
+            Guid.Parse(r.GetString(16)), r.IsDBNull(17) ? null : r.GetString(17), r.IsDBNull(18) ? null : r.GetString(18), r.GetString(19),
+            r.GetInt64(20)), ("$me", me), ("$automatic", q.Automatic ? 1 : 0), ("$conversation", q.Conversation is { } c ? Id(c) : null),
+            ("$operation", q.Operation is { } o ? Id(o) : null), ("$peer", q.PeerMachine), ("$endpoint", q.Endpoint),
+            ("$since", q.Since is { } since ? Stamp(since) : null), ("$limit", q.Limit));
+        rows.Reverse();
+        return rows;
+    }
+
+    /// <summary>
+    /// Applies the retention rules (<see cref="RetentionOptions"/>): drops old envelopes (keeping the
+    /// metadata), deletes old metadata with its events, old conversations, diagnostics and expired operation
+    /// records, then drops the oldest envelopes until the database is under its size cap. A live message
+    /// (in the outbox, or stored and not yet acknowledged, rejected or expired) is never touched.
+    /// </summary>
+    public RetentionResult ApplyRetention(RetentionOptions retention, DateTimeOffset now)
+    {
+        using var connection = Open();
+        int envelopes, messages, diagnostics, operations;
+        using (var transaction = connection.BeginTransaction(deferred: false))
+        {
+            envelopes = Execute(connection, transaction, $"""
+                UPDATE messages SET envelope = NULL WHERE envelope IS NOT NULL AND stored_on < $cutoff AND NOT {Live};
+                """, ("$cutoff", Stamp(now - retention.Envelopes)));
+            var cutoff = ("$cutoff", (object?)Stamp(now - retention.Metadata));
+            Execute(connection, transaction, $"""
+                CREATE TEMP TABLE IF NOT EXISTS retired (from_machine TEXT NOT NULL, id TEXT NOT NULL);
+                DELETE FROM retired;
+                INSERT INTO retired SELECT from_machine, id FROM messages WHERE stored_on < $cutoff AND NOT {Live};
+                DELETE FROM message_events WHERE (from_machine, message_id) IN (SELECT from_machine, id FROM retired);
+                DELETE FROM message_state WHERE (from_machine, message_id) IN (SELECT from_machine, id FROM retired);
+                """, cutoff);
+            messages = Execute(connection, transaction, "DELETE FROM messages WHERE (from_machine, id) IN (SELECT from_machine, id FROM retired);");
+            Execute(connection, transaction, "DELETE FROM retired; DELETE FROM conversations WHERE last_activity_on < $cutoff;", cutoff);
+            diagnostics = Execute(connection, transaction, "DELETE FROM diagnostics WHERE occurred_on < $cutoff;",
+                ("$cutoff", Stamp(now - retention.Diagnostics)));
+            operations = Execute(connection, transaction, "DELETE FROM operations WHERE keep_until < $now;", ("$now", Stamp(now)));
+            transaction.Commit();
+        }
+
+        // Over the cap: drop the oldest envelopes whose sizes add up to the excess (live ones stay whatever the size).
+        for (var excess = UsedBytes(connection) - retention.MaxDatabaseBytes; excess > 0; excess = UsedBytes(connection) - retention.MaxDatabaseBytes)
+        {
+            var oldest = Query(connection, null, $"""
+                SELECT from_machine, id, length(envelope) FROM messages WHERE envelope IS NOT NULL AND NOT {Live} ORDER BY stored_on LIMIT 1000;
+                """, r => (From: r.GetString(0), Id: r.GetString(1), Bytes: r.GetInt64(2)));
+            if (oldest.Count == 0)
+            {
+                break;
+            }
+
+            long freed = 0;
+            var batch = oldest.TakeWhile(m => (freed += m.Bytes) - m.Bytes < excess).ToList();
+            using var transaction = connection.BeginTransaction(deferred: false);
+            foreach (var m in batch)
+            {
+                envelopes += Execute(connection, transaction, "UPDATE messages SET envelope = NULL WHERE from_machine = $from AND id = $id;",
+                    ("$from", m.From), ("$id", m.Id));
+            }
+
+            transaction.Commit();
+        }
+
+        return new RetentionResult(envelopes, messages, diagnostics, operations);
+    }
+
+    /// <summary>Bytes the database's pages in use take (free pages don't count): what the size cap measures.</summary>
+    public long UsedBytes()
+    {
+        using var connection = Open();
+        return UsedBytes(connection);
+    }
+
+    private static long UsedBytes(SqliteConnection connection) =>
+        ((long)Scalar(connection, null, "PRAGMA page_count;")! - (long)Scalar(connection, null, "PRAGMA freelist_count;")!)
+        * (long)Scalar(connection, null, "PRAGMA page_size;")!;
+
+    /// <summary>A message is live while it's in the outbox or waiting for an agent.</summary>
+    private const string Live = """
+        EXISTS (SELECT 1 FROM message_state ls WHERE ls.from_machine = messages.from_machine AND ls.message_id = messages.id
+            AND ls.event IN ('queued', 'stored', 'fetched'))
+        """;
+
+    internal const string OperationColumns = "from_machine, from_endpoint, operation_id, to_endpoint, first_message_id, state, result_message_id, keep_until";
+
+    internal static OperationRecord ReadOperation(SqliteDataReader r) =>
+        new(r.GetString(0), r.GetString(1), Guid.Parse(r.GetString(2)), r.GetString(3), Guid.Parse(r.GetString(4)), r.GetString(5),
+            r.IsDBNull(6) ? null : Guid.Parse(r.GetString(6)), Parse(r.GetString(7)));
+
     private static StoredMessage ReadMessage(SqliteDataReader r) =>
         new(r.GetString(0), Guid.Parse(r.GetString(1)),
             r.IsDBNull(2) ? null : JsonSerializer.Deserialize<Envelope>(r.GetString(2), WireProtocol.Json),
@@ -365,6 +509,7 @@ public sealed class StoreTransaction
         Execute("UPDATE sequences SET next_outgoing = next_outgoing + 1 WHERE peer_machine = $peer;", ("$peer", toMachine));
         var envelope = seal(sequence);
         Insert(envelope, content, relayedOn: null, expiresOn: envelope.ExpiresOn);
+        Converse(content, content.FromEndpoint, envelope.ToMachine, content.ToEndpoint, startedBy: "local");
         AddEvent(envelope.FromMachine, envelope.Id, MessageDirection.Out, content.FromEndpoint, MessageEvents.Queued);
         return envelope;
     }
@@ -402,6 +547,11 @@ public sealed class StoreTransaction
 
         Execute("UPDATE sequences SET last_incoming = max(last_incoming, $seq) WHERE peer_machine = $peer;",
             ("$seq", envelope.Sequence), ("$peer", envelope.FromMachine));
+        if (envelope.FromMachine != me)
+        {
+            Converse(content, content.ToEndpoint, envelope.FromMachine, content.FromEndpoint, startedBy: "peer");
+        }
+
         return true;
     }
 
@@ -455,6 +605,57 @@ public sealed class StoreTransaction
 
         return expired.Count;
     }
+
+    /// <summary>
+    /// Records a message in its conversation, as one local endpoint sees it: the first message creates it, a
+    /// <c>done</c> or <c>failed</c> reply finishes it, and anything after reopens it. Automatic messages don't count.
+    /// </summary>
+    private void Converse(MessageContent c, string localEndpoint, string peerMachine, string peerEndpoint, string startedBy)
+    {
+        if (c.Type != MessageType.Message)
+        {
+            return;
+        }
+
+        var state = c.ReplyTo is not null && c.Status is ReplyStatus.Done or ReplyStatus.Failed ? "finished" : "open";
+        Execute("""
+            INSERT INTO conversations (id, local_endpoint, peer_machine, peer_endpoint, subject, started_by, started_on, last_activity_on, state)
+            VALUES ($id, $local, $peerMachine, $peerEndpoint, $subject, $startedBy, $now, $now, $state)
+            ON CONFLICT (id, local_endpoint) DO UPDATE SET subject = coalesce(subject, $subject), last_activity_on = $now, state = $state;
+            """, ("$id", ClientStore.Id(c.ConversationId)), ("$local", localEndpoint), ("$peerMachine", peerMachine),
+            ("$peerEndpoint", peerEndpoint), ("$subject", c.Subject), ("$startedBy", startedBy), ("$now", ClientStore.Stamp(Now)), ("$state", state));
+    }
+
+    /// <summary>The record of an operation a sender endpoint asked of this machine, unless it has expired.</summary>
+    public OperationRecord? GetOperation(string fromMachine, string fromEndpoint, Guid operationId) =>
+        ClientStore.Query(_connection, _transaction, $"""
+            SELECT {ClientStore.OperationColumns} FROM operations
+            WHERE from_machine = $from AND from_endpoint = $endpoint AND operation_id = $op AND keep_until >= $now;
+            """, ClientStore.ReadOperation, ("$from", fromMachine), ("$endpoint", fromEndpoint), ("$op", ClientStore.Id(operationId)),
+            ("$now", ClientStore.Stamp(Now))).FirstOrDefault();
+
+    /// <summary>Starts an operation (or starts it over, past an expired record): <c>running</c> until a done or failed reply.</summary>
+    public void StartOperation(string fromMachine, string fromEndpoint, Guid operationId, string toEndpoint, Guid firstMessageId, DateTimeOffset keepUntil) =>
+        Execute("""
+            INSERT INTO operations (from_machine, from_endpoint, operation_id, to_endpoint, first_message_id, state, keep_until)
+            VALUES ($from, $endpoint, $op, $to, $first, 'running', $keep)
+            ON CONFLICT (from_machine, from_endpoint, operation_id) DO UPDATE SET to_endpoint = $to, first_message_id = $first,
+                state = 'running', result_message_id = NULL, keep_until = $keep;
+            """, ("$from", fromMachine), ("$endpoint", fromEndpoint), ("$op", ClientStore.Id(operationId)), ("$to", toEndpoint),
+            ("$first", ClientStore.Id(firstMessageId)), ("$keep", ClientStore.Stamp(keepUntil)));
+
+    /// <summary>Records an operation's final reply (retries get a copy of it from now on) and keeps the record a full window longer.</summary>
+    public bool FinishOperation(string fromMachine, string fromEndpoint, Guid operationId, Guid resultMessageId, DateTimeOffset keepUntil) =>
+        Execute("""
+            UPDATE operations SET state = 'done', result_message_id = $result, keep_until = max(keep_until, $keep)
+            WHERE from_machine = $from AND from_endpoint = $endpoint AND operation_id = $op AND state = 'running';
+            """, ("$from", fromMachine), ("$endpoint", fromEndpoint), ("$op", ClientStore.Id(operationId)), ("$result", ClientStore.Id(resultMessageId)),
+            ("$keep", ClientStore.Stamp(keepUntil))) == 1;
+
+    /// <summary>A stored message's envelope (null if retention dropped it, or there's no such message).</summary>
+    public Envelope? GetEnvelope(string fromMachine, Guid id) =>
+        (string?)Scalar("SELECT envelope FROM messages WHERE from_machine = $from AND id = $id;", ("$from", fromMachine), ("$id", ClientStore.Id(id)))
+            is { } json ? JsonSerializer.Deserialize<Envelope>(json, WireProtocol.Json) : null;
 
     public void Count(string peer, string metric, long amount = 1) =>
         Execute("""
@@ -634,5 +835,23 @@ public sealed record LocalEndpointRecord(string Name, EndpointState State, DateT
 
 /// <summary>An endpoint another machine has announced.</summary>
 public sealed record PeerEndpoint(string Machine, string Endpoint, EndpointState State, long Counter, DateTimeOffset ChangedOn);
+
+/// <summary>A conversation as one local endpoint sees it. <see cref="State"/> is open or finished.</summary>
+public sealed record ConversationRecord(Guid Id, string LocalEndpoint, string PeerMachine, string PeerEndpoint, string? Subject, string StartedBy,
+    DateTimeOffset StartedOn, DateTimeOffset LastActivityOn, string State);
+
+/// <summary>An operation a sender endpoint asked of this machine. <see cref="State"/> is running or done.</summary>
+public sealed record OperationRecord(string FromMachine, string FromEndpoint, Guid OperationId, string ToEndpoint, Guid FirstMessageId, string State,
+    Guid? ResultMessageId, DateTimeOffset KeepUntil);
+
+/// <summary>Filters for <see cref="ClientStore.GetLog"/>; null means any.</summary>
+public sealed record LogQuery(Guid? Conversation = null, Guid? Operation = null, string? PeerMachine = null, string? Endpoint = null,
+    DateTimeOffset? Since = null, bool Automatic = false, int Limit = 1000);
+
+/// <summary>A log row: the message with the metadata this machine keeps in the clear (the body is only in the envelope).</summary>
+public sealed record LogEntry(StoredMessage Message, Guid ConversationId, Guid? ReplyTo, Guid OperationId, string? Status, string? Subject,
+    string ContentType, long Sequence);
+
+public sealed record RetentionResult(int EnvelopesDropped, int MessagesDeleted, int DiagnosticsDeleted, int OperationsDeleted);
 
 public sealed record Diagnostic(DateTimeOffset OccurredOn, string Level, string Category, string Detail, string? Machine, Guid? MessageId);

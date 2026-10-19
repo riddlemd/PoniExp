@@ -17,6 +17,7 @@ public sealed class RelayHub(
     MessageQueue queue,
     PresenceTracker presence,
     ConnectionGate gate,
+    TrafficLog traffic,
     TimeProvider time,
     IOptionsSnapshot<RouterOptions> options,
     ILogger<RelayHub> logger) : Hub
@@ -33,6 +34,7 @@ public sealed class RelayHub(
         if (gate.Open(Context, Context.GetHttpContext()?.Connection.RemoteIpAddress) is { } refused)
         {
             logger.LogWarning("Refused a connection: {Reason}", refused);
+            traffic.Refused($"connection: {refused}", Address);
             Context.Abort();
             return;
         }
@@ -75,7 +77,7 @@ public sealed class RelayHub(
         Context.Items.Remove(ChallengeItem); // one answer per challenge
         if (!PublicKeys.Verify(publicKey, Signatures.AuthPayload(challenge, publicKey), signature))
         {
-            throw new HubException("The challenge signature doesn't verify.");
+            throw Refuse("The challenge signature doesn't verify.");
         }
 
         var id = KeyFingerprint.MachineIdOf(publicKey);
@@ -84,7 +86,7 @@ public sealed class RelayHub(
         var record = registry.Get(id);
         if (record is { Status: MembershipStatus.Approved or MembershipStatus.Pending } && gate.Admit(Context.ConnectionId, id) is { } refused)
         {
-            throw new HubException($"Refused: {refused}.");
+            throw Refuse($"Refused: {refused}.", id);
         }
 
         if (record is not { Status: MembershipStatus.Approved })
@@ -109,6 +111,7 @@ public sealed class RelayHub(
 
         foreach (var delivery in queue.For(id))
         {
+            traffic.Delivered(delivery.Envelope);
             await Clients.Caller.SendAsync(HubMethods.Receive, delivery);
         }
 
@@ -133,14 +136,14 @@ public sealed class RelayHub(
 
         if (!PublicKeys.IsValid(request.PublicKey) || !Signatures.VerifyJoin(request))
         {
-            throw new HubException("The join request isn't signed by the key it carries, or lacks an encryption key signed by it.");
+            throw Refuse("The join request isn't signed by the key it carries, or lacks an encryption key signed by it.");
         }
 
         RequireFresh(request.RequestedOn);
-        if (registry.IsNewRequest(KeyFingerprint.MachineIdOf(request.PublicKey))
-            && gate.TakeJoin(Context.GetHttpContext()?.Connection.RemoteIpAddress) is { } limited)
+        var newRequest = registry.IsNewRequest(KeyFingerprint.MachineIdOf(request.PublicKey));
+        if (newRequest && gate.TakeJoin(Address) is { } limited)
         {
-            throw new HubException($"Refused: {limited}.");
+            throw Refuse($"Refused: {limited}.", KeyFingerprint.MachineIdOf(request.PublicKey));
         }
 
         MachineRecord record;
@@ -150,13 +153,18 @@ public sealed class RelayHub(
         }
         catch (RouterException e)
         {
-            throw new HubException(e.Message);
+            throw Refuse(e.Message, KeyFingerprint.MachineIdOf(request.PublicKey));
         }
 
         await ProveKeyAsync(record.Id);
         if (record.Status is MembershipStatus.Pending or MembershipStatus.Approved && gate.Admit(Context.ConnectionId, record.Id) is { } refused)
         {
-            throw new HubException($"Refused: {refused}.");
+            throw Refuse($"Refused: {refused}.", record.Id);
+        }
+
+        if (newRequest && record.Status == MembershipStatus.Pending)
+        {
+            traffic.JoinRequested(record.Id, record.Name, Address);
         }
 
         logger.LogInformation("Join request: {Name} ({Id}) on {Os} {Arch}, join code {Code}: {Status}",
@@ -174,38 +182,39 @@ public sealed class RelayHub(
         var me = RequireMember();
         if (envelope.FromMachine != me)
         {
-            throw new HubException("An envelope's FromMachine must be your own machine id.");
+            throw Refuse("An envelope's FromMachine must be your own machine id.", me, envelope);
         }
 
         if (envelope.Ciphertext is null || envelope.Size is < 0 or > Limits.MaxContentBytes)
         {
-            throw new HubException($"The encrypted content must be at most {Limits.MaxContentBytes} bytes.");
+            throw Refuse($"The encrypted content must be at most {Limits.MaxContentBytes} bytes.", me, envelope);
         }
 
         if (envelope.Wraps is null || envelope.Wraps.Count is 0 or > 2 || envelope.Wraps.All(w => w.Machine != envelope.ToMachine)
             || envelope.Wraps.Any(w => w.Machine != envelope.ToMachine && w.Machine != me))
         {
-            throw new HubException("The content key must be wrapped for the recipient (and at most the sender too).");
+            throw Refuse("The content key must be wrapped for the recipient (and at most the sender too).", me, envelope);
         }
 
         if (!Signatures.VerifyEnvelope(envelope, registry.Get(me)!.PublicKey))
         {
-            throw new HubException("The envelope signature doesn't verify.");
+            throw Refuse("The envelope signature doesn't verify.", me, envelope);
         }
 
         if (envelope.ExpiresOn <= time.GetUtcNow())
         {
-            throw new HubException("The envelope has already expired; check this machine's clock.");
+            throw Refuse("The envelope has already expired; check this machine's clock.", me, envelope);
         }
 
         if (registry.Get(envelope.ToMachine) is not { Status: MembershipStatus.Approved })
         {
-            throw new HubException("The recipient isn't an approved machine.");
+            throw Refuse("The recipient isn't an approved machine.", me, envelope);
         }
 
         var online = presence.IsOnline(envelope.ToMachine);
         if (await queue.EnqueueAsync(envelope) is { } delivery && online)
         {
+            traffic.Delivered(envelope); // before the push: the recipient may confirm before SendAsync returns
             await Clients.Group(MachineGroup(envelope.ToMachine)).SendAsync(HubMethods.Receive, delivery);
         }
 
@@ -243,6 +252,15 @@ public sealed class RelayHub(
     }
 
     internal static string MachineGroup(string id) => "machine:" + id;
+
+    private System.Net.IPAddress? Address => Context.GetHttpContext()?.Connection.RemoteIpAddress;
+
+    /// <summary>Records a refusal in the traffic log (if it's on) and returns the exception that tells the caller.</summary>
+    private HubException Refuse(string reason, string? machine = null, Envelope? envelope = null)
+    {
+        traffic.Refused(reason, Address, machine, envelope);
+        return new HubException(reason);
+    }
 
     /// <summary>Connections that proved a key, approved or not: where membership changes are announced.</summary>
     internal static string KeyGroup(string id) => "key:" + id;

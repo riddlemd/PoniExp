@@ -56,6 +56,7 @@ public static class RouterHost
         // Within docker stop's 10 s grace; daemons reconnect to the next instance anyway.
         builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(5));
         builder.Services.AddSingleton(new RouterStore(options.DataDirectory));
+        builder.Services.AddSingleton<TrafficLog>();
         builder.Services.AddSingleton<MachineRegistry>();
         builder.Services.AddSingleton<ConnectionGate>();
         builder.Services.AddHostedService<RouterMaintenance>();

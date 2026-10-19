@@ -250,6 +250,23 @@ public class EncryptionTests
 
     private static string ReadShared(string path)
     {
+        if (!File.Exists(path))
+        {
+            return string.Empty; // a -wal or -shm file checkpointed away since the listing
+        }
+
+        try
+        {
+            return ReadOpen(path);
+        }
+        catch (FileNotFoundException)
+        {
+            return string.Empty;
+        }
+    }
+
+    private static string ReadOpen(string path)
+    {
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         using var reader = new StreamReader(stream, Encoding.UTF8);
         return reader.ReadToEnd();

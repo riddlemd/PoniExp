@@ -100,7 +100,8 @@ public class DaemonTests
         await RouterFixture.Eventually(() => router.Queue.ExpiryOf(sent.Id) is null);
         await using var raw = await RelayTests.RawMemberConnectionAsync(router, ise.Keys);
         await raw.InvokeAsync<SendResult>(HubMethods.Send, envelope);
-        await RouterFixture.EventuallyAsync(async () => await wojtek.Store.GetMetricAsync(ise.Keys.MachineId, ClientMetrics.Duplicate) == 1);
+        // At least once: under load the router may also redeliver it on a reconnect before the confirm lands.
+        await RouterFixture.EventuallyAsync(async () => await wojtek.Store.GetMetricAsync(ise.Keys.MachineId, ClientMetrics.Duplicate) >= 1);
 
         await Task.Delay(300);
         Assert.Equal(1, wojtek.CountMessages("r.type = 'receipt' AND r.reply_to = $id", ("$id", sent.Id.ToString("D"))));

@@ -36,6 +36,8 @@ public static class DaemonHost
         builder.Services.AddSingleton<IValidateOptions<DaemonOptions>, DaemonOptionsValidator>();
         builder.Services.AddOptions<MessagingOptions>().Bind(builder.Configuration.GetSection(MessagingOptions.Section)).ValidateOnStart();
         builder.Services.AddSingleton<IValidateOptions<MessagingOptions>, MessagingOptionsValidator>();
+        builder.Services.AddOptions<RetentionOptions>().Bind(builder.Configuration.GetSection(RetentionOptions.Section)).ValidateOnStart();
+        builder.Services.AddSingleton<IValidateOptions<RetentionOptions>, RetentionOptionsValidator>();
         builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(5));
         builder.Services.AddSingleton(TimeProvider.System);
         builder.Services.AddSingleton(context);

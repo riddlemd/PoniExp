@@ -80,3 +80,6 @@ scripts/publish.sh win-x64 linux-x64                  # self-contained single-fi
 - Timestamps are named `*On` / `*_on`, never `*At` / `*_at`.
 - No secrets in the repo: keys live in `~/.poniexp/` and the router's `/data` volume, and backups
   (which hold the router's private key) stay out of it too.
+
+- Client schema changes go through `ClientStore` (`SchemaVersion` and `CREATE ... IF NOT EXISTS`);
+  retention must never touch a live message (`queued`, `stored`, `fetched`).

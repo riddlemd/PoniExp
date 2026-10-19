@@ -51,6 +51,44 @@ public static class AdminCli
                     var machine = (await response.Content.ReadFromJsonAsync<AdminMachineView>(Json))!;
                     output.WriteLine($"{verb}d {machine.Name} ({machine.Id[..8]}), join code {machine.JoinCode}: now {machine.Status}");
                     return 0;
+                case ["traffic-log", var state and ("on" or "off")]:
+                    var set = await ReadAsync<TrafficLogStatus>(await http.PostAsync($"admin/traffic-log/{state}", null), output);
+                    output.WriteLine(set is null ? "error" : $"traffic log {(set.Enabled ? "on: the router records what it can see of each message, and refusals" : "off")}");
+                    return set is null ? 1 : 0;
+                case ["traffic-log"] or ["traffic-log", "status"]:
+                    var status = await http.GetFromJsonAsync<TrafficLogStatus>("admin/traffic-log/status", Json);
+                    output.WriteLine($"traffic log {(status!.Enabled ? "on" : "off")}");
+                    return 0;
+                case ["traffic-log", "show", .. var options]:
+                    var query = new List<string>();
+                    var json = false;
+                    for (var i = 0; i < options.Count; i++)
+                    {
+                        switch (options[i])
+                        {
+                            case "--since" when i + 1 < options.Count:
+                                var value = options[++i];
+                                var since = DateTimeOffset.TryParse(value, System.Globalization.CultureInfo.InvariantCulture,
+                                    System.Globalization.DateTimeStyles.AssumeUniversal, out var on) ? on : DateTimeOffset.UtcNow - Duration(value);
+                                query.Add("since=" + Uri.EscapeDataString(since.ToString("O")));
+                                break;
+                            case "--machine" when i + 1 < options.Count: query.Add("machine=" + Uri.EscapeDataString(options[++i])); break;
+                            case "--limit" when i + 1 < options.Count: query.Add("limit=" + int.Parse(options[++i], System.Globalization.CultureInfo.InvariantCulture)); break;
+                            case "--json": json = true; break;
+                            default: throw new ArgumentException($"unknown option {options[i]}");
+                        }
+                    }
+
+                    var entries = await http.GetFromJsonAsync<List<AdminTrafficEntry>>("admin/traffic-log" + (query.Count == 0 ? "" : "?" + string.Join('&', query)), Json) ?? [];
+                    foreach (var t in entries)
+                    {
+                        output.WriteLine(json ? JsonSerializer.Serialize(t, Json)
+                            : $"{t.OccurredOn:yyyy-MM-dd HH:mm:ss}Z {t.Event,-14} {t.From ?? "-",-14} {t.To ?? "-",-14} " +
+                              $"{(t.MessageId is { } id ? id.ToString()[..8] : "-"),-8} {(t.Size is { } s ? $"{s}B" : ""),-8} {(t.Sequence is { } q ? $"#{q}" : ""),-6} " +
+                              $"{t.Address} {t.Detail}".TrimEnd());
+                    }
+
+                    return 0;
                 case ["clear-pending"]:
                     var cleared = await ReadAsync<List<AdminMachineView>>(await http.PostAsync("admin/clear-pending", null), output);
                     if (cleared is null)
@@ -94,7 +132,8 @@ public static class AdminCli
                     return 0;
                 default:
                     output.WriteLine("usage: poniexp admin [list | approve <id|name> | reject <id|name> | remove <id|name> | clear-pending | certificate\n" +
-                                     "                      | backup <path|-> | restore <path|->] [--url URL]");
+                                     "                      | backup <path|-> | restore <path|->\n" +
+                                     "                      | traffic-log [on | off | status | show [--since 2h|date] [--machine name] [--limit n] [--json]]] [--url URL]");
                     return 2;
             }
         }
@@ -103,6 +142,20 @@ public static class AdminCli
             output.WriteLine($"error: can't reach the router's admin listener at {url} ({e.Message})");
             return 1;
         }
+    }
+
+    private static TimeSpan Duration(string text)
+    {
+        var unit = text[^1];
+        var amount = double.Parse(text[..^1], System.Globalization.CultureInfo.InvariantCulture);
+        return unit switch
+        {
+            's' => TimeSpan.FromSeconds(amount),
+            'm' => TimeSpan.FromMinutes(amount),
+            'h' => TimeSpan.FromHours(amount),
+            'd' => TimeSpan.FromDays(amount),
+            _ => throw new ArgumentException($"'{text}' isn't a duration like 30m, 2h or 3d"),
+        };
     }
 
     private static async Task<T?> ReadAsync<T>(HttpResponseMessage response, TextWriter output) where T : class

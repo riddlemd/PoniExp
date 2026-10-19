@@ -156,6 +156,33 @@ public sealed class LocalApiClient : IDisposable
     public Task<List<LocalMessage>> ConversationAsync(string endpoint, Guid conversationId, CancellationToken ct = default) =>
         GetAsync<List<LocalMessage>>($"endpoints/{endpoint}/conversations/{conversationId}", ct);
 
+    /// <summary>The endpoint's conversations, most recent first: what an agent picks up again after a restart.</summary>
+    public Task<List<LocalConversation>> ConversationsAsync(string endpoint, CancellationToken ct = default) =>
+        GetAsync<List<LocalConversation>>($"endpoints/{endpoint}/conversations", ct);
+
+    /// <summary>The machine's message log (see <see cref="LocalLogQuery"/>), oldest first.</summary>
+    public Task<List<LocalLogEntry>> LogAsync(LocalLogQuery q, CancellationToken ct = default)
+    {
+        var query = new List<string>();
+        void Add(string name, object? value)
+        {
+            if (value is not null)
+            {
+                query.Add($"{name}={Uri.EscapeDataString(value is DateTimeOffset d ? d.ToString("O") : value.ToString()!)}");
+            }
+        }
+
+        Add("conversation", q.Conversation);
+        Add("operation", q.Operation);
+        Add("peer", q.Peer);
+        Add("endpoint", q.Endpoint);
+        Add("since", q.Since);
+        Add("limit", q.Limit);
+        Add("automatic", q.Automatic ? "true" : null);
+        Add("bodies", q.Bodies ? "true" : null);
+        return GetAsync<List<LocalLogEntry>>("log" + (query.Count == 0 ? string.Empty : "?" + string.Join('&', query)), ct);
+    }
+
     public Task<List<LocalEndpointInfo>> EndpointsAsync(CancellationToken ct = default) => GetAsync<List<LocalEndpointInfo>>("endpoints", ct);
 
     public Task<LocalEndpointInfo> RetireAsync(string endpoint, CancellationToken ct = default) =>
@@ -436,6 +463,22 @@ public sealed record LocalReplyRequest(
     TimeSpan? ExpiresIn = null);
 
 public sealed record LocalAckRequest(Guid Id);
+
+/// <summary>A conversation as one local endpoint sees it; <see cref="Peer"/> is <c>machine-name/endpoint</c>, <see cref="State"/> open or finished.</summary>
+public sealed record LocalConversation(Guid Id, string Peer, string? Subject, string StartedBy, DateTimeOffset StartedOn, DateTimeOffset LastActivityOn,
+    string State);
+
+/// <summary>Log filters; null means any. <see cref="Peer"/> is a machine name or id. Bodies are decrypted only with <see cref="Bodies"/>.</summary>
+public sealed record LocalLogQuery(Guid? Conversation = null, Guid? Operation = null, string? Peer = null, string? Endpoint = null,
+    DateTimeOffset? Since = null, int? Limit = null, bool Automatic = false, bool Bodies = false);
+
+/// <summary>
+/// One message in the log. <see cref="Body"/> is null unless bodies were asked for; <see cref="BodyDropped"/>
+/// says retention dropped the envelope, so there's no body left to show.
+/// </summary>
+public sealed record LocalLogEntry(Guid Id, string From, string To, string Direction, string Type, Guid ConversationId, Guid? ReplyTo, Guid OperationId,
+    string? Status, string? Subject, string ContentType, long Sequence, DateTimeOffset CreatedOn, DateTimeOffset StoredOn, DateTimeOffset ExpiresOn,
+    string? State, string? StateDetail, bool BodyDropped, string? Body = null, IReadOnlyDictionary<string, string>? Metadata = null);
 
 /// <summary>A message sent: to <c>machine-name/endpoint</c>; <see cref="State"/> is pushed, queued (by the router) or outbox (not relayed yet).</summary>
 public sealed record LocalSent(Guid Id, string To, Guid ConversationId, long Sequence, DateTimeOffset ExpiresOn, string State);

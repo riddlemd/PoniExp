@@ -31,9 +31,11 @@ public sealed class PoniExpTools(McpEndpoint me)
         [Description("How the body is to be read (default text/plain).")] string? contentType = null,
         [Description("Free-form key/value metadata for agent protocols.")] Dictionary<string, string>? metadata = null,
         [Description("How long it lives, e.g. '30m', '2h', '3d' (default and maximum are the machine's settings).")] string? expiresIn = null,
+        [Description("To retry a request safely, send it again with the first message's operationId (one recipient only): the other side " +
+                     "won't do it twice, and answers with 'still running' or the result it already gave.")] string? operationId = null,
         CancellationToken cancellationToken = default) =>
-        Json(await me.Api.SendAsync(new LocalSendRequest(me.Endpoint, to, body, subject, ParseId(conversationId), ContentType: contentType,
-            Metadata: metadata, ExpiresIn: ParseDuration(expiresIn)), cancellationToken));
+        Json(await me.Api.SendAsync(new LocalSendRequest(me.Endpoint, to, body, subject, ParseId(conversationId), OperationId: ParseId(operationId),
+            ContentType: contentType, Metadata: metadata, ExpiresIn: ParseDuration(expiresIn)), cancellationToken));
 
     [McpServerTool(Name = "reply"), Description(
         "Reply to a message you received, in its conversation, to its sender. Replying also acknowledges it. " +
@@ -56,6 +58,12 @@ public sealed class PoniExpTools(McpEndpoint me)
         "Messages for you that you haven't acknowledged yet, oldest first. Fetching doesn't acknowledge them.")]
     public async Task<string> InboxAsync(CancellationToken cancellationToken = default) =>
         Json(await me.Api.InboxAsync(me.Endpoint, cancellationToken));
+
+    [McpServerTool(Name = "conversations", ReadOnly = true), Description(
+        "Your conversations, most recent first: who with, the subject, and whether each is open or finished (its last reply was done or failed). " +
+        "Use it to pick up where you left off after a restart, then 'conversation' for the messages.")]
+    public async Task<string> ConversationsAsync(CancellationToken cancellationToken = default) =>
+        Json(await me.Api.ConversationsAsync(me.Endpoint, cancellationToken));
 
     [McpServerTool(Name = "conversation", ReadOnly = true), Description("Every message you sent and received in a conversation, oldest first.")]
     public async Task<string> ConversationAsync([Description("The conversation id.")] string conversationId, CancellationToken cancellationToken = default) =>

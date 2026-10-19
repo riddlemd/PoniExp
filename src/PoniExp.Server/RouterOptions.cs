@@ -73,6 +73,9 @@ public sealed class RouterOptions
 
     /// <summary>How often expired join requests and queue entries are swept.</summary>
     public TimeSpan MaintenanceInterval { get; set; } = TimeSpan.FromMinutes(1);
+
+    /// <summary>How long the traffic log (when it's on) keeps its entries.</summary>
+    public TimeSpan TrafficLogRetention { get; set; } = TimeSpan.FromDays(30);
 }
 
 public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
@@ -119,6 +122,11 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
         if (options.JoinRequestsPerHourPerAddress > options.JoinRequestsPerHour || options.MaxUnauthenticatedPerAddress > options.MaxUnauthenticatedConnections)
         {
             errors.Add("PoniExp: a per-address limit can't be higher than the router-wide one.");
+        }
+
+        if (options.TrafficLogRetention <= TimeSpan.Zero)
+        {
+            errors.Add("PoniExp:TrafficLogRetention must be positive.");
         }
 
         if (options.SharedAddresses.Any(a => !System.Net.IPAddress.TryParse(a, out _)))

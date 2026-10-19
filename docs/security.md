@@ -2,7 +2,7 @@
 
 What each party can and can't do, as built. Updated each phase (see `docs/plan.md`).
 
-**Current state: phase 4** (router on SQLite, connection and join limits, backups).
+**Current state: phase 5** (conversations, doing a request once, client log and retention, traffic log).
 
 ## Parties
 
@@ -83,6 +83,22 @@ Endpoints, conversation, subject, type, metadata, body and `createdOn` are encry
 
 - TLS with a self-signed certificate pinned by SHA-256 on every client: no public CA, and a man in the
   middle is refused.
+
+## Logs
+
+- **Client log:** the client database keeps envelopes, not decrypted bodies, so `log` shows
+  metadata (machines, endpoints, conversation, operation, subject, status, times and states) unless
+  `--bodies` decrypts them. A `--bodies` export is a plaintext file: it's written owner-only (on
+  Unix; on Windows it inherits the folder's ACL), and keeping it safe is up to its owner.
+- Events aren't hash-chained: a local process could rewrite the whole chain anyway (see Parties).
+  What a peer said is proved by its signed envelope, kept for 90 days by default.
+- **Retries:** a retry is matched by `(sender machine, sender endpoint, operationId)`, all of them
+  signed by the sender, so one machine can't answer, or block, another's operation. Records are kept
+  for MaxExpiry plus ClockSkew, as long as a message can be accepted, so a replay is a duplicate,
+  not a new request.
+- **Traffic log:** off by default. When on, the router records what it already sees (machines, id,
+  size, sequence, times) and, for refusals and join requests, the connection's address and the
+  reason. It never has endpoints, subjects or bodies. It's kept 30 days (`TrafficLogRetention`).
 
 ## The local API
 

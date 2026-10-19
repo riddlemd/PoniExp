@@ -44,6 +44,12 @@ const string Usage = """
       conversation <id> [--endpoint <name>] [--json]
       listen [--endpoint <name>] [--json] [--ack]
                                            be the endpoint: print messages and receipts as they arrive
+      conversations [--endpoint <name>]    an endpoint's conversations, most recent first
+      log [filters] [--json | --export <path|->] [--bodies]
+                                           the machine's message log, oldest first
+          --conversation <id> --operation <id> --peer <machine> --endpoint <name>
+          --since <2h|3d|date> --limit <n> --automatic (receipts, announcements too)
+          --bodies                 decrypt bodies into the output (they're then in the clear)
       endpoint list | endpoint retire <name>
                                            the endpoint registry; a retired endpoint's messages are rejected
       diagnostics                          recent connection, signature and delivery problems
@@ -79,6 +85,8 @@ try
         ["message", var id, .. var rest] => await MessageAsync(EndpointOf(rest), Guid.Parse(id)),
         ["conversation", var id, .. var rest] => await ConversationAsync(EndpointOf(rest), Guid.Parse(id), rest.Contains("--json")),
         ["listen", .. var rest] => await ListenAsync(EndpointOf(rest), rest.Contains("--json"), rest.Contains("--ack")),
+        ["conversations", .. var rest] => await ConversationsAsync(EndpointOf(rest)),
+        ["log", .. var rest] => await LogAsync(rest),
         ["endpoint", "list"] => await EndpointsAsync(),
         ["endpoint", "retire", var name] => await RetireAsync(name),
         ["diagnostics"] => await DiagnosticsAsync(),
@@ -619,6 +627,67 @@ async Task<int> ListenAsync(string endpoint, bool json, bool ack)
     }
     catch (OperationCanceledException)
     {
+    }
+
+    return 0;
+}
+
+async Task<int> ConversationsAsync(string endpoint)
+{
+    using var api = await DaemonAsync2();
+    foreach (var c in await api.ConversationsAsync(endpoint, cancel.Token))
+    {
+        Console.WriteLine($"{c.Id.ToString()[..8]}  {c.LastActivityOn.ToLocalTime():yyyy-MM-dd HH:mm}  {c.State,-8}  {c.Peer,-28}  {c.Subject}");
+    }
+
+    return 0;
+}
+
+async Task<int> LogAsync(string[] rest)
+{
+    Guid? conversation = null, operation = null;
+    string? peer = null, endpoint = null, export = null;
+    DateTimeOffset? since = null;
+    int? limit = null;
+    bool json = false, bodies = false, automatic = false;
+    for (var i = 0; i < rest.Length; i++)
+    {
+        string Next() => ++i < rest.Length ? rest[i] : throw new ArgumentException($"{rest[i - 1]} needs a value");
+        switch (rest[i])
+        {
+            case "--conversation": conversation = Guid.Parse(Next()); break;
+            case "--operation": operation = Guid.Parse(Next()); break;
+            case "--peer": peer = Next(); break;
+            case "--endpoint": endpoint = Next(); break;
+            case "--since":
+                var value = Next();
+                since = DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var on) ? on
+                    : DateTimeOffset.UtcNow - ParseDuration(value);
+                break;
+            case "--limit": limit = int.Parse(Next(), CultureInfo.InvariantCulture); break;
+            case "--json": json = true; break;
+            case "--export": export = Next(); json = true; break;
+            case "--bodies": bodies = true; break;
+            case "--automatic": automatic = true; break;
+            default: throw new ArgumentException($"unknown log option {rest[i]}");
+        }
+    }
+
+    using var api = await DaemonAsync2();
+    var entries = await api.LogAsync(new LocalLogQuery(conversation, operation, peer, endpoint, since, limit, automatic, bodies), cancel.Token);
+    using var file = export is null or "-" ? null : new StreamWriter(PrivateFiles.Create(export));
+    var output = file ?? Console.Out;
+    foreach (var e in entries)
+    {
+        output.WriteLine(json ? JsonSerializer.Serialize(e, WireProtocol.Json)
+            : $"{e.StoredOn.ToLocalTime():yyyy-MM-dd HH:mm:ss} {e.Id.ToString()[..8]} {e.From} -> {e.To} {e.Type}" +
+              $"{(e.Status is null ? string.Empty : $" [{e.Status}]")} <{e.State ?? "?"}> conv {e.ConversationId.ToString()[..8]}" +
+              $"{(e.Subject is null ? string.Empty : $" \"{e.Subject}\"")}{(e.Body is null ? (bodies && e.BodyDropped ? " (body dropped by retention)" : string.Empty) : $": {e.Body}")}");
+    }
+
+    if (file is not null)
+    {
+        Console.Error.WriteLine($"wrote {entries.Count} entries to {export}{(bodies ? " (with decrypted bodies; owner-only)" : string.Empty)}");
     }
 
     return 0;

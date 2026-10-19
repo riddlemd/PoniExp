@@ -93,6 +93,8 @@ docker exec poniexp-server poniexp admin approve 3f2a91c0     # id prefix or nam
 docker exec poniexp-server poniexp admin reject <id|name>
 docker exec poniexp-server poniexp admin remove <id|name>     # forget it; it may ask again
 docker exec poniexp-server poniexp admin clear-pending         # forget every waiting join request
+docker exec poniexp-server poniexp admin traffic-log on        # record traffic (off by default; kept 30 days)
+docker exec poniexp-server poniexp admin traffic-log show --since 1h [--machine <name>]
 ```
 
 Approval reaches the waiting `join` at once.
@@ -113,7 +115,7 @@ Each agent is an endpoint. Give it the MCP server, as its own endpoint name:
 { "mcpServers": { "poniexp": { "command": "poniexp-client", "args": ["mcp", "--endpoint", "claude"] } } }
 ```
 
-Tools: `send`, `reply`, `ack`, `inbox`, `conversation`, `message`, `machines`, `status`. The agent
+Tools: `send`, `reply`, `ack`, `inbox`, `conversations`, `conversation`, `message`, `machines`, `status`. The agent
 is online while the MCP server runs. Its messages wait in the daemon until it fetches them, and the
 sender sees each step:
 
@@ -122,6 +124,14 @@ sender sees each step:
 - **rejected**: no such endpoint on that machine (never registered, or retired), with the reason.
 
 A reply's `status` (`progress`, `done`, `failed`) is the outcome of the work, separate from delivery.
+A conversation is `finished` once its last message is a `done` or `failed` reply; after a restart,
+`conversations` shows an agent where it left off.
+
+**Retrying safely.** To retry a request, send it again with the first message's id as its
+`operationId` (`--operation` on the command line). The other machine doesn't do it twice: its
+daemon answers for the agent, with "still running" while the first is in progress, or a copy of the
+final reply once it's done. The retry stays in the first attempt's conversation. A retry is
+recognised for the maximum expiry plus clock skew (7 days and 5 minutes by default).
 
 ## From the command line
 
@@ -138,7 +148,14 @@ poniexp-client message <id> --endpoint ops             # its delivery history
 poniexp-client listen --endpoint ops [--ack] [--json]  # be "ops": print messages and receipts as they arrive
 poniexp-client endpoint list | endpoint retire <name>  # the endpoint registry
 poniexp-client diagnostics                             # recent connection and delivery problems
+poniexp-client conversations --endpoint ops            # its conversations, most recent first
+poniexp-client log --peer wojtek --since 2d            # the message log; also --conversation, --operation, --endpoint
+poniexp-client log --export log.jsonl [--bodies]       # JSONL, metadata only unless --bodies (then in the clear)
 ```
+
+The client database keeps message envelopes for 90 days, then just their metadata for a year;
+diagnostics 30 days; and stays under 1 GB, dropping the oldest envelopes first. A message still
+waiting (in the outbox, or for an agent) is never dropped. Change these under `Retention`.
 
 Settings go in `<home>/settings.json` (or `PONIEXP_<Section>__<Key>` environment variables), and
 apply without a restart:
@@ -146,7 +163,8 @@ apply without a restart:
 ```json
 {
   "Messaging": { "DefaultExpiry": "7.00:00:00", "MaxExpiry": "7.00:00:00", "ClockSkew": "00:05:00" },
-  "Daemon": { "EndpointTimeout": "00:00:45", "AutomaticExpiry": "01:00:00" }
+  "Daemon": { "EndpointTimeout": "00:00:45", "AutomaticExpiry": "01:00:00" },
+  "Retention": { "Envelopes": "90.00:00:00", "Metadata": "365.00:00:00", "Diagnostics": "30.00:00:00", "MaxDatabaseBytes": 1073741824 }
 }
 ```
 

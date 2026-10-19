@@ -6,6 +6,16 @@ public static class PrivateFiles
     public static void WriteAllText(string path, string contents) =>
         WriteAllBytes(path, System.Text.Encoding.UTF8.GetBytes(contents));
 
+    /// <summary>A new (or truncated) file to stream into, owner read/write only on Unix. Not atomic.</summary>
+    public static FileStream Create(string path) => OperatingSystem.IsWindows()
+        ? new FileStream(path, FileMode.Create, FileAccess.Write)
+        : new FileStream(path, new FileStreamOptions
+        {
+            Mode = FileMode.Create,
+            Access = FileAccess.Write,
+            UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite,
+        });
+
     public static void WriteAllBytes(string path, byte[] contents)
     {
         var temp = path + ".tmp";
