@@ -89,6 +89,21 @@ public static class AdminCli
                     }
 
                     return 0;
+                case ["rooms"]:
+                    var live = await http.GetFromJsonAsync<List<RoomSummary>>("admin/rooms", Json) ?? [];
+                    output.WriteLine(live.Count == 0 ? "no live rooms" : string.Join("\n", live.Select(r =>
+                        $"{r.Name,-20} {r.RoomId.ToString()[..8]}  opened {r.OpenedOn.ToLocalTime():yyyy-MM-dd HH:mm}, last activity {r.LastActivityOn.ToLocalTime():yyyy-MM-dd HH:mm}, {Count(r.Messages, "message")}\n" +
+                        $"    members: {string.Join(", ", r.Members)}" + (r.Invited.Count > 0 ? $"\n    invited: {string.Join(", ", r.Invited)}" : ""))));
+                    return 0;
+                case ["rooms", "--collapsed", .. var roomArgs]:
+                    var collapsedSince = roomArgs is ["--since", var from] ? "?since=" + Uri.EscapeDataString(DateTimeOffset.Parse(from, System.Globalization.CultureInfo.InvariantCulture).ToString("O")) : "";
+                    var collapsed = await http.GetFromJsonAsync<List<RoomStats>>("admin/rooms/collapsed" + collapsedSince, Json) ?? [];
+                    output.WriteLine(collapsed.Count == 0 ? "no collapsed rooms" : string.Join("\n", collapsed.Select(r =>
+                        $"{r.Name,-20} {r.RoomId.ToString()[..8]}  {r.OpenedOn.ToLocalTime():yyyy-MM-dd HH:mm} to {r.CollapsedOn.ToLocalTime():yyyy-MM-dd HH:mm} ({r.Reason}), " +
+                        $"{Count(r.Machines.Sum(m => m.Messages), "message")}, {r.Machines.Sum(m => m.Bytes)} bytes\n" +
+                        string.Join("\n", r.Members.Select(m => $"    {m.Member,-30} {m.JoinedOn.ToLocalTime():yyyy-MM-dd HH:mm} to {m.LeftOn?.ToLocalTime():yyyy-MM-dd HH:mm}")) + "\n" +
+                        string.Join("\n", r.Machines.Select(m => $"    from {m.Machine,-25} {Count(m.Messages, "message")}, {m.Bytes} bytes")))));
+                    return 0;
                 case ["groups"]:
                     var groups = await http.GetFromJsonAsync<List<GroupInfo>>("admin/groups", Json) ?? [];
                     output.WriteLine(groups.Count == 0 ? "no groups" : string.Join("\n", groups.Select(g => $"{g.Name,-20} {string.Join(" ", g.Members)}")));
@@ -172,6 +187,7 @@ public static class AdminCli
                 default:
                     output.WriteLine("usage: poniexp admin [list | approve <id|name> | reject <id|name> | remove <id|name> | clear-pending | certificate\n" +
                                      "                      | backup <path|-> | restore <path|-> | blobs [clear --for <machine>]\n" +
+                                     "                      | rooms [--collapsed [--since <time>]]\n" +
                                      "                      | groups | group set <name> <machine/agent|role:x[/all]>... | group remove <name>\n" +
                                      "                      | traffic-log [on | off | status | show [--since 2h|date] [--machine name] [--limit n] [--json]]] [--url URL]");
                     return 2;
@@ -245,6 +261,8 @@ public static class AdminCli
                              (string.IsNullOrEmpty(m.Description.Notes) ? string.Empty : $" ({m.Description.Notes})"));
         }
     }
+
+    private static string Count(int n, string noun) => $"{n} {noun}{(n == 1 ? "" : "s")}";
 }
 
 internal sealed record BlobsCleared(int Released);

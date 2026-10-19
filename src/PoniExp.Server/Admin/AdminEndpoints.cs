@@ -39,6 +39,8 @@ public static class AdminEndpoints
                 e.MessageId, e.Size, e.Sequence, e.Address, e.Detail)).ToList());
         });
         admin.MapGet("/groups", (AdminService service) => Results.Ok(service.Groups()));
+        admin.MapGet("/rooms", (AdminService service) => Results.Ok(service.Rooms()));
+        admin.MapGet("/rooms/collapsed", (AdminService service, DateTimeOffset? since) => Results.Ok(service.CollapsedRooms(since)));
         admin.MapPut("/groups/{name}", (string name, GroupInfo body, AdminService service) =>
         {
             try

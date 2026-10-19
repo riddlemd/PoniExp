@@ -56,13 +56,14 @@ const string Usage = """
           --conversation <id> --operation <id> --peer <machine> --agent <name>
           --since <2h|3d|date> --limit <n> --automatic (receipts, announcements too)
           --bodies                 decrypt bodies into the output (they're then in the clear)
-      room list [--agent <name>]        rooms with a member here
-      room create <name> --as <agent> [--member <address>]...
-      room add|remove|admin <room> --as <agent> <address>...
-      room leave|close <room> --as <agent>
+      room list [--agent <name>]          rooms an agent here is in, was in, or is invited to
+      room create <name> --as <agent> [--invite <address>]...
+      room invite <room> --as <agent> <address>...   (roles and groups are resolved now)
+      room invites [--agent <name>]       open invitations
+      room join|leave <room> --as <agent>
       room read <room> --as <agent> [--since <time>] [--json]
-      room send <room> --as <agent> [--reply <id>] <body|->
-                                           rooms: everyone in one sees its messages (addresses may be roles or groups)
+      room send <room> --as <agent> [--reply <id>] <body|->   (or: send --to room:<name>)
+                                           rooms: named conversations everyone in sees; invitees accept, members leave
       agent list | agent retire <name>
                                            the agent registry; a retired agent's messages are rejected
       diagnostics                          recent connection, signature and delivery problems
@@ -657,6 +658,16 @@ async Task<int> ListenAsync(string agent, bool json, bool ack, bool autoFetch, I
         {
             Console.WriteLine(json ? JsonSerializer.Serialize(e, WireProtocol.Json) : Format(rm));
         }
+        else if (e.Kind == LocalEventKinds.RoomInvite && e.Invite is { } invite)
+        {
+            Console.WriteLine(json ? JsonSerializer.Serialize(e, WireProtocol.Json)
+                : $"invited to room {invite.Room} by {invite.InvitedBy} (room join {invite.Room} --as <agent>; open until {invite.ExpiresOn.ToLocalTime():yyyy-MM-dd HH:mm})");
+        }
+        else if (e.Kind == LocalEventKinds.RoomChanged && e.Room is { } changed)
+        {
+            Console.WriteLine(json ? JsonSerializer.Serialize(e, WireProtocol.Json)
+                : changed.Collapsed ? $"room {changed.Name} collapsed ({changed.CollapseReason})" : $"room {changed.Name}: {string.Join(", ", changed.Members)}");
+        }
         else if (e.FileReceipt is { } f)
         {
             Console.Error.WriteLine(json ? JsonSerializer.Serialize(f, WireProtocol.Json)
@@ -749,7 +760,7 @@ async Task<int> RoomAsync(string[] rest)
     var positional = new List<string>();
     for (var i = 0; i < rest.Length; i++)
     {
-        if (rest[i] is "--as" or "--member" or "--since" or "--reply" or "--agent")
+        if (rest[i] is "--as" or "--invite" or "--since" or "--reply" or "--agent")
         {
             i++;
         }
@@ -760,7 +771,9 @@ async Task<int> RoomAsync(string[] rest)
     }
 
     static void Show(LocalRoom r) =>
-        Console.WriteLine($"{r.Id.ToString()[..8]}  {r.Name}{(r.Closed ? " (closed)" : "")}  v{r.Version}\n    members: {string.Join(", ", r.Members)}\n    admins:  {string.Join(", ", r.Admins)}");
+        Console.WriteLine($"{r.Name}  {r.Id.ToString()[..8]}{(r.Collapsed ? $" (collapsed: {r.CollapseReason})" : "")}  opened by {r.Creator} {r.OpenedOn.ToLocalTime():yyyy-MM-dd HH:mm}\n" +
+                          $"    members: {(r.Members.Count == 0 ? "none" : string.Join(", ", r.Members))}" +
+                          (r.Invited.Count > 0 ? $"\n    invited: {string.Join(", ", r.Invited.Select(i => i.Invitee))}" : ""));
 
     switch (positional)
     {
@@ -773,22 +786,22 @@ async Task<int> RoomAsync(string[] rest)
 
             rooms.ForEach(Show);
             return 0;
-        case ["create", var name]:
-            Show(await api.CreateRoomAsync(new LocalRoomCreate(As(), name, Options(rest, "--member")), cancel.Token));
+        case ["invites"]:
+            var invites = await api.RoomInvitesAsync(Option(rest, "--agent"), cancel.Token);
+            Console.WriteLine(invites.Count == 0 ? "no open invitations" : string.Join("\n", invites.Select(i =>
+                $"{i.Room,-20} {i.Invitee}, invited by {i.InvitedBy}, until {i.ExpiresOn.ToLocalTime():yyyy-MM-dd HH:mm}")));
             return 0;
-        case [var verb and ("add" or "remove" or "admin"), var room, .. var addresses] when addresses.Count > 0:
-            Show(await api.ChangeRoomAsync(room, new LocalRoomChange(As(), verb switch
-            {
-                "add" => new RoomChange(Add: addresses),
-                "remove" => new RoomChange(Remove: addresses),
-                _ => new RoomChange(AddAdmins: addresses),
-            }), cancel.Token));
+        case ["create", var name]:
+            Show(await api.CreateRoomAsync(new LocalRoomCreate(As(), name, Options(rest, "--invite")), cancel.Token));
+            return 0;
+        case ["invite", var room, .. var addresses] when addresses.Count > 0:
+            Show(await api.InviteToRoomAsync(room, new LocalRoomInviteRequest(As(), addresses), cancel.Token));
+            return 0;
+        case ["join", var room]:
+            Show(await api.JoinRoomAsync(room, As(), cancel.Token));
             return 0;
         case ["leave", var room]:
-            Show(await api.ChangeRoomAsync(room, new LocalRoomChange(As(), new RoomChange(Leave: true)), cancel.Token));
-            return 0;
-        case ["close", var room]:
-            Show(await api.ChangeRoomAsync(room, new LocalRoomChange(As(), new RoomChange(Close: true)), cancel.Token));
+            Show(await api.LeaveRoomAsync(room, As(), cancel.Token));
             return 0;
         case ["read", var room]:
             var since = Option(rest, "--since") is { } s ? DateTimeOffset.Parse(s, CultureInfo.InvariantCulture) : (DateTimeOffset?)null;

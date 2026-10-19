@@ -13,7 +13,7 @@ namespace PoniExp.Server.Machines;
 /// </summary>
 public sealed class RouterStore
 {
-    private const int SchemaVersion = 4;
+    private const int SchemaVersion = 5;
 
     private static readonly JsonSerializerOptions Json = WireProtocol.Configure(new JsonSerializerOptions(JsonSerializerDefaults.Web));
 
@@ -62,6 +62,16 @@ public sealed class RouterStore
                 name    TEXT PRIMARY KEY,
                 members TEXT NOT NULL
             ) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS rooms (
+                id               TEXT PRIMARY KEY,
+                name             TEXT NOT NULL,
+                state            TEXT NOT NULL,
+                opened_on        TEXT NOT NULL,
+                last_activity_on TEXT NOT NULL,
+                collapsed_on     TEXT,
+                record           TEXT NOT NULL
+            ) WITHOUT ROWID;
+            CREATE UNIQUE INDEX IF NOT EXISTS rooms_live_name ON rooms (name) WHERE state = 'live';
             CREATE TABLE IF NOT EXISTS router_state (
                 name  TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -168,6 +178,63 @@ public sealed class RouterStore
             : "INSERT INTO groups (name, members) VALUES ($name, $members) ON CONFLICT (name) DO UPDATE SET members = $members;";
         command.Parameters.AddWithValue("$name", name);
         command.Parameters.AddWithValue("$members", JsonSerializer.Serialize(members, Json));
+        command.ExecuteNonQuery();
+    }
+
+    // ---- rooms ----
+
+    public IReadOnlyList<Rooms.LiveRoomRecord> LoadLiveRooms() => Load<Rooms.LiveRoomRecord>("SELECT record FROM rooms WHERE state = 'live';");
+
+    public bool RoomExists(Guid id)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT 1 FROM rooms WHERE id = $id;";
+        command.Parameters.AddWithValue("$id", id.ToString("D"));
+        return command.ExecuteScalar() is not null;
+    }
+
+    public void SaveLiveRoom(Rooms.LiveRoomRecord room)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO rooms (id, name, state, opened_on, last_activity_on, record) VALUES ($id, $name, 'live', $opened, $last, $record)
+            ON CONFLICT (id) DO UPDATE SET last_activity_on = $last, record = $record;
+            """;
+        command.Parameters.AddWithValue("$id", room.RoomId.ToString("D"));
+        command.Parameters.AddWithValue("$name", room.Name);
+        command.Parameters.AddWithValue("$opened", Signatures.Stamp(room.OpenedOn));
+        command.Parameters.AddWithValue("$last", Signatures.Stamp(room.LastActivityOn));
+        command.Parameters.AddWithValue("$record", JsonSerializer.Serialize(room, Json));
+        command.ExecuteNonQuery();
+    }
+
+    /// <summary>Replaces a live room's log with its statistics (the log is dropped).</summary>
+    public void CollapseRoom(RoomStats stats)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE rooms SET state = 'collapsed', collapsed_on = $on, record = $record WHERE id = $id;";
+        command.Parameters.AddWithValue("$id", stats.RoomId.ToString("D"));
+        command.Parameters.AddWithValue("$on", Signatures.Stamp(stats.CollapsedOn));
+        command.Parameters.AddWithValue("$record", JsonSerializer.Serialize(stats, Json));
+        command.ExecuteNonQuery();
+    }
+
+    public RoomStats? LoadRoomStats(Guid id) =>
+        Load<RoomStats>($"SELECT record FROM rooms WHERE state = 'collapsed' AND id = '{id:D}';").FirstOrDefault();
+
+    public IReadOnlyList<RoomStats> LoadRoomStats(DateTimeOffset? since) =>
+        Load<RoomStats>("SELECT record FROM rooms WHERE state = 'collapsed'" + (since is { } s ? $" AND collapsed_on >= '{Signatures.Stamp(s)}'" : "")
+                        + " ORDER BY collapsed_on;");
+
+    public void DeleteRoomStatsBefore(DateTimeOffset before)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM rooms WHERE state = 'collapsed' AND collapsed_on < $before;";
+        command.Parameters.AddWithValue("$before", Signatures.Stamp(before));
         command.ExecuteNonQuery();
     }
 

@@ -19,6 +19,12 @@ public static class HubMethods
     public const string GetMachines = nameof(GetMachines);
     public const string GetGroups = nameof(GetGroups);
 
+    // rooms: the router keeps each room's signed membership log
+    public const string CreateRoom = nameof(CreateRoom);
+    public const string SubmitRoomEvent = nameof(SubmitRoomEvent);
+    public const string GetRoom = nameof(GetRoom);
+    public const string GetMyRooms = nameof(GetMyRooms);
+
     // files (the chunks themselves go over HTTP, under BlobsPath, with a ticket)
     public const string BlobsPath = "/blobs";
     public const string BeginUpload = nameof(BeginUpload);
@@ -34,4 +40,6 @@ public static class HubMethods
     public const string Receive = nameof(Receive);
     public const string PresenceChanged = nameof(PresenceChanged);
     public const string MembershipChanged = nameof(MembershipChanged);
+    /// <summary>A room this machine is involved in changed (a <see cref="RoomState"/>), or collapsed.</summary>
+    public const string RoomChanged = nameof(RoomChanged);
 }

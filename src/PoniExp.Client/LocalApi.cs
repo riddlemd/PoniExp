@@ -196,14 +196,24 @@ public sealed class LocalApiClient : IDisposable
 
     public async Task CancelBlobAsync(Guid blobId, CancellationToken ct = default) => await PostAsync<LocalOk>($"blobs/{blobId}/cancel", new { }, ct);
 
-    /// <summary>Rooms with a member here (or just <paramref name="agent"/>'s).</summary>
+    /// <summary>Rooms with an agent of this machine in them or invited (or just <paramref name="agent"/>'s), collapsed ones last.</summary>
     public Task<List<LocalRoom>> RoomsAsync(string? agent = null, CancellationToken ct = default) =>
         GetAsync<List<LocalRoom>>("rooms" + (agent is null ? "" : "?agent=" + Uri.EscapeDataString(agent)), ct);
 
+    /// <summary>Open invitations for <paramref name="agent"/> (or every local agent).</summary>
+    public Task<List<LocalRoomInvite>> RoomInvitesAsync(string? agent = null, CancellationToken ct = default) =>
+        GetAsync<List<LocalRoomInvite>>("rooms/invites" + (agent is null ? "" : "?agent=" + Uri.EscapeDataString(agent)), ct);
+
     public Task<LocalRoom> CreateRoomAsync(LocalRoomCreate request, CancellationToken ct = default) => PostAsync<LocalRoom>("rooms", request, ct);
 
-    public Task<LocalRoom> ChangeRoomAsync(string room, LocalRoomChange request, CancellationToken ct = default) =>
-        PostAsync<LocalRoom>($"rooms/{Uri.EscapeDataString(room)}/change", request, ct);
+    public Task<LocalRoom> InviteToRoomAsync(string room, LocalRoomInviteRequest request, CancellationToken ct = default) =>
+        PostAsync<LocalRoom>($"rooms/{Uri.EscapeDataString(room)}/invite", request, ct);
+
+    public Task<LocalRoom> JoinRoomAsync(string room, string agent, CancellationToken ct = default) =>
+        PostAsync<LocalRoom>($"rooms/{Uri.EscapeDataString(room)}/join", new LocalRoomAgent(agent), ct);
+
+    public Task<LocalRoom> LeaveRoomAsync(string room, string agent, CancellationToken ct = default) =>
+        PostAsync<LocalRoom>($"rooms/{Uri.EscapeDataString(room)}/leave", new LocalRoomAgent(agent), ct);
 
     public Task<LocalSent> SendToRoomAsync(string room, LocalRoomSend request, CancellationToken ct = default) =>
         PostAsync<LocalSent>($"rooms/{Uri.EscapeDataString(room)}/send", request, ct);
@@ -448,6 +458,10 @@ public static class LocalEventKinds
     public const string Receipt = "receipt";
     /// <summary>A message in a room the agent is a member of.</summary>
     public const string RoomMessage = "room-message";
+    /// <summary>The agent was invited to a room (join it, or ignore the invitation).</summary>
+    public const string RoomInvite = "room-invite";
+    /// <summary>A room the agent is in changed: someone joined or left, or it collapsed.</summary>
+    public const string RoomChanged = "room-changed";
     /// <summary>A file receipt (downloaded, download-failed) for a file the agent sent.</summary>
     public const string FileReceipt = "file-receipt";
 }
@@ -479,7 +493,8 @@ public sealed record LocalMessageDetail(LocalMessage Message, IReadOnlyList<Mess
 /// <summary>A delivery receipt for <see cref="MessageId"/>: received, acknowledged or rejected (with a reason).</summary>
 public sealed record LocalReceipt(Guid MessageId, string Receipt, string? Reason, string From);
 
-public sealed record LocalEvent(string Kind, LocalMessage? Message = null, LocalReceipt? Receipt = null, LocalFileReceipt? FileReceipt = null);
+public sealed record LocalEvent(string Kind, LocalMessage? Message = null, LocalReceipt? Receipt = null, LocalFileReceipt? FileReceipt = null,
+    LocalRoom? Room = null, LocalRoomInvite? Invite = null);
 
 /// <summary>A file receipt for <see cref="BlobId"/>, sent with <see cref="MessageId"/>: downloaded, or download-failed (with why).</summary>
 public sealed record LocalFileReceipt(Guid MessageId, Guid BlobId, string Receipt, string? Reason, string From);
@@ -569,17 +584,23 @@ public sealed record LocalJoinResult(string Membership, string? Name, string Mac
 
 public sealed record LocalOk(bool Ok);
 
-/// <summary>A room as a member machine knows it. Members and admins are <c>machine-name/agent</c>.</summary>
-public sealed record LocalRoom(Guid Id, string Name, long Version, IReadOnlyList<string> Members, IReadOnlyList<string> Admins, bool Closed);
+/// <summary>
+/// A room as this machine knows it. Members are <c>machine-name/agent</c>; <see cref="Invited"/> are open invitations.
+/// A collapsed room's history is still readable here.
+/// </summary>
+public sealed record LocalRoom(Guid Id, string Name, string Creator, DateTimeOffset OpenedOn, IReadOnlyList<string> Members,
+    IReadOnlyList<LocalRoomInvite> Invited, bool Collapsed, string? CollapseReason);
 
-public sealed record LocalRoomCreate(string Agent, string Name, IReadOnlyList<string>? Members = null);
+/// <summary>An open invitation: <see cref="Invitee"/> joins with <c>room join</c> before <see cref="ExpiresOn"/>, or ignores it.</summary>
+public sealed record LocalRoomInvite(Guid RoomId, string Room, string Invitee, string InvitedBy, DateTimeOffset ExpiresOn);
 
-/// <summary>A change to a room by one of its admins (or <see cref="RoomChange.Leave"/> by any member).</summary>
-public sealed record LocalRoomChange(string Agent, RoomChange Change);
+public sealed record LocalRoomCreate(string Agent, string Name, IReadOnlyList<string>? Invite = null);
 
-/// <summary>What to change. Addresses may be <c>machine/agent</c>, roles or groups (resolved when the change is made).</summary>
-public sealed record RoomChange(IReadOnlyList<string>? Add = null, IReadOnlyList<string>? Remove = null, IReadOnlyList<string>? AddAdmins = null,
-    IReadOnlyList<string>? RemoveAdmins = null, string? Name = null, bool? Close = null, bool Leave = false);
+/// <summary>Invite agents (addresses may be <c>machine/agent</c>, roles or groups, resolved now).</summary>
+public sealed record LocalRoomInviteRequest(string Agent, IReadOnlyList<string> Invite);
+
+/// <summary>Join (accept an invitation) or leave.</summary>
+public sealed record LocalRoomAgent(string Agent);
 
 public sealed record LocalRoomSend(string Agent, string Body, Guid? ReplyTo = null, string? Subject = null, string? ContentType = null,
     IReadOnlyDictionary<string, string>? Metadata = null);

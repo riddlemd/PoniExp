@@ -1,3 +1,4 @@
+using PoniExp.Core.Protocol;
 using Microsoft.Extensions.Options;
 
 namespace PoniExp.Daemon;
@@ -26,6 +27,9 @@ public sealed class DaemonOptions
     /// <summary>How long to wait before trying the router again when it can't be reached at start.</summary>
     public TimeSpan ConnectRetry { get; set; } = TimeSpan.FromSeconds(5);
 
+    /// <summary>How long a room invitation stays open (at most 30 days).</summary>
+    public TimeSpan RoomInviteLifetime { get; set; } = TimeSpan.FromDays(7);
+
     /// <summary>
     /// System mode on Windows: the SID of the user the daemon serves. Only that user (and the service) may
     /// open the local pipe. Unset in user mode, where the pipe is the current user's only.
@@ -38,6 +42,11 @@ public sealed class DaemonOptionsValidator : IValidateOptions<DaemonOptions>
     public ValidateOptionsResult Validate(string? name, DaemonOptions options)
     {
         var errors = new List<string>();
+        if (options.RoomInviteLifetime <= TimeSpan.Zero || options.RoomInviteLifetime > RoomLog.MaxInviteLifetime)
+        {
+            errors.Add("Daemon:RoomInviteLifetime must be positive and at most 30 days.");
+        }
+
         if (options.SweepInterval <= TimeSpan.Zero)
         {
             errors.Add("Daemon:SweepInterval must be positive.");

@@ -67,6 +67,7 @@ public static class RouterHost
         builder.Services.AddSingleton<PresenceTracker>();
         builder.Services.AddSingleton<Blobs.BlobRegistry>();
         builder.Services.AddSingleton<AdminService>();
+        builder.Services.AddSingleton<Rooms.RoomRegistry>();
         builder.Services.AddSignalR(signalR =>
             {
                 signalR.MaximumReceiveMessageSize = Limits.MaxContentBytes * 2 + 64 * 1024;

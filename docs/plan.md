@@ -37,9 +37,10 @@ only has to build on the ones before it; a protection that arrives in a later ph
   file receipts; release; limits with per-machine overrides; the message queue's own cap; `send/reply
   --attach`, `fetch`, `release`, `blobs`, `cancel`, `listen --auto-fetch`; MCP `attach`, `fetch`, `release`;
   `admin blobs`. Protocol 5.
-- **Roles, groups (phase 7):** roles in announcements (`role:x`, `role:x/all`), owner groups
-  (`group:x`, `admin group`). Rooms were built with admins and snapshots and are being reworked to the
-  revised design (invite/join/leave log on the router, collapse and stats). Protocol 6.
+- **Rooms, roles, groups (phase 7):** roles in announcements (`role:x`, `role:x/all`), owner groups
+  (`group:x`, `admin group`), named rooms with a signed invite/join/leave log on the router,
+  envelopes sealed for exactly the members' machines, collapse when empty or idle, statistics
+  afterwards (`admin rooms`). Endpoints are called agents. Protocol 6.
 - **Executables:**
   - `poniexp` (`src/PoniExp.Server`), with the subcommands `router` and `admin`.
   - `poniexp-client` (`src/PoniExp.Cli`).
@@ -71,7 +72,7 @@ only has to build on the ones before it; a protection that arrives in a later ph
 | Roles | Self-declared per agent, carried in the signed agent announcements (phase 7). Labels for addressing only: permissions are per machine (phase 9). |
 | Permission level | Machines only. No per-agent keys or permissions: an agent is a name any local process may use, so separating agents takes separate machines (or containers, each its own machine). |
 | Naming | What was called an endpoint is an **agent**: addresses are `machine/agent`, flags `--agent`, the automatic announcement type `agent`. Agent names are labels, not identities. |
-| Rooms | Named (unique on the router while live), created by any agent; members invite, invitees accept, members leave; no admins, no removals. Membership is a log of signed events the router keeps and orders and can see (agents included); each message's key is wrapped for exactly the current members' machines, checked by the router. A room collapses when empty or idle (`RoomIdleExpiry`); the router then keeps only stats (no subjects or bodies). |
+| Rooms | Named (unique on the router while live), created by any agent; members invite, invitees accept, members leave; no admins, no removals. Membership is a log of signed events the router keeps and orders and can see (agents included); each message's key is wrapped for exactly the current members' machines, checked by the router. A room collapses when empty or idle (`RoomIdleExpiry`); the router then keeps only stats, per machine (no subjects, bodies or sending agents). |
 | Groups | Owner-defined lists of addresses on the router (`admin group`), resolved by the sender's daemon into separate messages. |
 | Local trust | Every local process running as the machine's user is trusted; it could read the user's keys anyway. The daemon scopes what each agent is shown, but that is convenience, not a security boundary. |
 | Storage | SQLite, bundled in the app (`Microsoft.Data.Sqlite`). Nothing for the user to install. |
@@ -516,7 +517,7 @@ database.
   and the local copy surviving acknowledgement and being deleted only after every local agent
   has released it.
 
-## Phase 7: Rooms, roles and groups (workshop; rooms being revised)
+## Phase 7: Rooms, roles and groups (workshop, done)
 
 Decided in the workshop (see the decisions table): roles are self-declared, groups are the owner's,
 rooms have no shared key.
@@ -553,19 +554,28 @@ Revised after review (the first build used admins and versioned snapshots; that 
   - `create` (by the creator, who is the first member), `invite`, `join` (by the invitee, accepting) and
     `leave`.
   - Each event is signed by its author's machine key and names the author agent, so the router can't
-    forge or alter one, only withhold it.
+    forge or alter one, only withhold it. It carries that key (whose fingerprint is the machine id), so a
+    log checks out without asking anyone, even after a machine is removed.
+  - The room id is derived from the `create` event, so no other log can claim it.
   - An invite counts only from a member at that point in the log; a join only from an invited agent;
     a leave only from a member.
   - Every member machine (and an invitee's) gets the log, checks it from `create` on, and derives the
     members from it. A member is whoever has joined (or created the room) and hasn't left.
-  - Invites are pending until accepted, and an agent declines by ignoring the invite (it expires).
+  - Invites are pending until accepted, and an agent declines by ignoring the invite (it expires,
+    after `Daemon:RoomInviteLifetime`, default 7 days, at most 30).
+  - The owner removing a machine adds a router `removed` event (unsigned), which members accept only for
+    a machine no longer approved: its agents are out.
+  - The router sends a room's log to every machine involved whenever it changes, and to a machine that
+    connects before its queued messages; a daemon keeps a log only if it extends the one it has.
 - **The router sees the membership:** which agents are in which room, and when they joined and left.
   That is a deliberate exception to "the router sees machines, not agents", needed for unique names
   and for collapsing empty rooms.
 - **Messages:** one envelope per room message, addressed to the room, its content key wrapped for
   exactly the current members' machines. The router fans it out, and **refuses an envelope not wrapped
   for exactly those machines**, so a sender that missed a join or leave refreshes and seals again (no
-  stale sender can reach someone who left). Contents, subjects and bodies stay end-to-end encrypted.
+  stale sender can reach someone who left). Contents, subjects, bodies and the sending agent stay
+  end-to-end encrypted: the router checks the sending machine has a member in the room, and each
+  member's daemon checks the sending agent was a member when it wrote the message.
 - **History:** an agent sees messages from when it joined. Each machine keeps its own copy under the
   normal retention (phase 5). No receipts and no inbox in rooms: they're read like a channel.
 - **Collapse:** a room collapses when its last member leaves, or when no member has said anything for
@@ -574,7 +584,7 @@ Revised after review (the first build used admins and versioned snapshots; that 
 - **Stats:** on collapse the router compacts the room to statistics and drops the event log:
   - name and id, opened and collapsed (and why);
   - members, with when each joined and left;
-  - per member, message count and bytes;
+  - per machine, message count and bytes (the sending agent is encrypted, so not per member);
   - each message's timestamp and size.
 
   No subjects or bodies: the router never has them. `poniexp admin rooms [--collapsed]` shows them.
@@ -583,6 +593,8 @@ Revised after review (the first build used admins and versioned snapshots; that 
   `room read`, `room send`. MCP `rooms`, `room_invites`, `room_join`, `room_leave`, `room_invite`,
   `room` (read), `room_send`, `room_create`.
 - **Not in this phase:** files in room messages (a shared copy needs its own release rule).
+- **Settings:** `PoniExp:RoomIdleExpiry` (14 days) and `PoniExp:RoomStatsRetention` (365 days) on the
+  router; `Daemon:RoomInviteLifetime` (7 days) on each machine.
 
 **Done when:** tests show:
 - a unique name refused while live and free after collapse;

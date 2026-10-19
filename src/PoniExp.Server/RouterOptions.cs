@@ -82,6 +82,12 @@ public sealed class RouterOptions
 
     /// <summary>How long the traffic log (when it's on) keeps its entries.</summary>
     public TimeSpan TrafficLogRetention { get; set; } = TimeSpan.FromDays(30);
+
+    /// <summary>A room in which nobody has said or done anything for this long collapses.</summary>
+    public TimeSpan RoomIdleExpiry { get; set; } = TimeSpan.FromDays(14);
+
+    /// <summary>How long a collapsed room's statistics are kept.</summary>
+    public TimeSpan RoomStatsRetention { get; set; } = TimeSpan.FromDays(365);
 }
 
 public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
@@ -138,6 +144,11 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
         if (options.TrafficLogRetention <= TimeSpan.Zero)
         {
             errors.Add("PoniExp:TrafficLogRetention must be positive.");
+        }
+
+        if (options.RoomIdleExpiry <= TimeSpan.Zero || options.RoomStatsRetention <= TimeSpan.Zero)
+        {
+            errors.Add("PoniExp:RoomIdleExpiry and RoomStatsRetention must be positive.");
         }
 
         if (options.SharedAddresses.Any(a => !System.Net.IPAddress.TryParse(a, out _)))

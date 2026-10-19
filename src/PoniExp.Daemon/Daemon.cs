@@ -66,12 +66,14 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
             if (up)
             {
                 Background(() => AnnounceAsync(null));
+                Background(SyncRoomsAsync);
             }
             else
             {
                 Diagnose("warning", "connection", $"connection to the router lost: {error?.Message ?? "closed"}");
             }
         };
+        relay.RoomChanged += ApplyRoom;
         relay.MessageRejected += (envelope, why) => Diagnose("warning", why.Contains("signature", StringComparison.Ordinal) ? "signature" : "delivery",
             $"refused a message: {why}", envelope?.FromMachine, envelope?.Id);
         relay.BackgroundError += e => Diagnose("error", "delivery", e.Message);
@@ -173,10 +175,6 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
         {
             case MessageType.Message when RoomAddress.TryParse(envelope.ToMachine, out var roomId):
                 OnRoomMessage(tx, envelope, content, roomId);
-                break;
-
-            case MessageType.Room: // between daemons: membership, applied if an admin sent it
-                OnRoomSnapshot(tx, envelope, content);
                 break;
 
             case MessageType.Message:
@@ -304,7 +302,7 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
             if (Store.GetState(message.Envelope.FromMachine, message.Envelope.Id, MessageDirection.In) == MessageEvents.Received
                 && Store.GetRoom(roomId) is { } room)
             {
-                PushToRoom(room.Snapshot, Store.GetRoomMessages(MachineId, roomId, null).Single(m => m.Id == message.Envelope.Id), MessageDirection.In);
+                PushToRoom(room, Store.GetRoomMessages(MachineId, roomId, null).Single(m => m.Id == message.Envelope.Id), MessageDirection.In);
             }
         }
         else if (content.Type == MessageType.Message)
@@ -555,7 +553,7 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
     {
         content ??= _relay.Open(stored.Envelope!);
         var incoming = direction == MessageDirection.In;
-        var to = RoomAddress.TryParse(stored.ToMachine, out var roomId) ? $"room:{Store.GetRoom(roomId)?.Snapshot.Name ?? roomId.ToString()}"
+        var to = RoomAddress.TryParse(stored.ToMachine, out var roomId) ? $"room:{Store.GetRoom(roomId)?.Name ?? roomId.ToString()}"
             : $"{NameOf(stored.ToMachine)}/{content.ToAgent}";
         return new LocalMessage(stored.Id, stored.FromMachine, $"{NameOf(stored.FromMachine)}/{content.FromAgent}", to, incoming ? "in" : "out", content.ConversationId, content.ReplyTo, content.OperationId,
             content.Status is { } s ? WireProtocol.NameOf(s) : null, content.Subject, WireProtocol.NameOf(content.Type), content.ContentType,

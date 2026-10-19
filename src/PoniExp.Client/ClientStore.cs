@@ -17,7 +17,7 @@ namespace PoniExp.Client;
 /// </summary>
 public sealed class ClientStore
 {
-    private const int SchemaVersion = 6;
+    private const int SchemaVersion = 7;
 
     private const string Schema = """
         PRAGMA journal_mode = WAL;
@@ -165,12 +165,12 @@ public sealed class ClientStore
         );
         CREATE INDEX IF NOT EXISTS attachment_events_message ON attachment_events (from_machine, message_id);
         CREATE TABLE IF NOT EXISTS rooms (
-            id         TEXT PRIMARY KEY,
-            snapshot   TEXT NOT NULL,
-            version    INTEGER NOT NULL,
-            changed_by TEXT NOT NULL,
-            changed_on TEXT NOT NULL,
-            joined_on  TEXT NOT NULL
+            id           TEXT PRIMARY KEY,
+            name         TEXT NOT NULL,
+            events       TEXT NOT NULL,
+            collapsed    INTEGER NOT NULL DEFAULT 0,
+            reason       TEXT,
+            updated_on   TEXT NOT NULL
         ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS diagnostics (
             occurred_on  TEXT NOT NULL,
@@ -212,6 +212,11 @@ public sealed class ClientStore
         }.ToString();
 
         using var connection = Open();
+        if (Query(connection, null, "PRAGMA user_version;", r => r.GetInt64(0)).Single() is > 0 and < 7)
+        {
+            Execute(connection, null, "DROP TABLE IF EXISTS rooms;"); // schema 6's admin snapshots; rooms are now a signed log
+        }
+
         Execute(connection, null, Schema);
         AddColumn(connection, "agents", "roles", "TEXT"); // schema 5
         AddColumn(connection, "peer_agents", "roles", "TEXT");
@@ -401,11 +406,11 @@ public sealed class ClientStore
             r.IsDBNull(10) ? null : r.GetString(10), r.IsDBNull(11) ? null : r.GetString(11), r.IsDBNull(12) ? null : r.GetString(12),
             r.IsDBNull(13) ? null : r.GetString(13));
 
-    public IReadOnlyList<RoomRecord> GetRooms() =>
-        Query("SELECT snapshot, changed_by, changed_on, joined_on FROM rooms ORDER BY changed_on DESC;", ReadRoom);
+    internal const string RoomColumns = "id, name, events, collapsed, reason, updated_on";
 
-    public RoomRecord? GetRoom(Guid id) =>
-        Query("SELECT snapshot, changed_by, changed_on, joined_on FROM rooms WHERE id = $id;", ReadRoom, ("$id", Id(id))).FirstOrDefault();
+    public IReadOnlyList<RoomRecord> GetRooms() => Query($"SELECT {RoomColumns} FROM rooms ORDER BY collapsed, updated_on DESC;", ReadRoom);
+
+    public RoomRecord? GetRoom(Guid id) => Query($"SELECT {RoomColumns} FROM rooms WHERE id = $id;", ReadRoom, ("$id", Id(id))).FirstOrDefault();
 
     /// <summary>A room's messages on this machine (sent and accepted), oldest first: the most recent <paramref name="limit"/> since <paramref name="since"/>.</summary>
     public IReadOnlyList<StoredMessage> GetRoomMessages(string me, Guid roomId, DateTimeOffset? since, int limit = 200)
@@ -423,7 +428,8 @@ public sealed class ClientStore
     }
 
     internal static RoomRecord ReadRoom(SqliteDataReader r) =>
-        new(JsonSerializer.Deserialize<RoomSnapshot>(r.GetString(0), WireProtocol.Json)!, r.GetString(1), Parse(r.GetString(2)), Parse(r.GetString(3)));
+        new(Guid.Parse(r.GetString(0)), r.GetString(1), JsonSerializer.Deserialize<List<RoomEvent>>(r.GetString(2), WireProtocol.Json)!, r.GetInt64(3) == 1,
+            r.IsDBNull(4) ? null : r.GetString(4), Parse(r.GetString(5)));
 
     /// <summary>The conversations local agents have had, most recent first.</summary>
     public IReadOnlyList<ConversationRecord> GetConversations(string? agent = null, int limit = 100) =>
@@ -837,16 +843,20 @@ public sealed class StoreTransaction
         Execute("UPDATE blobs SET released_on = $now WHERE blob_id = $id AND released_on IS NULL;", ("$id", ClientStore.Id(blobId)), ("$now", ClientStore.Stamp(Now)));
 
     public RoomRecord? GetRoom(Guid id) =>
-        ClientStore.Query(_connection, _transaction, "SELECT snapshot, changed_by, changed_on, joined_on FROM rooms WHERE id = $id;", ClientStore.ReadRoom,
+        ClientStore.Query(_connection, _transaction, $"SELECT {ClientStore.RoomColumns} FROM rooms WHERE id = $id;", ClientStore.ReadRoom,
             ("$id", ClientStore.Id(id))).FirstOrDefault();
 
-    /// <summary>Stores a room's newest membership snapshot (the caller has checked it may replace the last).</summary>
-    public void SaveRoom(RoomSnapshot snapshot, string changedBy) =>
+    /// <summary>Stores a room's log (the caller has checked it, and that it only grew).</summary>
+    public void SaveRoom(Guid id, string name, IReadOnlyList<RoomEvent> events) =>
         Execute("""
-            INSERT INTO rooms (id, snapshot, version, changed_by, changed_on, joined_on) VALUES ($id, $snapshot, $version, $by, $now, $now)
-            ON CONFLICT (id) DO UPDATE SET snapshot = $snapshot, version = $version, changed_by = $by, changed_on = $now;
-            """, ("$id", ClientStore.Id(snapshot.RoomId)), ("$snapshot", JsonSerializer.Serialize(snapshot, WireProtocol.Json)), ("$version", snapshot.Version),
-            ("$by", changedBy), ("$now", ClientStore.Stamp(Now)));
+            INSERT INTO rooms (id, name, events, updated_on) VALUES ($id, $name, $events, $now)
+            ON CONFLICT (id) DO UPDATE SET events = $events, updated_on = $now;
+            """, ("$id", ClientStore.Id(id)), ("$name", name), ("$events", JsonSerializer.Serialize(events, WireProtocol.Json)), ("$now", ClientStore.Stamp(Now)));
+
+    /// <summary>The room has collapsed: this machine keeps its log and messages (under the usual retention).</summary>
+    public void CollapseRoom(Guid id, string reason) =>
+        Execute("UPDATE rooms SET collapsed = 1, reason = $reason, updated_on = $now WHERE id = $id AND collapsed = 0;",
+            ("$id", ClientStore.Id(id)), ("$reason", reason), ("$now", ClientStore.Stamp(Now)));
 
     /// <summary>The record of an operation a sender agent asked of this machine, unless it has expired.</summary>
     public OperationRecord? GetOperation(string fromMachine, string fromAgent, Guid operationId) =>
@@ -1094,8 +1104,8 @@ public static class AttachmentEvents
 }
 
 /// <summary>A conversation as one local agent sees it. <see cref="State"/> is open or finished.</summary>
-/// <summary>A room as this machine knows it: its latest accepted snapshot, who changed it last, and when this machine first heard of it.</summary>
-public sealed record RoomRecord(RoomSnapshot Snapshot, string ChangedBy, DateTimeOffset ChangedOn, DateTimeOffset JoinedOn);
+/// <summary>A room as this machine knows it: its membership log (checked), and whether it has collapsed.</summary>
+public sealed record RoomRecord(Guid Id, string Name, IReadOnlyList<RoomEvent> Events, bool Collapsed, string? CollapseReason, DateTimeOffset UpdatedOn);
 
 public sealed record ConversationRecord(Guid Id, string LocalAgent, string PeerMachine, string PeerAgent, string? Subject, string StartedBy,
     DateTimeOffset StartedOn, DateTimeOffset LastActivityOn, string State);

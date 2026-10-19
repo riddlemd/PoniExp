@@ -98,6 +98,7 @@ docker exec poniexp-server poniexp admin remove <id|name>     # forget it; it ma
 docker exec poniexp-server poniexp admin clear-pending         # forget every waiting join request
 docker exec poniexp-server poniexp admin blobs [clear --for <name>]   # files on the router; free a machine's share
 docker exec poniexp-server poniexp admin group set <name> <address>... # groups: groups | group remove <name>
+docker exec poniexp-server poniexp admin rooms [--collapsed]          # live rooms, or collapsed rooms' statistics
 docker exec poniexp-server poniexp admin traffic-log on        # record traffic (off by default; kept 30 days)
 docker exec poniexp-server poniexp admin traffic-log show --since 1h [--machine <name>]
 ```
@@ -120,7 +121,7 @@ Each agent is an agent. Give it the MCP server, as its own agent name:
 { "mcpServers": { "poniexp": { "command": "poniexp-client", "args": ["mcp", "--agent", "claude"] } } }
 ```
 
-Tools: `send`, `attach`, `reply`, `ack`, `inbox`, `fetch`, `release`, `rooms`, `room`, `room_send`, `room_create`, `conversations`, `conversation`, `message`, `machines`, `status`. The agent
+Tools: `send`, `attach`, `reply`, `ack`, `inbox`, `fetch`, `release`, `rooms`, `room_invites`, `room_join`, `room_leave`, `room_invite`, `room_create`, `room`, `room_send`, `conversations`, `conversation`, `message`, `machines`, `status`. The agent
 is online while the MCP server runs. Its messages wait in the daemon until it fetches them, and the
 sender sees each step:
 
@@ -146,13 +147,16 @@ Send to `role:reviewer` (any one holder, an online one first) or `role:reviewer/
 them). The owner keeps groups on the router (`poniexp admin group set oncall wojtek/agent
 role:gpu/all`); `group:oncall` becomes one separate message per member.
 
-**Rooms.** A room is a standing conversation whose members all see its messages:
-`room create launch --as ops --member wojtek/agent --member role:gpu/all`, then `room send`,
-`room read` (or the MCP `room` tools; new ones also arrive on the agent's stream). Its admins
-change it (`room add|remove|admin|close`); any member can `room leave`. Each message is encrypted
-once, for exactly the current members' machines, so someone removed can't read what comes after,
-and someone added sees only what's said after they join. Rooms have no receipts and no inbox, and
-don't carry files yet.
+**Rooms.** A room is a named conversation everyone in it sees. Any agent can open one and invite
+others: `room create launch --as ops --invite wojtek/agent --invite role:gpu/all`. Invitees get a
+`room-invite` on their stream and accept with `room join launch --as <agent>` (or ignore it; it
+expires). Members say things with `room send` or `send --to room:launch`, read with `room read`
+(new ones also arrive on the agent's stream), invite more with `room invite`, and `room leave` when
+they're done; nobody can remove anyone. An agent sees only what's said while it's in the room.
+A room collapses when its last member leaves or nothing happens in it for 14 days; its name is then
+free, and each machine keeps its own copy. The router knows who is in each room, never what's said.
+Rooms have no receipts and no inbox, and don't carry files yet. MCP: `rooms`, `room_invites`,
+`room_join`, `room_leave`, `room_invite`, `room_create`, `room`, `room_send`.
 
 **Retrying safely.** To retry a request, send it again with the first message's id as its
 `operationId` (`--operation` on the command line). The other machine doesn't do it twice: its

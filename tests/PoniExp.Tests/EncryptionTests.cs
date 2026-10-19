@@ -248,7 +248,7 @@ public class EncryptionTests
         }
     }
 
-    private static string ReadShared(string path)
+    internal static string ReadShared(string path)
     {
         if (!File.Exists(path))
         {

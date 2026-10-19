@@ -20,6 +20,7 @@ public sealed class RelayHub(
     TrafficLog traffic,
     RouterStore store,
     PoniExp.Server.Blobs.BlobRegistry blobs,
+    PoniExp.Server.Rooms.RoomRegistry rooms,
     TimeProvider time,
     IOptionsSnapshot<RouterOptions> options,
     ILogger<RelayHub> logger) : Hub
@@ -111,6 +112,12 @@ public sealed class RelayHub(
             }
         }
 
+        // Room state first: a queued room message is judged against the members as they are when it was sent.
+        foreach (var room in rooms.Mine(id, []))
+        {
+            await Clients.Caller.SendAsync(HubMethods.RoomChanged, room);
+        }
+
         foreach (var delivery in queue.For(id))
         {
             traffic.Delivered(delivery.Envelope);
@@ -192,17 +199,18 @@ public sealed class RelayHub(
             throw Refuse($"The encrypted content must be at most {Limits.MaxContentBytes} bytes.", me, envelope);
         }
 
-        // A room envelope goes to every machine its key is wrapped for; a message to its one recipient.
-        var isRoom = RoomAddress.TryParse(envelope.ToMachine, out _);
+        // A room envelope goes to the machines of the room's members, and must be wrapped for exactly those; a message to its one recipient.
+        var isRoom = RoomAddress.TryParse(envelope.ToMachine, out var roomId);
         List<string> recipients;
         if (isRoom)
         {
-            recipients = [.. (envelope.Wraps ?? []).Select(w => w.Machine).Where(m => m != me).Distinct()];
-            if (recipients.Count is 0 or > Limits.MaxRoomMachines || envelope.Wraps!.Count != recipients.Count + envelope.Wraps.Count(w => w.Machine == me)
-                || envelope.Wraps.Count(w => w.Machine == me) > 1)
+            try
             {
-                throw Refuse($"A room envelope is wrapped once for each of 1-{Limits.MaxRoomMachines} other machines (and at most once for the sender).",
-                    me, envelope);
+                recipients = [.. rooms.CheckMessage(me, envelope, roomId)];
+            }
+            catch (RouterException e)
+            {
+                throw Refuse(e.Message, me, envelope);
             }
         }
         else
@@ -242,7 +250,12 @@ public sealed class RelayHub(
         }
 
         var online = recipients.Where(presence.IsOnline).ToList();
-        if (await queue.EnqueueAsync(envelope, isRoom ? recipients : null) is { } delivery)
+        if (isRoom && queue.ExpiryOf(envelope.Id) is null)
+        {
+            rooms.Record(roomId, envelope);
+        }
+
+        if (recipients.Count > 0 && await queue.EnqueueAsync(envelope, isRoom ? recipients : null) is { } delivery)
         {
             foreach (var recipient in online)
             {
@@ -317,6 +330,45 @@ public sealed class RelayHub(
         try
         {
             return work();
+        }
+        catch (RouterException e)
+        {
+            throw Refuse(e.Message, me);
+        }
+    }
+
+    // ---- rooms ----
+
+    [HubMethodName(HubMethods.CreateRoom)]
+    public Task<RoomState> CreateRoomAsync(RoomEvent create)
+    {
+        var me = RequireMember();
+        return Room(() => rooms.CreateAsync(me, create), me);
+    }
+
+    [HubMethodName(HubMethods.SubmitRoomEvent)]
+    public Task<RoomState> SubmitRoomEventAsync(RoomEvent e)
+    {
+        var me = RequireMember();
+        return Room(() => rooms.SubmitAsync(me, e), me);
+    }
+
+    [HubMethodName(HubMethods.GetRoom)]
+    public Task<RoomState> GetRoomAsync(Guid roomId)
+    {
+        var me = RequireMember();
+        return Room(() => Task.FromResult(rooms.Get(me, roomId)), me);
+    }
+
+    /// <summary>Live rooms this machine is involved in, and what became of the ones it knows that aren't.</summary>
+    [HubMethodName(HubMethods.GetMyRooms)]
+    public IReadOnlyList<RoomState> GetMyRooms(IReadOnlyList<Guid> known) => rooms.Mine(RequireMember(), known ?? []);
+
+    private async Task<T> Room<T>(Func<Task<T>> work, string me)
+    {
+        try
+        {
+            return await work();
         }
         catch (RouterException e)
         {

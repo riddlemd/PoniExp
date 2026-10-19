@@ -107,28 +107,50 @@ public sealed class PoniExpTools(McpAgent me)
         Json(await me.Api.MessageAsync(me.Agent, ParseId(messageId) ?? throw new ArgumentException("messageId is required"), cancellationToken));
 
     [McpServerTool(Name = "rooms", ReadOnly = true), Description(
-        "The rooms you're a member of: standing conversations with several agents, who see each other's messages. Each with its members and admins.")]
+        "Rooms: named, standing conversations where every member sees every message. Lists the rooms you're in or invited to, " +
+        "with their members and open invitations.")]
     public async Task<string> RoomsAsync(CancellationToken cancellationToken = default) => Json(await me.Api.RoomsAsync(me.Agent, cancellationToken));
 
+    [McpServerTool(Name = "room_invites", ReadOnly = true), Description(
+        "Your open room invitations. Join one with room_join, or ignore it (it expires).")]
+    public async Task<string> RoomInvitesAsync(CancellationToken cancellationToken = default) =>
+        Json(await me.Api.RoomInvitesAsync(me.Agent, cancellationToken));
+
     [McpServerTool(Name = "room", ReadOnly = true), Description(
-        "Read a room's messages, oldest first (the most recent 200, or those after 'since'). New ones also arrive as you go; there's no ack in rooms.")]
-    public async Task<string> RoomAsync([Description("The room's id or name.")] string room,
+        "Read a room's messages, oldest first: those said while you were in it (the most recent 200, or those after 'since'). " +
+        "New ones also arrive as you go; rooms have no ack and no inbox.")]
+    public async Task<string> RoomAsync([Description("The room's name or id.")] string room,
         [Description("Only messages created after this time (ISO 8601), e.g. the last one you saw.")] string? since = null,
         CancellationToken cancellationToken = default) =>
         Json(await me.Api.ReadRoomAsync(room, me.Agent, since is null ? null : DateTimeOffset.Parse(since, System.Globalization.CultureInfo.InvariantCulture),
             ct: cancellationToken));
 
-    [McpServerTool(Name = "room_send"), Description("Say something in a room: every member sees it. Set replyTo to answer a message in it.")]
-    public async Task<string> RoomSendAsync([Description("The room's id or name.")] string room, [Description("The message text.")] string body,
+    [McpServerTool(Name = "room_send"), Description("Say something in a room you're in: every member sees it. Set replyTo to answer a message in it.")]
+    public async Task<string> RoomSendAsync([Description("The room's name or id.")] string room, [Description("The message text.")] string body,
         [Description("The id of the message you are answering (optional).")] string? replyTo = null, CancellationToken cancellationToken = default) =>
         Json(await me.Api.SendToRoomAsync(room, new LocalRoomSend(me.Agent, body, ParseId(replyTo)), cancellationToken));
 
     [McpServerTool(Name = "room_create"), Description(
-        "Create a room with you as its admin. Members are 'machine/agent', 'role:<role>/all' or 'group:<name>'. Members who join later " +
-        "see only what is said after they join.")]
-    public async Task<string> RoomCreateAsync([Description("A name for the room.")] string name, [Description("Its members besides you.")] string[] members,
+        "Open a room with you in it. Its name must be free among live rooms. Anyone invited must accept; members only ever " +
+        "leave (nobody can remove anyone). The room collapses when the last member leaves or it goes quiet for long enough.")]
+    public async Task<string> RoomCreateAsync([Description("The room's name: lowercase letters, digits, '.', '_' or '-'.")] string name,
+        [Description("Agents to invite: 'machine/agent', 'role:<role>' or 'role:<role>/all', or 'group:<name>'.")] string[]? invite = null,
         CancellationToken cancellationToken = default) =>
-        Json(await me.Api.CreateRoomAsync(new LocalRoomCreate(me.Agent, name, members), cancellationToken));
+        Json(await me.Api.CreateRoomAsync(new LocalRoomCreate(me.Agent, name, invite), cancellationToken));
+
+    [McpServerTool(Name = "room_invite"), Description("Invite agents to a room you're in. They must accept (room_join).")]
+    public async Task<string> RoomInviteAsync([Description("The room's name or id.")] string room,
+        [Description("Agents to invite: 'machine/agent', 'role:<role>' or 'role:<role>/all', or 'group:<name>'.")] string[] invite,
+        CancellationToken cancellationToken = default) =>
+        Json(await me.Api.InviteToRoomAsync(room, new LocalRoomInviteRequest(me.Agent, invite), cancellationToken));
+
+    [McpServerTool(Name = "room_join"), Description("Accept an invitation to a room. You see what's said from now on, not before.")]
+    public async Task<string> RoomJoinAsync([Description("The room's name or id.")] string room, CancellationToken cancellationToken = default) =>
+        Json(await me.Api.JoinRoomAsync(room, me.Agent, cancellationToken));
+
+    [McpServerTool(Name = "room_leave"), Description("Leave a room when you no longer need to be part of the conversation.")]
+    public async Task<string> RoomLeaveAsync([Description("The room's name or id.")] string room, CancellationToken cancellationToken = default) =>
+        Json(await me.Api.LeaveRoomAsync(room, me.Agent, cancellationToken));
 
     [McpServerTool(Name = "machines", ReadOnly = true), Description("The other machines, whether they're online, their agents and the agents' states.")]
     public async Task<string> MachinesAsync(CancellationToken cancellationToken = default) => Json(await me.Api.MachinesAsync(cancellationToken));

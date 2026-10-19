@@ -73,6 +73,30 @@ public static class Signatures
         return unsigned with { Signature = sender.Sign(EnvelopePayload(unsigned)) };
     }
 
+    /// <summary>Signs a room event with its author's machine key (the actor's machine).</summary>
+    public static RoomEvent SignRoomEvent(MachineKeys keys, RoomEvent e)
+    {
+        var unsigned = e with
+        {
+            OccurredOn = Truncate(e.OccurredOn), ExpiresOn = e.ExpiresOn is { } x ? Truncate(x) : null, ActorKey = keys.PublicKey, Signature = string.Empty,
+        };
+        return unsigned with { Signature = keys.Sign(RoomEventPayload(unsigned)) };
+    }
+
+    public static byte[] RoomEventPayload(RoomEvent e) =>
+        SigningPayload.Build("room-event", [
+            e.EventId.ToString("D"),
+            e.RoomId.ToString("D"),
+            WireProtocol.NameOf(e.Kind),
+            e.Actor,
+            e.Subject ?? "",
+            e.Name ?? "",
+            e.InviteId?.ToString("D") ?? "",
+            Stamp(e.OccurredOn),
+            e.ExpiresOn is { } x ? Stamp(x) : "",
+            e.ActorKey,
+        ]);
+
     public static bool VerifyJoin(JoinRequest request) =>
         PublicKeys.Verify(request.PublicKey, JoinPayload(request), request.Signature)
         && PublicKeys.VerifyEncryptionKey(request.PublicKey, request.EncryptionKey, request.EncryptionKeySignature);

@@ -62,6 +62,25 @@ public static class LocalApiEndpoints
         app.MapPost("/send", (Daemon d, LocalSendRequest request, CancellationToken ct) => Handle(async () =>
         {
             RequireAgent(request.From);
+            if (request.To.Any(t => t.StartsWith(RoomAddress.Prefix, StringComparison.Ordinal)))
+            {
+                if (request.To is not [var room] || request.Attachments is { Count: > 0 } || request.ConversationId is not null)
+                {
+                    throw new ArgumentException("a room is sent to on its own, without files or a conversation id (the room is the conversation)");
+                }
+
+                var said = await d.SendToRoomAsync(request.From, room, new OutgoingMessage(request.Body ?? throw new ArgumentException("a body is required"))
+                {
+                    Subject = request.Subject,
+                    ReplyTo = request.ReplyTo,
+                    ContentType = request.ContentType ?? "text/plain",
+                    Metadata = request.Metadata,
+                    ExpiresIn = request.ExpiresIn,
+                }, ct);
+                return Results.Ok(new List<LocalSent> { new(said.Id, $"room:{d.RequireRoom(room).Name}", said.ConversationId, said.Sequence, said.ExpiresOn,
+                    said.State is { } state ? WireProtocol.NameOf(state) : "outbox") });
+            }
+
             var sent = await d.SendAsync(request.To, new OutgoingMessage(request.Body ?? throw new ArgumentException("a body is required"))
             {
                 FromAgent = request.From,
@@ -161,16 +180,30 @@ public static class LocalApiEndpoints
 
         app.MapGet("/rooms", (Daemon d, string? agent) => Results.Ok(d.Rooms(agent)));
 
+        app.MapGet("/rooms/invites", (Daemon d, string? agent) => Results.Ok(d.RoomInvites(agent)));
+
         app.MapPost("/rooms", (Daemon d, LocalRoomCreate request, CancellationToken ct) => Handle(async () =>
         {
             RequireAgent(request.Agent);
-            return Results.Ok(d.ToLocalRoom(await d.CreateRoomAsync(request.Agent, request.Name, request.Members ?? [], ct)));
+            return Results.Ok(await d.CreateRoomAsync(request.Agent, request.Name, request.Invite ?? [], ct));
         }));
 
-        app.MapPost("/rooms/{room}/change", (Daemon d, string room, LocalRoomChange request, CancellationToken ct) => Handle(async () =>
+        app.MapPost("/rooms/{room}/invite", (Daemon d, string room, LocalRoomInviteRequest request, CancellationToken ct) => Handle(async () =>
         {
             RequireAgent(request.Agent);
-            return Results.Ok(d.ToLocalRoom(await d.ChangeRoomAsync(request.Agent, room, request.Change, ct)));
+            return Results.Ok(await d.InviteToRoomAsync(request.Agent, room, request.Invite ?? [], ct));
+        }));
+
+        app.MapPost("/rooms/{room}/join", (Daemon d, string room, LocalRoomAgent request, CancellationToken ct) => Handle(async () =>
+        {
+            RequireAgent(request.Agent);
+            return Results.Ok(await d.JoinRoomAsync(request.Agent, room, ct));
+        }));
+
+        app.MapPost("/rooms/{room}/leave", (Daemon d, string room, LocalRoomAgent request, CancellationToken ct) => Handle(async () =>
+        {
+            RequireAgent(request.Agent);
+            return Results.Ok(await d.LeaveRoomAsync(request.Agent, room, ct));
         }));
 
         app.MapPost("/rooms/{room}/send", (Daemon d, string room, LocalRoomSend request, CancellationToken ct) => Handle(async () =>
@@ -183,7 +216,7 @@ public static class LocalApiEndpoints
                 ContentType = request.ContentType ?? "text/plain",
                 Metadata = request.Metadata,
             }, ct);
-            return Results.Ok(new LocalSent(sent.Id, $"room:{d.RequireRoom(room).Snapshot.Name}", sent.ConversationId, sent.Sequence, sent.ExpiresOn,
+            return Results.Ok(new LocalSent(sent.Id, $"room:{d.RequireRoom(room).Name}", sent.ConversationId, sent.Sequence, sent.ExpiresOn,
                 sent.State is { } s ? WireProtocol.NameOf(s) : "outbox"));
         }));
 

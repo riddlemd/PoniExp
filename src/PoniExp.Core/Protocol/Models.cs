@@ -30,8 +30,6 @@ public enum MessageType
     Receipt,
     FileReceipt,
     Agent,
-    /// <summary>A room's membership snapshot, daemon to daemon (see <see cref="RoomSnapshot"/>).</summary>
-    Room,
 }
 
 /// <summary>The outcome of the work a message asked for, carried on replies. Anything but Failed is the success path.</summary>
@@ -218,13 +216,6 @@ public sealed record AgentAnnouncement(long Counter, IReadOnlyList<AnnouncedAgen
 
 /// <summary>An owner-defined group: a named list of addresses (<c>machine/agent</c> or <c>role:...</c>), by machine name.</summary>
 public sealed record GroupInfo(string Name, IReadOnlyList<string> Members);
-
-/// <summary>
-/// The body of a <see cref="MessageType.Room"/> message (JSON): a room's complete membership as of
-/// <see cref="Version"/>. Members and admins are <c>machineId/agent</c>. A machine applies it only if it is
-/// newer than what it has and comes from an admin of the room as it knows it (or is a member leaving).
-/// </summary>
-public sealed record RoomSnapshot(Guid RoomId, string Name, long Version, IReadOnlyList<string> Members, IReadOnlyList<string> Admins, bool Closed = false);
 
 /// <summary>How a room envelope is addressed: <c>room:&lt;id&gt;</c> in <see cref="Envelope.ToMachine"/>, signed like every header field.</summary>
 public static class RoomAddress

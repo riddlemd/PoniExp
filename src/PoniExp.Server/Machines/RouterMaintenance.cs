@@ -4,7 +4,7 @@ using PoniExp.Server.Admin;
 namespace PoniExp.Server.Machines;
 
 /// <summary>Sweeps expired join requests (telling their waiting clients) and expired queue entries.</summary>
-public sealed class RouterMaintenance(AdminService admin, MessageQueue queue, TrafficLog traffic, Blobs.BlobRegistry blobs, IOptionsMonitor<RouterOptions> options, TimeProvider time,
+public sealed class RouterMaintenance(AdminService admin, MessageQueue queue, TrafficLog traffic, Blobs.BlobRegistry blobs, Rooms.RoomRegistry rooms, IOptionsMonitor<RouterOptions> options, TimeProvider time,
     ILogger<RouterMaintenance> logger) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -17,6 +17,7 @@ public sealed class RouterMaintenance(AdminService admin, MessageQueue queue, Tr
                 await queue.PruneAsync();
                 traffic.Prune();
                 blobs.Sweep();
+                await rooms.SweepAsync();
             }
             catch (Exception e) when (e is not OperationCanceledException)
             {

@@ -16,6 +16,7 @@ public sealed class AdminService(
     ConnectionGate gate,
     RouterStore store,
     Blobs.BlobRegistry blobs,
+    Rooms.RoomRegistry rooms,
     IHubContext<RelayHub> hub,
     IOptionsMonitor<RouterOptions> options,
     TimeProvider time,
@@ -51,6 +52,7 @@ public sealed class AdminService(
         presence.Disconnect(record.Id);
         await queue.DropForAsync(record.Id);
         blobs.Forget(record.Id);
+        await rooms.MachineRemovedAsync(record.Id);
         return View(record) with { Status = MembershipStatus.Unknown };
     }
 
@@ -114,6 +116,17 @@ public sealed class AdminService(
     }
 
     public IReadOnlyList<GroupInfo> Groups() => store.LoadGroups();
+
+    public IReadOnlyList<RoomSummary> Rooms() => rooms.Summaries();
+
+    /// <summary>Collapsed rooms' statistics, members shown by machine name.</summary>
+    public IReadOnlyList<RoomStats> CollapsedRooms(DateTimeOffset? since) =>
+        [.. rooms.Collapsed(since).Select(s => s with
+        {
+            Members = [.. s.Members.Select(m => m with { Member = rooms.Display(m.Member) })],
+            Machines = [.. s.Machines.Select(m => m with { Machine = registry.Get(m.Machine)?.Name ?? m.Machine[..Math.Min(8, m.Machine.Length)] })],
+            Messages = [.. s.Messages.Select(m => m with { FromMachine = registry.Get(m.FromMachine)?.Name ?? m.FromMachine[..Math.Min(8, m.FromMachine.Length)] })],
+        })];
 
     /// <summary>
     /// Sets a group (<c>poniexp admin group set</c>): members are <c>machine/agent</c> (an approved machine, by name)

@@ -105,6 +105,11 @@ public sealed class RelayClient : IAsyncDisposable
             PresenceChanged?.Invoke(change);
         }));
         _connection.On<MembershipStatus>(HubMethods.MembershipChanged, status => Post(() => OnMembershipChangedAsync(status)));
+        _connection.On<RoomState>(HubMethods.RoomChanged, room => Post(() =>
+        {
+            RoomChanged?.Invoke(room); // on the worker, so before any room message the router sends after it
+            return Task.CompletedTask;
+        }));
         _connection.Reconnected += _ =>
         {
             Post(OnReconnectedAsync);
@@ -141,6 +146,9 @@ public sealed class RelayClient : IAsyncDisposable
     public event Action<PresenceChange>? PresenceChanged;
 
     public event Action<MembershipStatus>? MembershipChanged;
+
+    /// <summary>A room this machine is involved in changed or collapsed (the log is unchecked: the caller replays it).</summary>
+    public event Action<RoomState>? RoomChanged;
 
     /// <summary>True when (re)connected and authenticated; false (with the error) when the link drops.</summary>
     public event Action<bool, Exception?>? ConnectionChanged;
@@ -247,6 +255,38 @@ public sealed class RelayClient : IAsyncDisposable
     }
 
     /// <summary>The owner's groups (named lists of addresses), as the router serves them.</summary>
+    /// <summary>Signs a room event with this machine's key.</summary>
+    public RoomEvent SignRoomEvent(RoomEvent e) => Signatures.SignRoomEvent(_keys, e);
+
+    public Task<RoomState> CreateRoomAsync(RoomEvent create, CancellationToken cancellationToken = default) =>
+        InvokeRoomAsync<RoomState>(HubMethods.CreateRoom, create, cancellationToken);
+
+    public Task<RoomState> SubmitRoomEventAsync(RoomEvent e, CancellationToken cancellationToken = default) =>
+        InvokeRoomAsync<RoomState>(HubMethods.SubmitRoomEvent, e, cancellationToken);
+
+    public Task<RoomState> GetRoomAsync(Guid roomId, CancellationToken cancellationToken = default) =>
+        InvokeRoomAsync<RoomState>(HubMethods.GetRoom, roomId, cancellationToken);
+
+    public Task<IReadOnlyList<RoomState>> GetMyRoomsAsync(IReadOnlyList<Guid> known, CancellationToken cancellationToken = default) =>
+        InvokeRoomAsync<IReadOnlyList<RoomState>>(HubMethods.GetMyRooms, known, cancellationToken);
+
+    private async Task<T> InvokeRoomAsync<T>(string method, object argument, CancellationToken cancellationToken)
+    {
+        if (!IsConnected)
+        {
+            throw new InvalidOperationException("not connected to the router: rooms need it");
+        }
+
+        try
+        {
+            return await _connection.InvokeAsync<T>(method, argument, cancellationToken);
+        }
+        catch (HubException e)
+        {
+            throw new InvalidOperationException(ReasonOf(e), e);
+        }
+    }
+
     public async Task<IReadOnlyList<GroupInfo>> GetGroupsAsync(CancellationToken cancellationToken = default) =>
         await _connection.InvokeAsync<IReadOnlyList<GroupInfo>>(HubMethods.GetGroups, cancellationToken);
 

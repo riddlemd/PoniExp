@@ -87,19 +87,31 @@ Agents, conversation, subject, type, metadata, body and `createdOn` are encrypte
 ## Roles, groups and rooms
 
 - **Roles** are declared by each machine for its own agents, in its signed announcements: the router
-  can't add or hide a holder, but any approved machine can claim any role for its agents until
-  phase 9 restricts them.
+  can't add or hide a holder, but any approved machine can claim any role for its agents. Roles are
+  labels for addressing, not permissions (those are per machine).
 - **Groups** are the owner's lists, served by the router: a compromised router could point a group
   at another approved machine (still encrypted to that machine, so only it could read). Owner-signed
   lists come with phase 9.
-- **Rooms:** each message's key is wrapped only for the machines of the members its sender knows of,
-  so a removed member can't read later messages and the router can't add a reader. Membership
-  snapshots count only from an admin (by machine signature and sender agent), or a member removing
-  themselves; a machine that first hears of a room trusts the snapshot's own admin list, as for a
-  new room. The router sees a room's id, its member machines (it fans out to them) and message sizes,
-  never its name, members' agents or contents. A member machine stores the room's history; a
-  machine whose agents are all removed stops accepting its messages.
-- A message sent by a member whose machine hasn't yet heard of a change goes to the old member set.
+- **Rooms:**
+  - **What the router sees:** a room's name and members (which agents, when they joined and left,
+    who invited whom), the machines each message goes to, and message sizes and times. Never subjects,
+    bodies or which agent sent a message. That is by choice: the router enforces unique names, checks
+    each message is sealed for exactly the members' machines, and collapses empty or idle rooms.
+  - **What it can't do:** every membership event is signed by its author's machine, and each daemon
+    checks the whole log from the room's creation (an invite only from a member, a join only by the
+    invitee of an open invite, a leave only by a member). The router can't add a member, forge an
+    invite or join, or read a message. It can withhold events, or refuse to relay; a daemon only keeps
+    a log that extends the one it has, so it can't roll one back either.
+  - **Removed members:** each message's key is wrapped for the members' machines at the time, and the
+    router refuses one wrapped for anyone else, so someone who left can't read what follows. Their
+    machine also drops room messages from agents that weren't members when they wrote them.
+  - **Agents are labels:** the router and members know a member as `machine/agent`, vouched for by the
+    machine. Any process on a member's machine can use that agent name (local processes are trusted).
+  - **Removed machines:** the owner removing a machine adds an unsigned router event taking its agents
+    out; members accept it only for a machine no longer in the router's approved list.
+  - **After a room collapses** the router keeps statistics (members with join and leave times, counts and
+    sizes per machine, each message's time and size) for `RoomStatsRetention`; each member machine keeps
+    its own log and messages under its usual retention.
 
 ## Files
 
