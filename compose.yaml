@@ -12,6 +12,11 @@ services:
     volumes:
       - poniexp-data:/data
     environment:
+      # Rancher Desktop's port forwarding: every client arrives from this address, so per-address limits
+      # don't apply to it (see docs/plan.md, Connection limits). Check with: docker logs poniexp-server.
+      PoniExp__SharedAddresses__0: "192.168.127.1"
+      Logging__LogLevel__Default: Information
+      Logging__LogLevel__Microsoft.AspNetCore: Warning
       Logging__Console__FormatterName: simple
       Logging__Console__FormatterOptions__SingleLine: "true"
       Logging__Console__FormatterOptions__TimestampFormat: "yyyy-MM-dd HH:mm:ss "

@@ -11,7 +11,7 @@ public sealed class RouterOptions
 {
     public const string Section = "PoniExp";
 
-    /// <summary>Where machines.json, queue.json and the TLS certificate live. A volume in the container. Startup only.</summary>
+    /// <summary>Where router.db and the TLS certificate live. A volume in the container. Startup only.</summary>
     public string DataDirectory { get; set; } = "data";
 
     /// <summary>Startup only.</summary>
@@ -37,6 +37,42 @@ public sealed class RouterOptions
 
     /// <summary>Caps unapproved join requests, so nobody can fill the list.</summary>
     public int MaxPendingMachines { get; set; } = 50;
+
+    /// <summary>A join request not approved or rejected within this long is forgotten (the machine may ask again).</summary>
+    public TimeSpan JoinRequestExpiry { get; set; } = TimeSpan.FromHours(24);
+
+    /// <summary>New join requests the router accepts per hour, from anywhere.</summary>
+    public int JoinRequestsPerHour { get; set; } = 10;
+
+    /// <summary>New join requests per hour from one address (not applied to <see cref="SharedAddresses"/>).</summary>
+    public int JoinRequestsPerHourPerAddress { get; set; } = 5;
+
+    /// <summary>
+    /// How long a connection may go without proving a key that is approved or pending. A <c>join</c> waiting
+    /// for approval is pending, so it may stay.
+    /// </summary>
+    public TimeSpan AuthenticationTimeout { get; set; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>Connections that haven't proved an approved or pending key, at once, from anywhere.</summary>
+    public int MaxUnauthenticatedConnections { get; set; } = 20;
+
+    /// <summary>Of those, from one address (not applied to <see cref="SharedAddresses"/>).</summary>
+    public int MaxUnauthenticatedPerAddress { get; set; } = 10;
+
+    /// <summary>Connections one approved or pending machine may hold at once.</summary>
+    public int MaxConnectionsPerMachine { get; set; } = 5;
+
+    /// <summary>
+    /// Addresses that stand for many clients, so per-address limits would lump them together: e.g. a port
+    /// forwarder's (behind Rancher Desktop, every client arrives from its gateway).
+    /// </summary>
+    public List<string> SharedAddresses { get; set; } = [];
+
+    /// <summary>Kestrel's cap on open connections, a backstop under the limits above. Startup only.</summary>
+    public int MaxConnections { get; set; } = 200;
+
+    /// <summary>How often expired join requests and queue entries are swept.</summary>
+    public TimeSpan MaintenanceInterval { get; set; } = TimeSpan.FromMinutes(1);
 }
 
 public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
@@ -67,6 +103,27 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
         if (options.MaxPendingMachines < 1)
         {
             errors.Add("PoniExp:MaxPendingMachines must be at least 1.");
+        }
+
+        if (options.JoinRequestExpiry <= TimeSpan.Zero || options.AuthenticationTimeout <= TimeSpan.Zero || options.MaintenanceInterval <= TimeSpan.Zero)
+        {
+            errors.Add("PoniExp:JoinRequestExpiry, AuthenticationTimeout and MaintenanceInterval must be positive.");
+        }
+
+        if (options.JoinRequestsPerHour < 1 || options.JoinRequestsPerHourPerAddress < 1 || options.MaxUnauthenticatedConnections < 1
+            || options.MaxUnauthenticatedPerAddress < 1 || options.MaxConnectionsPerMachine < 1 || options.MaxConnections < 1)
+        {
+            errors.Add("PoniExp: the join and connection limits must be at least 1.");
+        }
+
+        if (options.JoinRequestsPerHourPerAddress > options.JoinRequestsPerHour || options.MaxUnauthenticatedPerAddress > options.MaxUnauthenticatedConnections)
+        {
+            errors.Add("PoniExp: a per-address limit can't be higher than the router-wide one.");
+        }
+
+        if (options.SharedAddresses.Any(a => !System.Net.IPAddress.TryParse(a, out _)))
+        {
+            errors.Add("PoniExp:SharedAddresses must be IP addresses.");
         }
 
         return errors.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(errors);

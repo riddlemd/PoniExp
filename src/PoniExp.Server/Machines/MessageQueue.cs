@@ -16,21 +16,26 @@ namespace PoniExp.Server.Machines;
 public sealed class MessageQueue
 {
     private readonly SemaphoreSlim _lock = new(1, 1);
-    private readonly string _path;
+    private readonly RouterStore _store;
     private readonly IOptionsMonitor<RouterOptions> _options;
     private readonly TimeProvider _time;
     private ImmutableDictionary<Guid, QueuedEnvelope> _queue;
 
-    public MessageQueue(IOptionsMonitor<RouterOptions> options, TimeProvider time)
+    public MessageQueue(RouterStore store, IOptionsMonitor<RouterOptions> options, TimeProvider time)
     {
-        var dataDirectory = options.CurrentValue.DataDirectory; // startup only
-        Directory.CreateDirectory(dataDirectory);
-        _path = Path.Combine(dataDirectory, "queue.json");
+        _store = store;
         _options = options;
         _time = time;
-        _queue = (JsonFile.Read<List<QueuedEnvelope>>(_path) ?? [])
+        _queue = store.LoadQueue()
             .Where(q => q.Envelope?.Ciphertext is not null) // entries from an older format can't be delivered
             .ToImmutableDictionary(q => q.Envelope.Id);
+    }
+
+    /// <summary>Drops what the router no longer delivers (past its expiry).</summary>
+    public Task PruneAsync()
+    {
+        var now = _time.GetUtcNow();
+        return UpdateAsync(queue => queue.RemoveRange(queue.Values.Where(q => q.ExpiresOn <= now).Select(q => q.Envelope.Id)));
     }
 
     public int Count => _queue.Count;
@@ -97,7 +102,7 @@ public sealed class MessageQueue
             var next = change(_queue);
             if (!ReferenceEquals(next, _queue))
             {
-                JsonFile.Write(_path, next.Values.OrderBy(q => q.QueuedOn).ToList());
+                _store.SaveQueue(_queue, next);
                 _queue = next;
             }
         }

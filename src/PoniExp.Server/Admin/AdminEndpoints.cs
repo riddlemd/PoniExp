@@ -21,6 +21,19 @@ public static class AdminEndpoints
         admin.MapPost("/machines/{selector}/reject", (string selector, AdminService service) => RunAsync(() => service.RejectAsync(selector)));
         admin.MapPost("/machines/{selector}/remove", (string selector, AdminService service) => RunAsync(() => service.RemoveAsync(selector)));
         admin.MapGet("/certificate", (RouterCertificateInfo certificate) => Results.Ok(certificate));
+        admin.MapPost("/clear-pending", async (AdminService service) => Results.Ok(await service.ClearPendingAsync()));
+        admin.MapGet("/backup", (AdminService service, RouterCertificateInfo certificate) => Results.Ok(service.Backup(certificate)));
+        admin.MapPost("/restore", async (RouterBackup backup, AdminService service, RouterCertificateInfo certificate) =>
+        {
+            try
+            {
+                return Results.Ok(await service.RestoreAsync(backup, certificate));
+            }
+            catch (Exception e) when (e is RouterException or FormatException or System.Security.Cryptography.CryptographicException)
+            {
+                return Results.Problem(e.Message, statusCode: StatusCodes.Status400BadRequest);
+            }
+        });
     }
 
     private static async Task<IResult> RunAsync(Func<Task<AdminMachineView>> action)

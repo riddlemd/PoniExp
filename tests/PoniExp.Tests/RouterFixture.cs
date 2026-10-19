@@ -25,11 +25,16 @@ public sealed class RouterFixture : IAsyncDisposable
 
     public string DataDirectory { get; }
 
+    /// <summary>Leave the data directory on disposal, for a router started on it again (a restart).</summary>
+    public bool KeepData { get; set; }
+
     public Uri Url => new(RouterHost.Addresses(App).First());
 
     public AdminService Admin => App.Services.GetRequiredService<AdminService>();
 
     public MessageQueue Queue => App.Services.GetRequiredService<MessageQueue>();
+
+    public PoniExp.Server.Hubs.ConnectionGate Gate => App.Services.GetRequiredService<PoniExp.Server.Hubs.ConnectionGate>();
 
     /// <param name="settings">Router settings ("PoniExp:MaxExpiry", ...), changeable later with <see cref="SetSetting"/>.</param>
     public static async Task<RouterFixture> StartAsync(bool useHttps = false, string? dataDirectory = null,
@@ -116,7 +121,7 @@ public sealed class RouterFixture : IAsyncDisposable
         await App.StopAsync();
         await App.DisposeAsync();
         SqliteConnection.ClearAllPools();
-        foreach (var directory in new[] { DataDirectory, DataDirectory + "-clients" })
+        foreach (var directory in KeepData ? [] : new[] { DataDirectory, DataDirectory + "-clients" })
         {
             try
             {

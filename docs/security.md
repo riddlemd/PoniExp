@@ -2,7 +2,7 @@
 
 What each party can and can't do, as built. Updated each phase (see `docs/plan.md`).
 
-**Current state: phase 3** (daemon, local API, receipts, endpoint announcements, MCP).
+**Current state: phase 4** (router on SQLite, connection and join limits, backups).
 
 ## Parties
 
@@ -55,6 +55,29 @@ Endpoints, conversation, subject, type, metadata, body and `createdOn` are encry
   the newest list per machine, so a replayed or late announcement can't bring back an old state.
 - Endpoint names travel encrypted inside announcements: the router doesn't learn which agents a
   machine has.
+
+## Limits on the relay port
+
+- A connection must prove a key that is approved or pending within `AuthenticationTimeout` (10 s), or
+  it is closed; at most `MaxUnauthenticatedConnections` (20) may be waiting at once. An approved or
+  pending machine may hold `MaxConnectionsPerMachine` (5) connections. Kestrel caps open connections
+  (200) underneath.
+- At most `JoinRequestsPerHour` (10) new join requests an hour, router-wide. A flood can therefore
+  hold up genuine joins for up to an hour (and fill the pending list, `MaxPendingMachines`), but
+  can't get anyone approved: approval stays a human comparing join codes. `admin clear-pending` and
+  the 24-hour `JoinRequestExpiry` clear it.
+- Per-address limits (10 waiting connections, 5 join requests an hour) apply on top, except to
+  `SharedAddresses`. Behind Rancher Desktop's port forwarding every client has the same address, so
+  only the router-wide limits protect the port there.
+- `/health` says only `healthy` or `unhealthy`: no counts or names.
+
+## Backups
+
+- `admin backup` holds the TLS certificate's private key: whoever has it can impersonate the router to
+  every pinned client (though not read messages, which are encrypted end to end, nor forge them). It
+  is written owner-only, or to stdout for the owner to store (e.g. in Bitwarden).
+- `admin restore` checks that the certificate matches its SHA-256 and that each machine's id is its key's
+  fingerprint, and restores approved machines only.
 
 ## Network
 

@@ -3,7 +3,9 @@ using PoniExp.Server.Admin;
 
 const string Usage = """
     poniexp router [--PoniExp:Port=5443 ...]    run the relay (settings also from PoniExp__* env vars)
-    poniexp admin <command>                      manage a running router: list, approve, reject, remove, certificate
+    poniexp admin <command>                      manage a running router: list, approve, reject, remove, clear-pending,
+                                                 certificate, backup, restore
+    poniexp health                               exit 0 if the running router is healthy (the Docker health check)
     """;
 
 switch (args)
@@ -13,6 +15,8 @@ switch (args)
         return 0;
     case ["admin", .. var rest]:
         return await AdminCli.RunAsync(rest, Console.Out);
+    case ["health"]:
+        return await AdminCli.HealthAsync(Console.Out);
     default:
         Console.Error.WriteLine(Usage.TrimEnd());
         return 2;

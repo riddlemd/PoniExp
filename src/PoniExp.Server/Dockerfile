@@ -22,4 +22,6 @@ ENV PoniExp__DataDirectory=/data \
     DOTNET_gcServer=0
 VOLUME /data
 EXPOSE 5443
+# `poniexp health` asks the loopback admin listener; it says only whether the router works.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 CMD ["poniexp", "health"]
 ENTRYPOINT ["dotnet", "/app/poniexp.dll", "router"]

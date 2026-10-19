@@ -1,7 +1,10 @@
 using Microsoft.AspNetCore.SignalR;
+using Microsoft.Extensions.Options;
+using PoniExp.Core.Crypto;
 using PoniExp.Core.Protocol;
 using PoniExp.Server.Hubs;
 using PoniExp.Server.Machines;
+using PoniExp.Server.Security;
 
 namespace PoniExp.Server.Admin;
 
@@ -10,9 +13,14 @@ public sealed class AdminService(
     MachineRegistry registry,
     MessageQueue queue,
     PresenceTracker presence,
+    ConnectionGate gate,
     IHubContext<RelayHub> hub,
+    IOptionsMonitor<RouterOptions> options,
+    TimeProvider time,
     ILogger<AdminService> logger)
 {
+    public const string BackupFormat = "poniexp-router-backup";
+
     public IReadOnlyList<AdminMachineView> List() => registry.List().Select(View).ToList();
 
     public async Task<AdminMachineView> ApproveAsync(string selector)
@@ -43,6 +51,65 @@ public sealed class AdminService(
         return View(record) with { Status = MembershipStatus.Unknown };
     }
 
+    /// <summary>Forgets every pending join request and tells the waiting clients (<c>poniexp admin clear-pending</c>).</summary>
+    public async Task<IReadOnlyList<AdminMachineView>> ClearPendingAsync() => await ForgetAsync(await registry.ClearPendingAsync(), "Cleared");
+
+    /// <summary>Forgets join requests that waited longer than <see cref="RouterOptions.JoinRequestExpiry"/>.</summary>
+    public async Task<IReadOnlyList<AdminMachineView>> ExpirePendingAsync() => await ForgetAsync(await registry.ExpirePendingAsync(), "Expired");
+
+    /// <summary>The certificate (with its private key) and the approved machines: what can't be rebuilt without every client.</summary>
+    public RouterBackup Backup(RouterCertificateInfo certificate)
+    {
+        var pfx = Path.Combine(options.CurrentValue.DataDirectory, "router.pfx");
+        return new RouterBackup(BackupFormat, 1, time.GetUtcNow(), certificate.Sha256,
+            File.Exists(pfx) ? Convert.ToBase64String(File.ReadAllBytes(pfx)) : null,
+            [.. registry.List().Where(m => m.Status == MembershipStatus.Approved)]);
+    }
+
+    /// <summary>
+    /// Puts a backup back: the approved machines at once, the certificate on disk (served after a restart).
+    /// Returns whether the certificate changed.
+    /// </summary>
+    public async Task<RestoreResult> RestoreAsync(RouterBackup backup, RouterCertificateInfo current)
+    {
+        if (backup.Format != BackupFormat || backup.Version != 1)
+        {
+            throw new RouterException("That isn't a PoniExp router backup (or it's from a newer version).", RouterErrorKind.Invalid);
+        }
+
+        var certificateChanged = false;
+        if (backup.Certificate is { } certificate)
+        {
+            var bytes = Convert.FromBase64String(certificate);
+            using var loaded = System.Security.Cryptography.X509Certificates.X509CertificateLoader.LoadPkcs12(bytes, null);
+            if (RouterCertificate.Sha256Of(loaded) != backup.CertificateSha256)
+            {
+                throw new RouterException("The backup's certificate doesn't match its SHA-256; the file is damaged.", RouterErrorKind.Invalid);
+            }
+
+            certificateChanged = backup.CertificateSha256 != current.Sha256;
+            PrivateFiles.WriteAllBytes(Path.Combine(options.CurrentValue.DataDirectory, "router.pfx"), bytes);
+        }
+
+        var machines = backup.Machines.Where(m => m.Status == MembershipStatus.Approved && KeyFingerprint.MachineIdOf(m.PublicKey) == m.Id).ToList();
+        await registry.RestoreAsync(machines);
+        logger.LogInformation("Restored {Count} machines from a backup of {On}; certificate {Changed}", machines.Count, backup.CreatedOn,
+            certificateChanged ? "changed (restart to serve it)" : "unchanged");
+        return new RestoreResult(machines.Count, certificateChanged, backup.CertificateSha256);
+    }
+
+    private async Task<IReadOnlyList<AdminMachineView>> ForgetAsync(IReadOnlyList<MachineRecord> forgotten, string verb)
+    {
+        foreach (var record in forgotten)
+        {
+            logger.LogInformation("{Verb} the join request of {Name} ({Id})", verb, record.Name, record.Id[..8]);
+            await hub.Clients.Group(RelayHub.KeyGroup(record.Id)).SendAsync(HubMethods.MembershipChanged, MembershipStatus.Unknown);
+            gate.Expel(record.Id);
+        }
+
+        return [.. forgotten.Select(m => View(m) with { Status = MembershipStatus.Unknown })];
+    }
+
     private AdminMachineView View(MachineRecord m) =>
         new(m.Id, m.Name, m.Status, m.JoinCode, m.Description, m.RequestedOn, m.DecidedOn, m.LastSeenOn, presence.IsOnline(m.Id));
 }
@@ -57,3 +124,9 @@ public sealed record AdminMachineView(
     DateTimeOffset? DecidedOn,
     DateTimeOffset? LastSeenOn,
     bool Online);
+
+/// <summary>A router backup: its TLS certificate (PKCS#12, base64, with the private key) and the approved machines.</summary>
+public sealed record RouterBackup(string Format, int Version, DateTimeOffset CreatedOn, string? CertificateSha256, string? Certificate,
+    IReadOnlyList<MachineRecord> Machines);
+
+public sealed record RestoreResult(int Machines, bool CertificateChanged, string? CertificateSha256);

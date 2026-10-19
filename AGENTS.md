@@ -70,8 +70,13 @@ scripts/publish.sh win-x64 linux-x64                  # self-contained single-fi
 - **Admin is loopback-only** (`docker exec`). Don't expose it on the relay port.
 - The client database (`ClientStore`, SQLite) is shared by every process on the machine: writes are
   short IMMEDIATE transactions. Store a message before confirming it to the router.
-- Registry and queue writes are serialised with a `SemaphoreSlim`, saved to disk first, then
-  published as a new immutable snapshot. Reads don't lock.
+- Registry and queue writes are serialised with a `SemaphoreSlim`, saved to the router's SQLite
+  database (`RouterStore`, only the rows that changed) first, then published as a new immutable
+  snapshot. Reads don't lock.
+- **Connection limits go by what a connection proved** (`ConnectionGate`), never by address alone:
+  behind port forwarding every client has the same address.
+- Tests that restart a router on the same data directory set `RouterFixture.KeepData` on the first.
 - Every `Task`-returning method ends in `Async`.
 - Timestamps are named `*On` / `*_on`, never `*At` / `*_at`.
-- No secrets in the repo: keys live in `~/.poniexp/` and the router's `/data` volume.
+- No secrets in the repo: keys live in `~/.poniexp/` and the router's `/data` volume, and backups
+  (which hold the router's private key) stay out of it too.

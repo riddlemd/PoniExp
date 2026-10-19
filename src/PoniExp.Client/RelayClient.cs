@@ -34,6 +34,7 @@ public sealed class RelayClient : IAsyncDisposable
     private readonly CancellationTokenSource _disposing = new();
     private readonly SemaphoreSlim _flushing = new(1, 1);
     private volatile bool _authenticated;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, byte> _unconfirmed = new();
     private Dictionary<string, MachineInfo> _machines = [];
 
     /// <exception cref="OptionsValidationException">The messaging settings are invalid.</exception>
@@ -501,6 +502,7 @@ public sealed class RelayClient : IAsyncDisposable
             await RefreshMachinesAsync(cancellationToken);
             ConnectionChanged?.Invoke(true, null);
             Post(() => FlushOutboxAsync()); // whatever waited for the connection
+            Post(RetryConfirmsAsync); // confirms that failed (e.g. sent just as the link dropped)
         }
 
         return result.Status;
@@ -625,10 +627,21 @@ public sealed class RelayClient : IAsyncDisposable
         try
         {
             await _connection.InvokeAsync(HubMethods.Confirm, id);
+            _unconfirmed.TryRemove(id, out _);
         }
         catch (Exception e)
         {
-            BackgroundError?.Invoke(e); // it comes back on reconnect and is then a duplicate
+            // Retried after the next authentication; if the router redelivers it first, it's a duplicate.
+            _unconfirmed[id] = 0;
+            BackgroundError?.Invoke(e);
+        }
+    }
+
+    private async Task RetryConfirmsAsync()
+    {
+        foreach (var id in _unconfirmed.Keys)
+        {
+            await ConfirmAsync(id);
         }
     }
 

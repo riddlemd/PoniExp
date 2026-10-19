@@ -31,6 +31,8 @@ public static class RouterHost
 
         builder.WebHost.ConfigureKestrel(kestrel =>
         {
+            kestrel.Limits.MaxConcurrentConnections = options.MaxConnections;
+            kestrel.Limits.MaxConcurrentUpgradedConnections = options.MaxConnections;
             kestrel.Listen(IPAddress.Parse(options.BindAddress), options.Port, listen =>
             {
                 if (certificate is not null)
@@ -51,7 +53,12 @@ public static class RouterHost
         builder.Services.AddSingleton<IValidateOptions<RouterOptions>, RouterOptionsValidator>();
         builder.Services.AddSingleton(time);
         builder.Services.AddSingleton(certificateInfo);
+        // Within docker stop's 10 s grace; daemons reconnect to the next instance anyway.
+        builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(5));
+        builder.Services.AddSingleton(new RouterStore(options.DataDirectory));
         builder.Services.AddSingleton<MachineRegistry>();
+        builder.Services.AddSingleton<ConnectionGate>();
+        builder.Services.AddHostedService<RouterMaintenance>();
         builder.Services.AddSingleton<MessageQueue>();
         builder.Services.AddSingleton<PresenceTracker>();
         builder.Services.AddSingleton<AdminService>();
@@ -66,6 +73,10 @@ public static class RouterHost
         app.MapHub<RelayHub>(HubMethods.Path);
         app.MapAdmin();
         app.MapGet("/", () => Results.Text("PoniExp router\n"));
+        // Says only whether the router works: no counts or names, since the relay port may face the internet.
+        app.MapGet("/health", (RouterStore store) => store.IsHealthy()
+            ? Results.Json(new { status = "healthy" })
+            : Results.Json(new { status = "unhealthy" }, statusCode: StatusCodes.Status503ServiceUnavailable));
 
         app.Lifetime.ApplicationStarted.Register(() =>
         {

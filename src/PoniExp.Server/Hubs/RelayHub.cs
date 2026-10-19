@@ -16,6 +16,7 @@ public sealed class RelayHub(
     MachineRegistry registry,
     MessageQueue queue,
     PresenceTracker presence,
+    ConnectionGate gate,
     TimeProvider time,
     IOptionsSnapshot<RouterOptions> options,
     ILogger<RelayHub> logger) : Hub
@@ -25,6 +26,19 @@ public sealed class RelayHub(
     private const string ChallengeItem = "challenge";
     private const string ProvenItem = "proven";
     private const string MemberItem = "member";
+
+    /// <summary>Every connection starts unauthenticated: admitted only within the limits, and with a deadline to prove a key.</summary>
+    public override async Task OnConnectedAsync()
+    {
+        if (gate.Open(Context, Context.GetHttpContext()?.Connection.RemoteIpAddress) is { } refused)
+        {
+            logger.LogWarning("Refused a connection: {Reason}", refused);
+            Context.Abort();
+            return;
+        }
+
+        await base.OnConnectedAsync();
+    }
 
     /// <summary>The first call on every connection. A client speaking another protocol version is refused.</summary>
     [HubMethodName(HubMethods.Hello)]
@@ -68,6 +82,11 @@ public sealed class RelayHub(
         await ProveKeyAsync(id);
 
         var record = registry.Get(id);
+        if (record is { Status: MembershipStatus.Approved or MembershipStatus.Pending } && gate.Admit(Context.ConnectionId, id) is { } refused)
+        {
+            throw new HubException($"Refused: {refused}.");
+        }
+
         if (record is not { Status: MembershipStatus.Approved })
         {
             return new AuthResult(record?.Status ?? MembershipStatus.Unknown, id, record?.Name);
@@ -118,6 +137,12 @@ public sealed class RelayHub(
         }
 
         RequireFresh(request.RequestedOn);
+        if (registry.IsNewRequest(KeyFingerprint.MachineIdOf(request.PublicKey))
+            && gate.TakeJoin(Context.GetHttpContext()?.Connection.RemoteIpAddress) is { } limited)
+        {
+            throw new HubException($"Refused: {limited}.");
+        }
+
         MachineRecord record;
         try
         {
@@ -129,6 +154,11 @@ public sealed class RelayHub(
         }
 
         await ProveKeyAsync(record.Id);
+        if (record.Status is MembershipStatus.Pending or MembershipStatus.Approved && gate.Admit(Context.ConnectionId, record.Id) is { } refused)
+        {
+            throw new HubException($"Refused: {refused}.");
+        }
+
         logger.LogInformation("Join request: {Name} ({Id}) on {Os} {Arch}, join code {Code}: {Status}",
             request.Name, record.Id[..8], d.OperatingSystem, d.Architecture, record.JoinCode, record.Status);
         return new AuthResult(record.Status, record.Id, record.Name);
@@ -199,6 +229,7 @@ public sealed class RelayHub(
 
     public override async Task OnDisconnectedAsync(Exception? exception)
     {
+        gate.Close(Context.ConnectionId);
         if (presence.Remove(Context.ConnectionId, out var id) && id is not null)
         {
             var now = time.GetUtcNow();

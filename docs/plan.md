@@ -26,6 +26,9 @@ only has to build on the ones before it; a protection that arrives in a later ph
   server; `doctor`; `service install` in user and system modes; self-contained single-file builds.
 - **Presence:** who's online, pushed to every machine.
 - **TLS:** a self-signed certificate made once by the server and pinned by clients.
+- **Server (phase 4):** SQLite storage (imported from the JSON files), connection and join limits by
+  what a connection proved, join expiry, `clear-pending`, `/health` and the Docker health check,
+  backup and restore.
 - **Executables:**
   - `poniexp` (`src/PoniExp.Server`), with the subcommands `router` and `admin`.
   - `poniexp-client` (`src/PoniExp.Cli`).
@@ -353,7 +356,7 @@ database. Pushing messages into Hermes (the Hermes bridge) is phase 12.
     arriving only after the agent acknowledges or replies (not when it merely fetches), and no
     second `received` for a duplicate.
 
-## Phase 4: Server foundations
+## Phase 4: Server foundations (done)
 
 - **SQLite** (`data/router.db`) replaces `machines.json` and `queue.json`, which are imported on first
   start and kept as `*.imported`. Files and jobs are added to it later.

@@ -51,8 +51,25 @@ docker logs poniexp-server            # prints the certificate SHA-256 to pin
 docker exec poniexp-server poniexp admin certificate
 ```
 
-It listens on port 5443. Machines away from home need that port reachable, through a router port
-forward or the VPN.
+It listens on port 5443. Machines away from home need that port reachable, through the VPN (or, once
+you're happy with the limits below, a router port forward). `docker ps` shows it as `healthy` when it
+works (`poniexp health`).
+
+**Limits.** A connection has 10 s to prove an approved or pending key, and at most 20 may be waiting
+at once. A machine may hold 5 connections, and the router accepts 10 new join requests an hour.
+Per-address limits apply on top, except to `PoniExp__SharedAddresses__*`: behind Rancher Desktop
+every client arrives from its gateway (`192.168.127.1`, set in `compose.yaml`). Join requests expire
+after 24 hours. Every limit is a `PoniExp__*` setting.
+
+**Backups.** Only the TLS certificate and the approved machines are worth keeping (queued messages
+are short-lived). The file holds the certificate's private key: keep it somewhere safe, such as a
+Bitwarden attachment.
+
+```sh
+docker exec poniexp-server poniexp admin backup - > poniexp-backup.json
+docker exec -i poniexp-server poniexp admin restore - < poniexp-backup.json
+docker restart poniexp-server            # if the restored certificate differs from the one in use
+```
 
 ## Set up a machine
 
@@ -75,6 +92,7 @@ docker exec poniexp-server poniexp admin list
 docker exec poniexp-server poniexp admin approve 3f2a91c0     # id prefix or name
 docker exec poniexp-server poniexp admin reject <id|name>
 docker exec poniexp-server poniexp admin remove <id|name>     # forget it; it may ask again
+docker exec poniexp-server poniexp admin clear-pending         # forget every waiting join request
 ```
 
 Approval reaches the waiting `join` at once.

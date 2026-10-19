@@ -97,7 +97,7 @@ public class DaemonTests
 
         // The same envelope again, as a replaying router (or a resend after a lost confirmation) would deliver it.
         // Once the router no longer holds the original: it drops a resend of an id it still has.
-        await RouterFixture.Eventually(() => router.Queue.Count == 0);
+        await RouterFixture.Eventually(() => router.Queue.ExpiryOf(sent.Id) is null);
         await using var raw = await RelayTests.RawMemberConnectionAsync(router, ise.Keys);
         await raw.InvokeAsync<SendResult>(HubMethods.Send, envelope);
         await RouterFixture.EventuallyAsync(async () => await wojtek.Store.GetMetricAsync(ise.Keys.MachineId, ClientMetrics.Duplicate) == 1);

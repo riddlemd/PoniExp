@@ -117,12 +117,12 @@ public class EncryptionTests
         await using var router = await RouterFixture.StartAsync();
         var (ise, _) = await router.MemberAsync("ise");
         var (wojtek, _) = await router.MemberAsync("wojtek");
-        await wojtek.DisposeAsync(); // offline, so the message waits in queue.json
+        await wojtek.DisposeAsync(); // offline, so the message waits in the router's database
 
         await ise.SendAsync("wojtek/vault", new OutgoingMessage("the eagle lands at 0400") { Subject = "landing", FromEndpoint = "ops" });
         await RouterFixture.Eventually(() => router.Queue.Count == 1);
 
-        var onDisk = await File.ReadAllTextAsync(Path.Combine(router.DataDirectory, "queue.json"));
+        var onDisk = string.Concat(Directory.GetFiles(router.DataDirectory, "router.db*").Select(ReadShared));
         Assert.DoesNotContain("eagle", onDisk);
         Assert.DoesNotContain("landing", onDisk);
         Assert.DoesNotContain("vault", onDisk); // endpoints too
@@ -246,6 +246,13 @@ public class EncryptionTests
         {
             Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(Path.Combine(home, "a.secret")));
         }
+    }
+
+    private static string ReadShared(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream, Encoding.UTF8);
+        return reader.ReadToEnd();
     }
 
     private static string TempHome() =>

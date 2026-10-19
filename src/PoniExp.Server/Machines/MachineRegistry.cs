@@ -7,24 +7,22 @@ namespace PoniExp.Server.Machines;
 
 /// <summary>
 /// Every machine that has asked to join, with its status. Reads are lock-free over an immutable snapshot;
-/// writes are serialised and saved to machines.json before the new snapshot is published.
+/// writes are serialised and saved to the router's database before the new snapshot is published.
 /// </summary>
 public sealed class MachineRegistry
 {
     private readonly SemaphoreSlim _lock = new(1, 1);
-    private readonly string _path;
+    private readonly RouterStore _store;
     private readonly IOptionsMonitor<RouterOptions> _options;
     private readonly TimeProvider _time;
     private ImmutableDictionary<string, MachineRecord> _machines;
 
-    public MachineRegistry(IOptionsMonitor<RouterOptions> options, TimeProvider time)
+    public MachineRegistry(RouterStore store, IOptionsMonitor<RouterOptions> options, TimeProvider time)
     {
-        var dataDirectory = options.CurrentValue.DataDirectory; // startup only
-        Directory.CreateDirectory(dataDirectory);
-        _path = Path.Combine(dataDirectory, "machines.json");
+        _store = store;
         _options = options;
         _time = time;
-        _machines = (JsonFile.Read<List<MachineRecord>>(_path) ?? []).ToImmutableDictionary(m => m.Id);
+        _machines = store.LoadMachines().ToImmutableDictionary(m => m.Id);
     }
 
     public MachineRecord? Get(string id) => _machines.GetValueOrDefault(id);
@@ -46,13 +44,15 @@ public sealed class MachineRegistry
                 return (machines, existing);
             }
 
-            if (existing is null && machines.Values.Count(m => m.Status == MembershipStatus.Pending) >= _options.CurrentValue.MaxPendingMachines)
+            var now = _time.GetUtcNow();
+            if (existing is null && machines.Values.Count(m => m.Status == MembershipStatus.Pending && !IsExpired(m, now))
+                >= _options.CurrentValue.MaxPendingMachines)
             {
                 throw new RouterException("Too many machines are waiting for approval; try again later.", RouterErrorKind.Conflict);
             }
 
             var record = new MachineRecord(id, request.Name, request.Description, request.PublicKey, request.EncryptionKey,
-                request.EncryptionKeySignature, MembershipStatus.Pending, _time.GetUtcNow());
+                request.EncryptionKeySignature, MembershipStatus.Pending, now);
             return (machines.SetItem(id, record), record);
         });
     }
@@ -67,6 +67,40 @@ public sealed class MachineRegistry
             var record = Resolve(machines, selector);
             return (machines.Remove(record.Id), record);
         });
+
+    /// <summary>True if the machine has no live request: never asked, or its pending request expired.</summary>
+    public bool IsNewRequest(string id) => Get(id) is not { } m || (m.Status == MembershipStatus.Pending && IsExpired(m, _time.GetUtcNow()));
+
+    /// <summary>Forgets pending requests older than <see cref="RouterOptions.JoinRequestExpiry"/>; returns them.</summary>
+    public async Task<IReadOnlyList<MachineRecord>> ExpirePendingAsync()
+    {
+        var expired = new List<MachineRecord>();
+        await UpdateAsync(machines =>
+        {
+            var now = _time.GetUtcNow();
+            expired.AddRange(machines.Values.Where(m => m.Status == MembershipStatus.Pending && IsExpired(m, now)));
+            return (expired.Count == 0 ? machines : machines.RemoveRange(expired.Select(m => m.Id)), null!);
+        });
+        return expired;
+    }
+
+    /// <summary>Forgets every pending request (<c>poniexp admin clear-pending</c>); returns them.</summary>
+    public async Task<IReadOnlyList<MachineRecord>> ClearPendingAsync()
+    {
+        var cleared = new List<MachineRecord>();
+        await UpdateAsync(machines =>
+        {
+            cleared.AddRange(machines.Values.Where(m => m.Status == MembershipStatus.Pending));
+            return (cleared.Count == 0 ? machines : machines.RemoveRange(cleared.Select(m => m.Id)), null!);
+        });
+        return cleared;
+    }
+
+    /// <summary>Puts machines back from a backup, replacing any with the same id.</summary>
+    public Task RestoreAsync(IReadOnlyCollection<MachineRecord> records) =>
+        UpdateAsync(machines => (machines.SetItems(records.Select(r => KeyValuePair.Create(r.Id, r))), null!));
+
+    private bool IsExpired(MachineRecord pending, DateTimeOffset now) => now - pending.RequestedOn > _options.CurrentValue.JoinRequestExpiry;
 
     public Task TouchAsync(string id, DateTimeOffset seenOn) =>
         UpdateAsync(machines => machines.TryGetValue(id, out var record)
@@ -133,7 +167,7 @@ public sealed class MachineRegistry
             var (next, result) = change(_machines);
             if (!ReferenceEquals(next, _machines))
             {
-                JsonFile.Write(_path, next.Values.OrderBy(m => m.Id).ToList());
+                _store.SaveMachines(_machines, next);
                 _machines = next;
             }
 
