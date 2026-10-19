@@ -38,6 +38,9 @@ public sealed class MessageQueue
 
     public int Count => _queue.Count;
 
+    /// <summary>Envelope bytes queued for <paramref name="machineId"/> (see <see cref="RouterOptions.MaxQueuedBytesPerRecipient"/>).</summary>
+    public long QueuedBytesFor(string machineId) => _queue.Values.Where(q => q.Envelope.ToMachine == machineId).Sum(q => (long)q.Envelope.Size);
+
     /// <summary>What the router would still deliver to <paramref name="machineId"/>, oldest first.</summary>
     public IReadOnlyList<Delivery> For(string machineId)
     {

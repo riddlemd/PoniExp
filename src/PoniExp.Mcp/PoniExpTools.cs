@@ -37,6 +37,35 @@ public sealed class PoniExpTools(McpEndpoint me)
         Json(await me.Api.SendAsync(new LocalSendRequest(me.Endpoint, to, body, subject, ParseId(conversationId), OperationId: ParseId(operationId),
             ContentType: contentType, Metadata: metadata, ExpiresIn: ParseDuration(expiresIn)), cancellationToken));
 
+    [McpServerTool(Name = "attach"), Description(
+        "Send files with a message. Each file is encrypted and uploaded once, shared with exactly these recipients; each recipient gets " +
+        "its own message. You'll get file receipts (downloaded, or download-failed with why) as they fetch them.")]
+    public async Task<string> AttachAsync(
+        [Description("Recipients: 'machine' or 'machine/endpoint'.")] string[] to,
+        [Description("Paths of the files on this machine.")] string[] files,
+        [Description("The message text.")] string body,
+        [Description("A short title (optional).")] string? subject = null,
+        [Description("Continue this conversation (one recipient only).")] string? conversationId = null,
+        CancellationToken cancellationToken = default) =>
+        Json(await me.Api.SendAsync(new LocalSendRequest(me.Endpoint, to, body, subject, ParseId(conversationId),
+            Attachments: [.. files.Select(Path.GetFullPath)]), cancellationToken));
+
+    [McpServerTool(Name = "fetch"), Description(
+        "Download a message's files to this machine, verified against the message, and get their local paths. Fetching once is enough " +
+        "even if other agents here got the same file. Call 'release' when you are done with them.")]
+    public async Task<string> FetchAsync([Description("The id of the message with the files.")] string messageId,
+        [Description("Just this file (its blobId); default all.")] string? blobId = null, CancellationToken cancellationToken = default) =>
+        Json(await me.Api.FetchAsync(me.Endpoint, new LocalFileRequest(ParseId(messageId) ?? throw new ArgumentException("messageId is required"),
+            ParseId(blobId)), cancellationToken));
+
+    [McpServerTool(Name = "release"), Description(
+        "You are done with a message's files: the local copy is deleted once every agent here that received them has released them. " +
+        "Acknowledging a message doesn't release its files.")]
+    public async Task<string> ReleaseAsync([Description("The id of the message with the files.")] string messageId,
+        [Description("Just this file (its blobId); default all.")] string? blobId = null, CancellationToken cancellationToken = default) =>
+        Json(await me.Api.ReleaseAsync(me.Endpoint, new LocalFileRequest(ParseId(messageId) ?? throw new ArgumentException("messageId is required"),
+            ParseId(blobId)), cancellationToken));
+
     [McpServerTool(Name = "reply"), Description(
         "Reply to a message you received, in its conversation, to its sender. Replying also acknowledges it. " +
         "Use status 'progress' for an update or a question, 'done' when the work is finished, 'failed' if it can't be done.")]
@@ -45,9 +74,10 @@ public sealed class PoniExpTools(McpEndpoint me)
         [Description("The reply text.")] string body,
         [Description("progress, done or failed (optional).")] string? status = null,
         [Description("Free-form key/value metadata.")] Dictionary<string, string>? metadata = null,
+        [Description("Paths of files to send back (optional).")] string[]? files = null,
         CancellationToken cancellationToken = default) =>
         Json(await me.Api.ReplyAsync(me.Endpoint, new LocalReplyRequest(ParseId(messageId) ?? throw new ArgumentException("messageId is required"),
-            body, status, Metadata: metadata), cancellationToken));
+            body, status, Metadata: metadata, Attachments: files is { Length: > 0 } ? [.. files.Select(Path.GetFullPath)] : null), cancellationToken));
 
     [McpServerTool(Name = "ack"), Description(
         "Acknowledge a message: tell its sender you have taken it on. Do this when you start on it (replying acknowledges too).")]

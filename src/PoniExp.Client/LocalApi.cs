@@ -183,6 +183,19 @@ public sealed class LocalApiClient : IDisposable
         return GetAsync<List<LocalLogEntry>>("log" + (query.Count == 0 ? string.Empty : "?" + string.Join('&', query)), ct);
     }
 
+    /// <summary>Fetches a received message's files to this machine (verified); returns where they are.</summary>
+    public Task<List<LocalAttachment>> FetchAsync(string endpoint, LocalFileRequest request, CancellationToken ct = default) =>
+        PostAsync<List<LocalAttachment>>($"endpoints/{endpoint}/fetch", request, ct);
+
+    /// <summary>The endpoint is done with the files; the local copy goes once every endpoint that received it is.</summary>
+    public Task<List<LocalAttachment>> ReleaseAsync(string endpoint, LocalFileRequest request, CancellationToken ct = default) =>
+        PostAsync<List<LocalAttachment>>($"endpoints/{endpoint}/release", request, ct);
+
+    /// <summary>The files this machine has uploaded, as the router sees them.</summary>
+    public Task<List<SenderBlob>> BlobsAsync(CancellationToken ct = default) => GetAsync<List<SenderBlob>>("blobs", ct);
+
+    public async Task CancelBlobAsync(Guid blobId, CancellationToken ct = default) => await PostAsync<LocalOk>($"blobs/{blobId}/cancel", new { }, ct);
+
     public Task<List<LocalEndpointInfo>> EndpointsAsync(CancellationToken ct = default) => GetAsync<List<LocalEndpointInfo>>("endpoints", ct);
 
     public Task<LocalEndpointInfo> RetireAsync(string endpoint, CancellationToken ct = default) =>
@@ -410,6 +423,8 @@ public static class LocalEventKinds
     public const string Message = "message";
     /// <summary>A delivery receipt for a message the endpoint sent.</summary>
     public const string Receipt = "receipt";
+    /// <summary>A file receipt (downloaded, download-failed) for a file the endpoint sent.</summary>
+    public const string FileReceipt = "file-receipt";
 }
 
 /// <summary>A message as an agent sees it, decrypted. <see cref="From"/> and <see cref="To"/> are <c>machine-name/endpoint</c>.</summary>
@@ -431,14 +446,27 @@ public sealed record LocalMessage(
     DateTimeOffset CreatedOn,
     DateTimeOffset ExpiresOn,
     string? State,
-    string? StateDetail);
+    string? StateDetail,
+    IReadOnlyList<LocalAttachment>? Attachments = null);
 
 public sealed record LocalMessageDetail(LocalMessage Message, IReadOnlyList<MessageEvent> Events);
 
 /// <summary>A delivery receipt for <see cref="MessageId"/>: received, acknowledged or rejected (with a reason).</summary>
 public sealed record LocalReceipt(Guid MessageId, string Receipt, string? Reason, string From);
 
-public sealed record LocalEvent(string Kind, LocalMessage? Message = null, LocalReceipt? Receipt = null);
+public sealed record LocalEvent(string Kind, LocalMessage? Message = null, LocalReceipt? Receipt = null, LocalFileReceipt? FileReceipt = null);
+
+/// <summary>A file receipt for <see cref="BlobId"/>, sent with <see cref="MessageId"/>: downloaded, or download-failed (with why).</summary>
+public sealed record LocalFileReceipt(Guid MessageId, Guid BlobId, string Receipt, string? Reason, string From);
+
+/// <summary>
+/// A file with a message. <see cref="State"/>, received: waiting, downloaded (<see cref="Path"/> is the local copy),
+/// download-failed, released or deleted. Sent: uploaded, downloaded, download-failed or cancelled.
+/// </summary>
+public sealed record LocalAttachment(Guid BlobId, string Name, string ContentType, long Size, string State, string? Path, string? Detail);
+
+/// <summary>Fetch (or release) a message's files: all of them, or the one blob.</summary>
+public sealed record LocalFileRequest(Guid Id, Guid? BlobId = null);
 
 public sealed record LocalSendRequest(
     string From,
@@ -451,7 +479,8 @@ public sealed record LocalSendRequest(
     string? Status = null,
     string? ContentType = null,
     IReadOnlyDictionary<string, string>? Metadata = null,
-    TimeSpan? ExpiresIn = null);
+    TimeSpan? ExpiresIn = null,
+    IReadOnlyList<string>? Attachments = null);
 
 public sealed record LocalReplyRequest(
     Guid Id,
@@ -460,7 +489,8 @@ public sealed record LocalReplyRequest(
     string? Subject = null,
     string? ContentType = null,
     IReadOnlyDictionary<string, string>? Metadata = null,
-    TimeSpan? ExpiresIn = null);
+    TimeSpan? ExpiresIn = null,
+    IReadOnlyList<string>? Attachments = null);
 
 public sealed record LocalAckRequest(Guid Id);
 
@@ -511,3 +541,5 @@ public sealed record LocalJoinRequest(string Name, string? Notes);
 
 /// <summary>Where the machine stands after asking to join; compare <see cref="JoinCode"/> on the router before approving.</summary>
 public sealed record LocalJoinResult(string Membership, string? Name, string MachineId, string JoinCode);
+
+public sealed record LocalOk(bool Ok);

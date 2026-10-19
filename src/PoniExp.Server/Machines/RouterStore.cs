@@ -13,7 +13,7 @@ namespace PoniExp.Server.Machines;
 /// </summary>
 public sealed class RouterStore
 {
-    private const int SchemaVersion = 2;
+    private const int SchemaVersion = 3;
 
     private static readonly JsonSerializerOptions Json = WireProtocol.Configure(new JsonSerializerOptions(JsonSerializerDefaults.Web));
 
@@ -50,6 +50,13 @@ public sealed class RouterStore
                 queued_on  TEXT NOT NULL,
                 expires_on TEXT NOT NULL,
                 entry      TEXT NOT NULL
+            ) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS blobs (
+                id         TEXT PRIMARY KEY,
+                sender     TEXT NOT NULL,
+                state      TEXT NOT NULL,
+                expires_on TEXT NOT NULL,
+                record     TEXT NOT NULL
             ) WITHOUT ROWID;
             CREATE TABLE IF NOT EXISTS router_state (
                 name  TEXT PRIMARY KEY,
@@ -105,6 +112,33 @@ public sealed class RouterStore
             command.Parameters.AddWithValue("$expires", Signatures.Stamp(q.ExpiresOn));
             command.Parameters.AddWithValue("$entry", JsonSerializer.Serialize(q, Json));
         });
+
+    public IReadOnlyList<Blobs.BlobRecord> LoadBlobs() => Load<Blobs.BlobRecord>("SELECT record FROM blobs;");
+
+    public void SaveBlob(Blobs.BlobRecord blob)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO blobs (id, sender, state, expires_on, record) VALUES ($id, $sender, $state, $expires, $record)
+            ON CONFLICT (id) DO UPDATE SET state = $state, expires_on = $expires, record = $record;
+            """;
+        command.Parameters.AddWithValue("$id", blob.Id.ToString("D"));
+        command.Parameters.AddWithValue("$sender", blob.Sender);
+        command.Parameters.AddWithValue("$state", WireProtocol.NameOf(blob.State));
+        command.Parameters.AddWithValue("$expires", Signatures.Stamp(blob.ExpiresOn));
+        command.Parameters.AddWithValue("$record", JsonSerializer.Serialize(blob, Json));
+        command.ExecuteNonQuery();
+    }
+
+    public void DeleteBlob(Guid id)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM blobs WHERE id = $id;";
+        command.Parameters.AddWithValue("$id", id.ToString("D"));
+        command.ExecuteNonQuery();
+    }
 
     public string? GetState(string name)
     {

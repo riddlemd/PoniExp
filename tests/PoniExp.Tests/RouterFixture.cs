@@ -36,6 +36,10 @@ public sealed class RouterFixture : IAsyncDisposable
 
     public PoniExp.Server.Hubs.ConnectionGate Gate => App.Services.GetRequiredService<PoniExp.Server.Hubs.ConnectionGate>();
 
+    public PoniExp.Server.Blobs.BlobRegistry Blobs => App.Services.GetRequiredService<PoniExp.Server.Blobs.BlobRegistry>();
+
+    public PoniExp.Server.Hubs.PresenceTracker Presence => App.Services.GetRequiredService<PoniExp.Server.Hubs.PresenceTracker>();
+
     /// <param name="settings">Router settings ("PoniExp:MaxExpiry", ...), changeable later with <see cref="SetSetting"/>.</param>
     public static async Task<RouterFixture> StartAsync(bool useHttps = false, string? dataDirectory = null,
         IDictionary<string, string?>? settings = null, int port = 0)

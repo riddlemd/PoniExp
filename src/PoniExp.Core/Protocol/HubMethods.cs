@@ -18,6 +18,17 @@ public static class HubMethods
     public const string Confirm = nameof(Confirm);
     public const string GetMachines = nameof(GetMachines);
 
+    // files (the chunks themselves go over HTTP, under BlobsPath, with a ticket)
+    public const string BlobsPath = "/blobs";
+    public const string BeginUpload = nameof(BeginUpload);
+    public const string ResumeUpload = nameof(ResumeUpload);
+    public const string CompleteUpload = nameof(CompleteUpload);
+    public const string RequestDownload = nameof(RequestDownload);
+    /// <summary>"This machine has the blob (verified), or gave up on it": the router may delete it once all have.</summary>
+    public const string ReleaseBlob = nameof(ReleaseBlob);
+    public const string CancelBlob = nameof(CancelBlob);
+    public const string GetBlobs = nameof(GetBlobs);
+
     // router -> client
     public const string Receive = nameof(Receive);
     public const string PresenceChanged = nameof(PresenceChanged);

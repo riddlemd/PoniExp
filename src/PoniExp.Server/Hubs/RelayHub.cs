@@ -18,6 +18,7 @@ public sealed class RelayHub(
     PresenceTracker presence,
     ConnectionGate gate,
     TrafficLog traffic,
+    PoniExp.Server.Blobs.BlobRegistry blobs,
     TimeProvider time,
     IOptionsSnapshot<RouterOptions> options,
     ILogger<RelayHub> logger) : Hub
@@ -211,6 +212,13 @@ public sealed class RelayHub(
             throw Refuse("The recipient isn't an approved machine.", me, envelope);
         }
 
+        var queued = queue.QueuedBytesFor(envelope.ToMachine);
+        if (queued + envelope.Size > options.Value.MaxQueuedBytesPerRecipient && queue.ExpiryOf(envelope.Id) is null)
+        {
+            throw Refuse($"Refused: {registry.Get(envelope.ToMachine)!.Name} has {PoniExp.Server.Blobs.BlobRegistry.Gb(queued)} of messages waiting, " +
+                         $"the most the router holds for one machine; it must come online and fetch them first.", me, envelope);
+        }
+
         var online = presence.IsOnline(envelope.ToMachine);
         if (await queue.EnqueueAsync(envelope) is { } delivery && online)
         {
@@ -224,6 +232,72 @@ public sealed class RelayHub(
     /// <summary>The recipient has stored the envelope: drop it from the queue.</summary>
     [HubMethodName(HubMethods.Confirm)]
     public Task ConfirmAsync(Guid id) => queue.ConfirmAsync(RequireMember(), id);
+
+    // ---- files ----
+
+    [HubMethodName(HubMethods.BeginUpload)]
+    public BlobTicket BeginUpload(BeginUploadRequest request)
+    {
+        var me = RequireMember();
+        return Blob(() => blobs.Begin(me, request), me);
+    }
+
+    [HubMethodName(HubMethods.ResumeUpload)]
+    public BlobTicket ResumeUpload(Guid blobId)
+    {
+        var me = RequireMember();
+        return Blob(() => blobs.Resume(me, blobId), me);
+    }
+
+    [HubMethodName(HubMethods.CompleteUpload)]
+    public BlobStatus CompleteUpload(Guid blobId)
+    {
+        var me = RequireMember();
+        return Blob(() => blobs.Complete(me, blobId), me);
+    }
+
+    [HubMethodName(HubMethods.RequestDownload)]
+    public BlobTicket RequestDownload(Guid blobId)
+    {
+        var me = RequireMember();
+        return Blob(() => blobs.RequestDownload(me, blobId), me);
+    }
+
+    [HubMethodName(HubMethods.ReleaseBlob)]
+    public void ReleaseBlob(Guid blobId) => blobs.Release(RequireMember(), blobId);
+
+    [HubMethodName(HubMethods.CancelBlob)]
+    public void CancelBlob(Guid blobId)
+    {
+        var me = RequireMember();
+        Blob(() =>
+        {
+            blobs.Cancel(me, blobId);
+            return 0;
+        }, me);
+    }
+
+    /// <summary>The caller's own uploads, with who they're shared with and who has released them.</summary>
+    [HubMethodName(HubMethods.GetBlobs)]
+    public IReadOnlyList<SenderBlob> GetBlobs()
+    {
+        var me = RequireMember();
+        string Name(string id) => registry.Get(id)?.Name ?? id[..Math.Min(8, id.Length)];
+        return [.. blobs.List().Where(b => b.Sender == me).Select(b => new SenderBlob(b.Id, b.State, b.ReservedBytes,
+            [.. b.SharedWith.Select(Name)], [.. b.ReleasedBy.Select(Name)], b.CreatedOn, b.ExpiresOn))];
+    }
+
+    private T Blob<T>(Func<T> work, string me)
+    {
+        try
+        {
+            return work();
+        }
+        catch (RouterException e)
+        {
+            throw Refuse(e.Message, me);
+        }
+    }
 
     [HubMethodName(HubMethods.GetMachines)]
     public IReadOnlyList<MachineInfo> GetMachines()

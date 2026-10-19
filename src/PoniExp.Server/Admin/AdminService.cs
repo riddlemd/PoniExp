@@ -14,6 +14,7 @@ public sealed class AdminService(
     MessageQueue queue,
     PresenceTracker presence,
     ConnectionGate gate,
+    Blobs.BlobRegistry blobs,
     IHubContext<RelayHub> hub,
     IOptionsMonitor<RouterOptions> options,
     TimeProvider time,
@@ -48,6 +49,7 @@ public sealed class AdminService(
         await hub.Clients.Group(RelayHub.KeyGroup(record.Id)).SendAsync(HubMethods.MembershipChanged, MembershipStatus.Unknown);
         presence.Disconnect(record.Id);
         await queue.DropForAsync(record.Id);
+        blobs.Forget(record.Id);
         return View(record) with { Status = MembershipStatus.Unknown };
     }
 
@@ -110,6 +112,17 @@ public sealed class AdminService(
         return [.. forgotten.Select(m => View(m) with { Status = MembershipStatus.Unknown })];
     }
 
+    /// <summary>Every blob, with machine names (<c>poniexp admin blobs</c>).</summary>
+    public IReadOnlyList<AdminBlobView> Blobs()
+    {
+        string Name(string id) => registry.Get(id)?.Name ?? id[..Math.Min(8, id.Length)];
+        return [.. blobs.List().Select(b => new AdminBlobView(b.Id, Name(b.Sender), b.State, b.ReservedBytes, b.ChunkCount, [.. b.SharedWith.Select(Name)],
+            [.. b.ReleasedBy.Select(Name)], b.CreatedOn, b.ExpiresOn, b.EndReason))];
+    }
+
+    /// <summary>Releases everything waiting for a machine (<c>poniexp admin blobs clear --for</c>).</summary>
+    public int ClearBlobsFor(string selector) => blobs.ClearFor(registry.Resolve(selector).Id);
+
     private AdminMachineView View(MachineRecord m) =>
         new(m.Id, m.Name, m.Status, m.JoinCode, m.Description, m.RequestedOn, m.DecidedOn, m.LastSeenOn, presence.IsOnline(m.Id));
 }
@@ -130,3 +143,6 @@ public sealed record RouterBackup(string Format, int Version, DateTimeOffset Cre
     IReadOnlyList<MachineRecord> Machines);
 
 public sealed record RestoreResult(int Machines, bool CertificateChanged, string? CertificateSha256);
+
+public sealed record AdminBlobView(Guid Id, string Sender, BlobState State, long Bytes, int Chunks, IReadOnlyList<string> SharedWith,
+    IReadOnlyList<string> ReleasedBy, DateTimeOffset CreatedOn, DateTimeOffset ExpiresOn, string? EndReason);

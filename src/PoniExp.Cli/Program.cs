@@ -36,13 +36,19 @@ const string Usage = """
           --expires <30s|10m|2h|3d>         how long it lives (default and maximum from settings)
           --content-type <type>    how to read the body (default: text/plain)
           --meta <key=value>       metadata; repeatable
+          --attach <path>          a file, uploaded once for all recipients; repeatable
       inbox [--endpoint <name>] [--json]   unacknowledged messages for an endpoint (default: "default")
       ack <id> [--endpoint <name>]         acknowledge a message (tell its sender you've taken it on)
-      reply <id> [--endpoint <name>] [--status progress|done|failed] [--meta k=v] <body|->
+      reply <id> [--endpoint <name>] [--status progress|done|failed] [--meta k=v] [--attach <path>] <body|->
                                            reply in its conversation (acknowledges it too)
       message <id> [--endpoint <name>]     one message and its delivery history
       conversation <id> [--endpoint <name>] [--json]
-      listen [--endpoint <name>] [--json] [--ack]
+      fetch <id> [--endpoint <name>] [--blob <id>]
+                                           download a message's files (verified) and print where they are
+      release <id> [--endpoint <name>] [--blob <id>]
+                                           done with them: the copy goes once every endpoint has released it
+      blobs | cancel <blob-id>             files this machine uploaded; cancel one (the router deletes it)
+      listen [--endpoint <name>] [--json] [--ack] [--auto-fetch]
                                            be the endpoint: print messages and receipts as they arrive
       conversations [--endpoint <name>]    an endpoint's conversations, most recent first
       log [filters] [--json | --export <path|->] [--bodies]
@@ -84,7 +90,11 @@ try
         ["reply", var id, .. var rest] => await ReplyAsync(Guid.Parse(id), rest),
         ["message", var id, .. var rest] => await MessageAsync(EndpointOf(rest), Guid.Parse(id)),
         ["conversation", var id, .. var rest] => await ConversationAsync(EndpointOf(rest), Guid.Parse(id), rest.Contains("--json")),
-        ["listen", .. var rest] => await ListenAsync(EndpointOf(rest), rest.Contains("--json"), rest.Contains("--ack")),
+        ["listen", .. var rest] => await ListenAsync(EndpointOf(rest), rest.Contains("--json"), rest.Contains("--ack"), rest.Contains("--auto-fetch")),
+        ["fetch", var id, .. var rest] => await FetchAsync(EndpointOf(rest), Guid.Parse(id), Option(rest, "--blob") is { } b ? Guid.Parse(b) : null),
+        ["release", var id, .. var rest] => await ReleaseAsync(EndpointOf(rest), Guid.Parse(id), Option(rest, "--blob") is { } b ? Guid.Parse(b) : null),
+        ["blobs"] => await BlobsAsync(),
+        ["cancel", var blob] => await CancelBlobAsync(Guid.Parse(blob)),
         ["conversations", .. var rest] => await ConversationsAsync(EndpointOf(rest)),
         ["log", .. var rest] => await LogAsync(rest),
         ["endpoint", "list"] => await EndpointsAsync(),
@@ -475,6 +485,7 @@ async Task<int> MachinesAsync()
 async Task<int> SendAsync(string[] rest)
 {
     var to = new List<string>();
+    var files = new List<string>();
     var metadata = new Dictionary<string, string>();
     string from = Address.DefaultEndpoint;
     string? subject = null, contentType = null, body = null;
@@ -493,6 +504,7 @@ async Task<int> SendAsync(string[] rest)
             case "--expires": expires = ParseDuration(Next()); break;
             case "--content-type": contentType = Next(); break;
             case "--meta": AddMeta(metadata, Next()); break;
+            case "--attach": files.Add(Path.GetFullPath(Next())); break;
             case var option when option.StartsWith("--", StringComparison.Ordinal) && option != "-":
                 throw new ArgumentException($"unknown option {option}");
             default:
@@ -508,7 +520,8 @@ async Task<int> SendAsync(string[] rest)
 
     using var api = await DaemonAsync2();
     var sent = await api.SendAsync(new LocalSendRequest(from, to, body == "-" ? await Console.In.ReadToEndAsync() : body, subject, conversation,
-        OperationId: operation, ContentType: contentType, Metadata: metadata.Count == 0 ? null : metadata, ExpiresIn: expires), cancel.Token);
+        OperationId: operation, ContentType: contentType, Metadata: metadata.Count == 0 ? null : metadata, ExpiresIn: expires,
+        Attachments: files.Count == 0 ? null : files), cancel.Token);
     foreach (var s in sent)
     {
         Console.WriteLine($"{s.State}: {s.Id} to {s.To} (#{s.Sequence}, conversation {s.ConversationId.ToString()[..8]}, " +
@@ -546,6 +559,7 @@ async Task<int> AckAsync(string endpoint, Guid id)
 async Task<int> ReplyAsync(Guid id, string[] rest)
 {
     var metadata = new Dictionary<string, string>();
+    var files = new List<string>();
     string endpoint = Address.DefaultEndpoint;
     string? status = null, body = null;
     for (var i = 0; i < rest.Length; i++)
@@ -556,6 +570,7 @@ async Task<int> ReplyAsync(Guid id, string[] rest)
             case "--endpoint": endpoint = Next(); break;
             case "--status": status = Next(); break;
             case "--meta": AddMeta(metadata, Next()); break;
+            case "--attach": files.Add(Path.GetFullPath(Next())); break;
             case var option when option.StartsWith("--", StringComparison.Ordinal) && option != "-":
                 throw new ArgumentException($"unknown option {option}");
             default:
@@ -571,7 +586,7 @@ async Task<int> ReplyAsync(Guid id, string[] rest)
 
     using var api = await DaemonAsync2();
     var sent = await api.ReplyAsync(endpoint, new LocalReplyRequest(id, body == "-" ? await Console.In.ReadToEndAsync() : body, status,
-        Metadata: metadata.Count == 0 ? null : metadata), cancel.Token);
+        Metadata: metadata.Count == 0 ? null : metadata, Attachments: files.Count == 0 ? null : files), cancel.Token);
     Console.WriteLine($"{sent.State}: {sent.Id} to {sent.To} (#{sent.Sequence})");
     return 0;
 }
@@ -600,7 +615,7 @@ async Task<int> ConversationAsync(string endpoint, Guid id, bool json)
     return 0;
 }
 
-async Task<int> ListenAsync(string endpoint, bool json, bool ack)
+async Task<int> ListenAsync(string endpoint, bool json, bool ack, bool autoFetch)
 {
     using var api = await DaemonAsync2();
     await using var connection = new EndpointConnection(api, endpoint, async e =>
@@ -608,10 +623,30 @@ async Task<int> ListenAsync(string endpoint, bool json, bool ack)
         if (e.Message is { } m)
         {
             Console.WriteLine(json ? JsonSerializer.Serialize(m, WireProtocol.Json) : Format(m));
+            if (autoFetch && m.Attachments is { Count: > 0 })
+            {
+                try
+                {
+                    foreach (var a in await api.FetchAsync(endpoint, new LocalFileRequest(m.Id), cancel.Token))
+                    {
+                        Console.Error.WriteLine($"* fetched {a.Name}: {a.Path}");
+                    }
+                }
+                catch (LocalApiException failure)
+                {
+                    Console.Error.WriteLine($"* couldn't fetch {m.Id.ToString()[..8]}'s files: {failure.Message}");
+                }
+            }
+
             if (ack)
             {
                 await api.AckAsync(endpoint, m.Id, cancel.Token);
             }
+        }
+        else if (e.FileReceipt is { } f)
+        {
+            Console.Error.WriteLine(json ? JsonSerializer.Serialize(f, WireProtocol.Json)
+                : $"* file {f.Receipt} by {f.From}: {f.BlobId.ToString()[..8]} (with {f.MessageId.ToString()[..8]}){(f.Reason is null ? "" : $": {f.Reason}")}");
         }
         else if (e.Receipt is { } r)
         {
@@ -693,6 +728,54 @@ async Task<int> LogAsync(string[] rest)
     return 0;
 }
 
+async Task<int> FetchAsync(string endpoint, Guid id, Guid? blob)
+{
+    using var api = await DaemonAsync2();
+    foreach (var a in await api.FetchAsync(endpoint, new LocalFileRequest(id, blob), cancel.Token))
+    {
+        Console.WriteLine($"{a.Name} ({FormatBytes(a.Size)}, {a.State}): {a.Path}");
+    }
+
+    return 0;
+}
+
+async Task<int> ReleaseAsync(string endpoint, Guid id, Guid? blob)
+{
+    using var api = await DaemonAsync2();
+    foreach (var a in await api.ReleaseAsync(endpoint, new LocalFileRequest(id, blob), cancel.Token))
+    {
+        Console.WriteLine($"{a.Name}: {a.State}");
+    }
+
+    return 0;
+}
+
+async Task<int> BlobsAsync()
+{
+    using var api = await DaemonAsync2();
+    var blobs = await api.BlobsAsync(cancel.Token);
+    if (blobs.Count == 0)
+    {
+        Console.WriteLine("no files on the router");
+    }
+
+    foreach (var b in blobs)
+    {
+        Console.WriteLine($"{b.BlobId}  {WireProtocol.NameOf(b.State),-10} {FormatBytes(b.Bytes),9}  to {string.Join(", ", b.SharedWith)}" +
+                          $"{(b.ReleasedBy.Count == 0 ? "" : $"  (fetched: {string.Join(", ", b.ReleasedBy)})")}  until {b.ExpiresOn.ToLocalTime():yyyy-MM-dd HH:mm}");
+    }
+
+    return 0;
+}
+
+async Task<int> CancelBlobAsync(Guid blob)
+{
+    using var api = await DaemonAsync2();
+    await api.CancelBlobAsync(blob, cancel.Token);
+    Console.WriteLine($"cancelled {blob}: the router deleted it; recipients that hadn't fetched it are told");
+    return 0;
+}
+
 async Task<int> EndpointsAsync()
 {
     using var api = await DaemonAsync2();
@@ -768,7 +851,12 @@ async Task<RelayClient> ConnectDirectAsync(bool probe)
 static string Format(LocalMessage m) =>
     $"[{m.CreatedOn.ToLocalTime():HH:mm:ss}] {m.Id.ToString()[..8]} {m.From} -> {m.To}" +
     (m.ReplyTo is { } re ? $" (re {re.ToString()[..8]}{(m.Status is { } s ? $", {s}" : string.Empty)})" : string.Empty) +
-    (m.Subject is null ? string.Empty : $" [{m.Subject}]") + $" <{m.State}>: {m.Body}";
+    (m.Subject is null ? string.Empty : $" [{m.Subject}]") + $" <{m.State}>: {m.Body}" +
+    string.Concat((m.Attachments ?? []).Select(a => $"\n    + {a.Name} ({FormatBytes(a.Size)}, {a.State}{(a.Path is null ? "" : $": {a.Path}")}" +
+                                                   $"{(a.Detail is null ? "" : $"; {a.Detail}")})"));
+
+static string FormatBytes(long bytes) =>
+    bytes >= 1_000_000_000 ? $"{bytes / 1e9:0.#} GB" : bytes >= 1_000_000 ? $"{bytes / 1e6:0.#} MB" : bytes >= 1_000 ? $"{bytes / 1e3:0.#} KB" : $"{bytes} B";
 
 static string FormatOffset(TimeSpan offset) =>
     offset.Duration() < TimeSpan.FromSeconds(1) ? "under a second" : $"{offset.Duration().TotalSeconds:0.#} s {(offset > TimeSpan.Zero ? "behind" : "ahead of")}";

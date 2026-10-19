@@ -74,6 +74,12 @@ public sealed class RouterOptions
     /// <summary>How often expired join requests and queue entries are swept.</summary>
     public TimeSpan MaintenanceInterval { get; set; } = TimeSpan.FromMinutes(1);
 
+    /// <summary>
+    /// The most queued (unconfirmed) message bytes for one recipient. Files have their own limits, so normal
+    /// messages always get through; this only stops one offline machine's queue from growing without end.
+    /// </summary>
+    public long MaxQueuedBytesPerRecipient { get; set; } = 100L * 1024 * 1024;
+
     /// <summary>How long the traffic log (when it's on) keeps its entries.</summary>
     public TimeSpan TrafficLogRetention { get; set; } = TimeSpan.FromDays(30);
 }
@@ -122,6 +128,11 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
         if (options.JoinRequestsPerHourPerAddress > options.JoinRequestsPerHour || options.MaxUnauthenticatedPerAddress > options.MaxUnauthenticatedConnections)
         {
             errors.Add("PoniExp: a per-address limit can't be higher than the router-wide one.");
+        }
+
+        if (options.MaxQueuedBytesPerRecipient < 4L * 1024 * 1024)
+        {
+            errors.Add("PoniExp:MaxQueuedBytesPerRecipient must be at least 4 MB (a few full-size messages).");
         }
 
         if (options.TrafficLogRetention <= TimeSpan.Zero)

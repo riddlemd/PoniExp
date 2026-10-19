@@ -18,7 +18,7 @@ public sealed record DaemonContext(MachineKeys Keys, string Home, RelayClientOpt
 /// announcements, and runs the outbox. Everything a message causes (its event, its receipt) is written in
 /// the transaction that stores it, so a crash never loses or doubles a receipt.
 /// </summary>
-public sealed class Daemon : BackgroundService, IIncomingHandler
+public sealed partial class Daemon : BackgroundService, IIncomingHandler
 {
     internal const string AnnouncementCounter = "endpoint-announcements";
 
@@ -142,11 +142,15 @@ public sealed class Daemon : BackgroundService, IIncomingHandler
             _lastRetention = Now;
             ApplyRetention(retention);
         }
+
+        await ReleaseOnRouterAsync();
     }
 
     internal RetentionResult ApplyRetention(RetentionOptions? retention = null)
     {
-        var result = Store.ApplyRetention(retention ?? _retention.CurrentValue, Now);
+        retention ??= _retention.CurrentValue;
+        DeleteOldCopies(Now - retention.Envelopes);
+        var result = Store.ApplyRetention(retention, Now);
         if (result is not { EnvelopesDropped: 0, MessagesDeleted: 0, DiagnosticsDeleted: 0, OperationsDeleted: 0 })
         {
             _logger.LogInformation("Retention: dropped {Envelopes} envelopes, deleted {Messages} messages, {Diagnostics} diagnostics, {Operations} operations",
@@ -214,6 +218,10 @@ public sealed class Daemon : BackgroundService, IIncomingHandler
                 }, receipt.Reason);
                 break;
 
+            case MessageType.FileReceipt: // automatic: applied, never answered
+                OnFileReceipt(tx, envelope, content);
+                break;
+
             case MessageType.Endpoint: // automatic: applied, never answered
                 if (Parse<EndpointAnnouncement>(content.Body) is { } announcement)
                 {
@@ -257,6 +265,7 @@ public sealed class Daemon : BackgroundService, IIncomingHandler
                 Metadata = copy.Metadata,
                 Status = copy.Status,
                 Subject = copy.Subject,
+                Attachments = copy.Attachments, // the same blobs, already shared with this machine
             };
         }
         else if (operation.State == "done")
@@ -289,6 +298,12 @@ public sealed class Daemon : BackgroundService, IIncomingHandler
             {
                 Deliver(session, Store.FindIncoming(MachineId, content.ToEndpoint, message.Envelope.Id)!, content);
             }
+        }
+        else if (content.Type == MessageType.FileReceipt && Parse<FileReceiptBody>(content.Body) is { } fileReceipt && content.ReplyTo is { } carried
+                 && _sessions.Get(content.ToEndpoint) is { } owner)
+        {
+            owner.Push(new LocalEvent(LocalEventKinds.FileReceipt, FileReceipt: new LocalFileReceipt(carried, fileReceipt.BlobId,
+                WireProtocol.NameOf(fileReceipt.Receipt), fileReceipt.Reason, $"{message.FromName}/{content.FromEndpoint}")));
         }
         else if (content.Type == MessageType.Receipt && Parse<ReceiptBody>(content.Body) is { } receipt && content.ReplyTo is { } about
                  && _sessions.Get(content.ToEndpoint) is { } sender)
@@ -353,11 +368,17 @@ public sealed class Daemon : BackgroundService, IIncomingHandler
     }
 
     /// <summary>Replies to a message for <paramref name="endpoint"/>; replying acknowledges it too (once).</summary>
-    internal async Task<SentMessage> ReplyAsync(string endpoint, Guid id, OutgoingMessage reply, CancellationToken cancellationToken)
+    internal async Task<SentMessage> ReplyAsync(string endpoint, Guid id, OutgoingMessage reply, CancellationToken cancellationToken,
+        IReadOnlyList<string>? files = null)
     {
         var stored = Store.FindIncoming(MachineId, endpoint, id) ?? throw new KeyNotFoundException($"no message {id} for endpoint '{endpoint}'");
         var content = _relay.Open(stored.Envelope!);
         var target = await _relay.ResolveAsync(stored.FromMachine, cancellationToken);
+        if (files is { Count: > 0 })
+        {
+            reply = reply with { Attachments = await UploadAsync(files, [target.Id], cancellationToken) };
+        }
+
         var envelope = Store.Transact(Now, tx =>
         {
             var sent = _relay.Compose(tx, target, content.FromEndpoint, RelayClient.ReplyTo(id, content, reply with { FromEndpoint = endpoint }));
@@ -376,9 +397,22 @@ public sealed class Daemon : BackgroundService, IIncomingHandler
     }
 
     /// <summary>Sends from a local endpoint. An endpoint that sends is entered in the registry, so replies to it are held, not rejected.</summary>
-    internal async Task<IReadOnlyList<SentMessage>> SendAsync(IReadOnlyCollection<string> to, OutgoingMessage message, CancellationToken cancellationToken)
+    internal async Task<IReadOnlyList<SentMessage>> SendAsync(IReadOnlyCollection<string> to, OutgoingMessage message, CancellationToken cancellationToken,
+        IReadOnlyList<string>? files = null)
     {
         var from = message.FromEndpoint ?? Address.DefaultEndpoint;
+        if (files is { Count: > 0 })
+        {
+            // Uploaded once, shared with exactly the machines these messages go to.
+            var machines = new HashSet<string>();
+            foreach (var address in to.Select(Address.Parse))
+            {
+                machines.Add((await _relay.ResolveAsync(address.Machine, cancellationToken)).Id);
+            }
+
+            message = message with { Attachments = await UploadAsync(files, machines, cancellationToken) };
+        }
+
         if (message is { OperationId: { } operation, ConversationId: null }
             && Store.GetLog(MachineId, new LogQuery(Operation: operation, Endpoint: from, Limit: 1)).FirstOrDefault() is { } earlier)
         {
@@ -471,7 +505,10 @@ public sealed class Daemon : BackgroundService, IIncomingHandler
 
     // ---- automatic messages ----
 
-    private void ComposeReceipt(StoreTransaction tx, Envelope envelope, MessageContent content, ReceiptBody receipt)
+    private void ComposeReceipt(StoreTransaction tx, Envelope envelope, MessageContent content, ReceiptBody receipt) =>
+        ComposeAutomatic(tx, envelope, content, JsonSerializer.Serialize(receipt, WireProtocol.Json), MessageType.Receipt);
+
+    private void ComposeAutomatic(StoreTransaction tx, Envelope envelope, MessageContent content, string body, MessageType type)
     {
         if (_relay.Machine(envelope.FromMachine) is not { } sender)
         {
@@ -479,7 +516,7 @@ public sealed class Daemon : BackgroundService, IIncomingHandler
             return;
         }
 
-        _relay.Compose(tx, sender, content.FromEndpoint, Automatic(JsonSerializer.Serialize(receipt, WireProtocol.Json), MessageType.Receipt) with
+        _relay.Compose(tx, sender, content.FromEndpoint, Automatic(body, type) with
         {
             FromEndpoint = content.ToEndpoint,
             ConversationId = content.ConversationId,
@@ -504,7 +541,8 @@ public sealed class Daemon : BackgroundService, IIncomingHandler
         return new LocalMessage(stored.Id, stored.FromMachine, $"{NameOf(stored.FromMachine)}/{content.FromEndpoint}",
             $"{NameOf(stored.ToMachine)}/{content.ToEndpoint}", incoming ? "in" : "out", content.ConversationId, content.ReplyTo, content.OperationId,
             content.Status is { } s ? WireProtocol.NameOf(s) : null, content.Subject, WireProtocol.NameOf(content.Type), content.ContentType,
-            content.Metadata, content.Body, content.CreatedOn, stored.ExpiresOn, stored.State, stored.StateDetail);
+            content.Metadata, content.Body, content.CreatedOn, stored.ExpiresOn, stored.State, stored.StateDetail,
+            content.Attachments is { Count: > 0 } ? AttachmentsOf(stored, direction) : null);
     }
 
     internal string NameOf(string machineId) => _relay.Machine(machineId)?.Name ?? machineId[..Math.Min(8, machineId.Length)];

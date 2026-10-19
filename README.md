@@ -59,7 +59,10 @@ works (`poniexp health`).
 at once. A machine may hold 5 connections, and the router accepts 10 new join requests an hour.
 Per-address limits apply on top, except to `PoniExp__SharedAddresses__*`: behind Rancher Desktop
 every client arrives from its gateway (`192.168.127.1`, set in `compose.yaml`). Join requests expire
-after 24 hours. Every limit is a `PoniExp__*` setting.
+after 24 hours. Files: 2 GB per file, 10 GB per sender, 5 GB waiting per recipient, 50 GB in all
+(and 5 GB of free disk kept), deleted when fetched by all, cancelled, or after 7 days
+(`PoniExp__Blobs__*`, with `Overrides__<machine>__PerRecipientBytes` per machine). An offline
+machine's queued messages are capped at 100 MB. Every limit is a `PoniExp__*` setting.
 
 **Backups.** Only the TLS certificate and the approved machines are worth keeping (queued messages
 are short-lived). The file holds the certificate's private key: keep it somewhere safe, such as a
@@ -93,6 +96,7 @@ docker exec poniexp-server poniexp admin approve 3f2a91c0     # id prefix or nam
 docker exec poniexp-server poniexp admin reject <id|name>
 docker exec poniexp-server poniexp admin remove <id|name>     # forget it; it may ask again
 docker exec poniexp-server poniexp admin clear-pending         # forget every waiting join request
+docker exec poniexp-server poniexp admin blobs [clear --for <name>]   # files on the router; free a machine's share
 docker exec poniexp-server poniexp admin traffic-log on        # record traffic (off by default; kept 30 days)
 docker exec poniexp-server poniexp admin traffic-log show --since 1h [--machine <name>]
 ```
@@ -115,7 +119,7 @@ Each agent is an endpoint. Give it the MCP server, as its own endpoint name:
 { "mcpServers": { "poniexp": { "command": "poniexp-client", "args": ["mcp", "--endpoint", "claude"] } } }
 ```
 
-Tools: `send`, `reply`, `ack`, `inbox`, `conversations`, `conversation`, `message`, `machines`, `status`. The agent
+Tools: `send`, `attach`, `reply`, `ack`, `inbox`, `fetch`, `release`, `conversations`, `conversation`, `message`, `machines`, `status`. The agent
 is online while the MCP server runs. Its messages wait in the daemon until it fetches them, and the
 sender sees each step:
 
@@ -126,6 +130,14 @@ sender sees each step:
 A reply's `status` (`progress`, `done`, `failed`) is the outcome of the work, separate from delivery.
 A conversation is `finished` once its last message is a `done` or `failed` reply; after a restart,
 `conversations` shows an agent where it left off.
+
+**Files.** `attach` (or `send --attach <path>`, `reply --attach`) encrypts each file and uploads it
+once to the router, shared with exactly the machines its messages go to. A recipient's agent calls
+`fetch` (or `poniexp-client fetch <id>`, or `listen --auto-fetch`): the daemon downloads it once
+for every agent on that machine, verifies it against the message, and returns a local path. The
+sender gets a file receipt, `downloaded` or `download-failed` (with why). Call `release` when done:
+the copy is deleted once every agent that received it has released it. Acknowledging doesn't
+release, and files need the router to be reachable (they don't wait in the outbox).
 
 **Retrying safely.** To retry a request, send it again with the first message's id as its
 `operationId` (`--operation` on the command line). The other machine doesn't do it twice: its
@@ -148,6 +160,10 @@ poniexp-client message <id> --endpoint ops             # its delivery history
 poniexp-client listen --endpoint ops [--ack] [--json]  # be "ops": print messages and receipts as they arrive
 poniexp-client endpoint list | endpoint retire <name>  # the endpoint registry
 poniexp-client diagnostics                             # recent connection and delivery problems
+poniexp-client send --to wojtek/agent --attach report.pdf "the report"   # uploaded once, for all --to
+poniexp-client fetch <id> --endpoint agent             # download a message's files; prints their paths
+poniexp-client release <id> --endpoint agent           # done with them
+poniexp-client blobs | cancel <blob-id>                # files this machine uploaded; cancel one
 poniexp-client conversations --endpoint ops            # its conversations, most recent first
 poniexp-client log --peer wojtek --since 2d            # the message log; also --conversation, --operation, --endpoint
 poniexp-client log --export log.jsonl [--bodies]       # JSONL, metadata only unless --bodies (then in the clear)

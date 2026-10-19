@@ -89,6 +89,31 @@ public static class AdminCli
                     }
 
                     return 0;
+                case ["blobs"]:
+                    var all = await http.GetFromJsonAsync<List<AdminBlobView>>("admin/blobs", Json) ?? [];
+                    if (all.Count == 0)
+                    {
+                        output.WriteLine("no blobs");
+                    }
+
+                    foreach (var b in all)
+                    {
+                        output.WriteLine($"{b.Id.ToString()[..8]}  {b.State,-10} {Blobs.BlobRegistry.Gb(b.Bytes),9}  from {b.Sender,-14} to {string.Join(",", b.SharedWith)}" +
+                                         $"{(b.ReleasedBy.Count > 0 ? $" (released: {string.Join(",", b.ReleasedBy)})" : "")}  until {b.ExpiresOn:yyyy-MM-dd HH:mm}" +
+                                         $"{(b.EndReason is null ? "" : $"  {b.EndReason}")}");
+                    }
+
+                    return 0;
+                case ["blobs", "clear", "--for", var target]:
+                    var clearResponse = await http.PostAsync($"admin/blobs/clear/{Uri.EscapeDataString(target)}", null);
+                    var clearedBlobs = await ReadAsync<BlobsCleared>(clearResponse, output);
+                    if (clearedBlobs is null)
+                    {
+                        return 1;
+                    }
+
+                    output.WriteLine($"released {clearedBlobs.Released} blob(s) waiting for {target}");
+                    return 0;
                 case ["clear-pending"]:
                     var cleared = await ReadAsync<List<AdminMachineView>>(await http.PostAsync("admin/clear-pending", null), output);
                     if (cleared is null)
@@ -132,7 +157,7 @@ public static class AdminCli
                     return 0;
                 default:
                     output.WriteLine("usage: poniexp admin [list | approve <id|name> | reject <id|name> | remove <id|name> | clear-pending | certificate\n" +
-                                     "                      | backup <path|-> | restore <path|->\n" +
+                                     "                      | backup <path|-> | restore <path|-> | blobs [clear --for <machine>]\n" +
                                      "                      | traffic-log [on | off | status | show [--since 2h|date] [--machine name] [--limit n] [--json]]] [--url URL]");
                     return 2;
             }
@@ -206,3 +231,5 @@ public static class AdminCli
         }
     }
 }
+
+internal sealed record BlobsCleared(int Released);

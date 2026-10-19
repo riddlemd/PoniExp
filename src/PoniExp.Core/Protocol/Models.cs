@@ -76,7 +76,55 @@ public sealed record MessageContent(
     string ContentType,
     IReadOnlyDictionary<string, string> Metadata,
     string Body,
-    DateTimeOffset CreatedOn);
+    DateTimeOffset CreatedOn,
+    IReadOnlyList<Attachment>? Attachments = null);
+
+/// <summary>
+/// A file sent with a message: a blob on the router (see <see cref="Files.BlobCrypto"/>). It travels inside the
+/// encrypted, signed content, so only the recipient (and the sender) learn the file key, and the router can't
+/// swap the blob: <see cref="ChunksHash"/> pins its contents. <see cref="Key"/> is base64; <see cref="ChunksHash"/>
+/// is the lowercase hex SHA-256 over the chunk hashes.
+/// </summary>
+public sealed record Attachment(Guid BlobId, string Name, string ContentType, long Size, int ChunkCount, string Key, string ChunksHash);
+
+/// <summary>Which file receipt (see <see cref="FileReceiptBody"/>).</summary>
+public enum FileReceiptKind
+{
+    /// <summary>The blob was fetched and verified on the recipient's machine.</summary>
+    Downloaded,
+    /// <summary>It couldn't be: tampered with, expired, cancelled by the sender, or over a limit (the reason says).</summary>
+    DownloadFailed,
+}
+
+/// <summary>
+/// The body of a <see cref="MessageType.FileReceipt"/> message (JSON), one per message that carried the file.
+/// Its ReplyTo is that message. Separate from delivery receipts and from a reply's status.
+/// </summary>
+public sealed record FileReceiptBody(FileReceiptKind Receipt, Guid BlobId, string? Reason = null);
+
+/// <summary>
+/// Starts an upload: the machines the blob is shared with (fixed from here on), its encrypted size (what is
+/// reserved against the limits) and its chunk count.
+/// </summary>
+public sealed record BeginUploadRequest(IReadOnlyList<string> ShareWith, long EncryptedBytes, int ChunkCount);
+
+/// <summary>A short-lived ticket for one blob in one direction (upload or download), for the <c>/blobs</c> HTTP calls.</summary>
+public sealed record BlobTicket(Guid BlobId, string Ticket, DateTimeOffset ExpiresOn);
+
+/// <summary>What of a blob is on the router: for resuming an upload, or before a download. Never lists who it's shared with.</summary>
+public sealed record BlobStatus(Guid BlobId, BlobState State, int ChunkCount, IReadOnlyList<int> Chunks, bool Manifest, long Bytes);
+
+public enum BlobState
+{
+    Uploading,
+    Sealed,
+    Cancelled,
+    Expired,
+}
+
+/// <summary>A blob as its sender sees it: who it's shared with and which of them have released it (machine names).</summary>
+public sealed record SenderBlob(Guid BlobId, BlobState State, long Bytes, IReadOnlyList<string> SharedWith, IReadOnlyList<string> ReleasedBy,
+    DateTimeOffset CreatedOn, DateTimeOffset ExpiresOn);
 
 /// <summary>
 /// A message between machines: the header the router needs for routing and expiry, and the content,

@@ -17,7 +17,7 @@ namespace PoniExp.Client;
 /// </summary>
 public sealed class ClientStore
 {
-    private const int SchemaVersion = 3;
+    private const int SchemaVersion = 4;
 
     private const string Schema = """
         PRAGMA journal_mode = WAL;
@@ -127,6 +127,43 @@ public sealed class ClientStore
         ) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS messages_operation ON messages (operation_id);
         CREATE INDEX IF NOT EXISTS messages_stored_on ON messages (stored_on);
+        CREATE TABLE IF NOT EXISTS blobs (
+            blob_id      TEXT PRIMARY KEY,
+            from_machine TEXT NOT NULL,
+            name         TEXT NOT NULL,
+            size         INTEGER NOT NULL,
+            state        TEXT NOT NULL,
+            local_path   TEXT,
+            detail       TEXT,
+            fetched_on   TEXT,
+            released_on  TEXT,
+            deleted_on   TEXT
+        ) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS attachments (
+            from_machine TEXT NOT NULL,
+            message_id   TEXT NOT NULL,
+            blob_id      TEXT NOT NULL,
+            direction    TEXT NOT NULL,
+            endpoint     TEXT NOT NULL,
+            name         TEXT NOT NULL,
+            size         INTEGER NOT NULL,
+            content_type TEXT NOT NULL,
+            receipt_sent INTEGER NOT NULL DEFAULT 0,
+            released_on  TEXT,
+            PRIMARY KEY (from_machine, message_id, blob_id)
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS attachments_blob ON attachments (blob_id);
+        CREATE TABLE IF NOT EXISTS attachment_events (
+            from_machine TEXT NOT NULL,
+            message_id   TEXT NOT NULL,
+            blob_id      TEXT NOT NULL,
+            direction    TEXT NOT NULL,
+            endpoint     TEXT NOT NULL,
+            event        TEXT NOT NULL,
+            occurred_on  TEXT NOT NULL,
+            detail       TEXT
+        );
+        CREATE INDEX IF NOT EXISTS attachment_events_message ON attachment_events (from_machine, message_id);
         CREATE TABLE IF NOT EXISTS diagnostics (
             occurred_on  TEXT NOT NULL,
             level        TEXT NOT NULL,
@@ -286,6 +323,58 @@ public sealed class ClientStore
             SELECT occurred_on, level, category, detail, machine, message_id FROM diagnostics ORDER BY rowid DESC LIMIT $limit;
             """, r => new Diagnostic(Parse(r.GetString(0)), r.GetString(1), r.GetString(2), r.GetString(3),
             r.IsDBNull(4) ? null : r.GetString(4), r.IsDBNull(5) ? null : Guid.Parse(r.GetString(5))), ("$limit", limit));
+
+    /// <summary>A message's attachments as this machine knows them: the file track's latest event, and the local copy.</summary>
+    public IReadOnlyList<AttachmentRecord> GetAttachments(string fromMachine, Guid messageId) =>
+        Query($"""
+            SELECT {AttachmentColumns} FROM attachments a LEFT JOIN blobs b ON b.blob_id = a.blob_id
+            WHERE a.from_machine = $from AND a.message_id = $id ORDER BY a.name;
+            """, ReadAttachment, ("$from", fromMachine), ("$id", Id(messageId)));
+
+    /// <summary>Every message (in one direction) that carries <paramref name="blobId"/>.</summary>
+    public IReadOnlyList<AttachmentRecord> GetAttachmentsOf(Guid blobId) =>
+        Query($"SELECT {AttachmentColumns} FROM attachments a LEFT JOIN blobs b ON b.blob_id = a.blob_id WHERE a.blob_id = $blob;",
+            ReadAttachment, ("$blob", Id(blobId)));
+
+    public IReadOnlyList<AttachmentEvent> GetAttachmentEvents(string fromMachine, Guid messageId) =>
+        Query("""
+            SELECT blob_id, direction, endpoint, event, occurred_on, detail FROM attachment_events
+            WHERE from_machine = $from AND message_id = $id ORDER BY rowid;
+            """, r => new AttachmentEvent(Guid.Parse(r.GetString(0)), r.GetString(1) == "in" ? MessageDirection.In : MessageDirection.Out, r.GetString(2),
+            r.GetString(3), Parse(r.GetString(4)), r.IsDBNull(5) ? null : r.GetString(5)), ("$from", fromMachine), ("$id", Id(messageId)));
+
+    public LocalBlob? GetLocalBlob(Guid blobId) =>
+        Query($"SELECT {LocalBlobColumns} FROM blobs WHERE blob_id = $id;", ReadLocalBlob, ("$id", Id(blobId))).FirstOrDefault();
+
+    /// <summary>Downloaded copies fetched before <paramref name="cutoff"/> and not yet deleted (retention).</summary>
+    public IReadOnlyList<LocalBlob> GetLocalBlobsFetchedBefore(DateTimeOffset cutoff) =>
+        Query($"SELECT {LocalBlobColumns} FROM blobs WHERE state = 'downloaded' AND fetched_on < $cutoff;", ReadLocalBlob, ("$cutoff", Stamp(cutoff)));
+
+    /// <summary>Blobs this machine has finished with (verified or failed) but not yet told the router.</summary>
+    public IReadOnlyList<LocalBlob> GetLocalBlobsToRelease() =>
+        Query($"SELECT {LocalBlobColumns} FROM blobs WHERE state IN ('downloaded', 'failed', 'deleted') AND released_on IS NULL;", ReadLocalBlob);
+
+    internal const string LocalBlobColumns = "blob_id, from_machine, name, size, state, local_path, detail, fetched_on, released_on, deleted_on";
+
+    internal static LocalBlob ReadLocalBlob(SqliteDataReader r) =>
+        new(Guid.Parse(r.GetString(0)), r.GetString(1), r.GetString(2), r.GetInt64(3), r.GetString(4), r.IsDBNull(5) ? null : r.GetString(5),
+            r.IsDBNull(6) ? null : r.GetString(6), r.IsDBNull(7) ? null : Parse(r.GetString(7)), r.IsDBNull(8) ? null : Parse(r.GetString(8)),
+            r.IsDBNull(9) ? null : Parse(r.GetString(9)));
+
+    internal const string AttachmentColumns = """
+        a.from_machine, a.message_id, a.blob_id, a.direction, a.endpoint, a.name, a.size, a.content_type, a.receipt_sent, a.released_on,
+        (SELECT e.event FROM attachment_events e WHERE e.from_machine = a.from_machine AND e.message_id = a.message_id AND e.blob_id = a.blob_id
+            ORDER BY e.rowid DESC LIMIT 1),
+        (SELECT e.detail FROM attachment_events e WHERE e.from_machine = a.from_machine AND e.message_id = a.message_id AND e.blob_id = a.blob_id
+            ORDER BY e.rowid DESC LIMIT 1),
+        b.state, b.local_path
+        """;
+
+    internal static AttachmentRecord ReadAttachment(SqliteDataReader r) =>
+        new(r.GetString(0), Guid.Parse(r.GetString(1)), Guid.Parse(r.GetString(2)), r.GetString(3) == "in" ? MessageDirection.In : MessageDirection.Out,
+            r.GetString(4), r.GetString(5), r.GetInt64(6), r.GetString(7), r.GetInt64(8) == 1, r.IsDBNull(9) ? null : Parse(r.GetString(9)),
+            r.IsDBNull(10) ? null : r.GetString(10), r.IsDBNull(11) ? null : r.GetString(11), r.IsDBNull(12) ? null : r.GetString(12),
+            r.IsDBNull(13) ? null : r.GetString(13));
 
     /// <summary>The conversations local endpoints have had, most recent first.</summary>
     public IReadOnlyList<ConversationRecord> GetConversations(string? endpoint = null, int limit = 100) =>
@@ -510,6 +599,7 @@ public sealed class StoreTransaction
         var envelope = seal(sequence);
         Insert(envelope, content, relayedOn: null, expiresOn: envelope.ExpiresOn);
         Converse(content, content.FromEndpoint, envelope.ToMachine, content.ToEndpoint, startedBy: "local");
+        AddAttachments(envelope, content, MessageDirection.Out, content.FromEndpoint, AttachmentEvents.Uploaded);
         AddEvent(envelope.FromMachine, envelope.Id, MessageDirection.Out, content.FromEndpoint, MessageEvents.Queued);
         return envelope;
     }
@@ -550,6 +640,11 @@ public sealed class StoreTransaction
         if (envelope.FromMachine != me)
         {
             Converse(content, content.ToEndpoint, envelope.FromMachine, content.FromEndpoint, startedBy: "peer");
+        }
+
+        if (envelope.ToMachine == me)
+        {
+            AddAttachments(envelope, content, MessageDirection.In, content.ToEndpoint, AttachmentEvents.Waiting);
         }
 
         return true;
@@ -625,6 +720,70 @@ public sealed class StoreTransaction
             """, ("$id", ClientStore.Id(c.ConversationId)), ("$local", localEndpoint), ("$peerMachine", peerMachine),
             ("$peerEndpoint", peerEndpoint), ("$subject", c.Subject), ("$startedBy", startedBy), ("$now", ClientStore.Stamp(Now)), ("$state", state));
     }
+
+    private void AddAttachments(Envelope envelope, MessageContent content, MessageDirection direction, string endpoint, string firstEvent)
+    {
+        foreach (var a in content.Attachments ?? [])
+        {
+            Execute("""
+                INSERT INTO attachments (from_machine, message_id, blob_id, direction, endpoint, name, size, content_type)
+                VALUES ($from, $id, $blob, $dir, $endpoint, $name, $size, $type) ON CONFLICT DO NOTHING;
+                """, ("$from", envelope.FromMachine), ("$id", ClientStore.Id(envelope.Id)), ("$blob", ClientStore.Id(a.BlobId)),
+                ("$dir", ClientStore.Name(direction)), ("$endpoint", endpoint), ("$name", a.Name), ("$size", a.Size), ("$type", a.ContentType));
+            AddAttachmentEvent(envelope.FromMachine, envelope.Id, a.BlobId, direction, endpoint, firstEvent);
+        }
+    }
+
+    /// <summary>Appends to the file track (separate from the message's delivery events).</summary>
+    public void AddAttachmentEvent(string fromMachine, Guid messageId, Guid blobId, MessageDirection direction, string endpoint, string @event,
+        string? detail = null) =>
+        Execute("""
+            INSERT INTO attachment_events (from_machine, message_id, blob_id, direction, endpoint, event, occurred_on, detail)
+            VALUES ($from, $id, $blob, $dir, $endpoint, $event, $on, $detail);
+            """, ("$from", fromMachine), ("$id", ClientStore.Id(messageId)), ("$blob", ClientStore.Id(blobId)), ("$dir", ClientStore.Name(direction)),
+            ("$endpoint", endpoint), ("$event", @event), ("$on", ClientStore.Stamp(Now)), ("$detail", detail));
+
+    public IReadOnlyList<AttachmentRecord> GetAttachmentsOf(Guid blobId, MessageDirection direction) =>
+        ClientStore.Query(_connection, _transaction, $"""
+            SELECT {ClientStore.AttachmentColumns} FROM attachments a LEFT JOIN blobs b ON b.blob_id = a.blob_id
+            WHERE a.blob_id = $blob AND a.direction = $dir;
+            """, ClientStore.ReadAttachment, ("$blob", ClientStore.Id(blobId)), ("$dir", ClientStore.Name(direction)));
+
+    public AttachmentRecord? GetAttachment(string fromMachine, Guid messageId, Guid blobId) =>
+        ClientStore.Query(_connection, _transaction, $"""
+            SELECT {ClientStore.AttachmentColumns} FROM attachments a LEFT JOIN blobs b ON b.blob_id = a.blob_id
+            WHERE a.from_machine = $from AND a.message_id = $id AND a.blob_id = $blob;
+            """, ClientStore.ReadAttachment, ("$from", fromMachine), ("$id", ClientStore.Id(messageId)), ("$blob", ClientStore.Id(blobId))).FirstOrDefault();
+
+    public void MarkFileReceiptSent(string fromMachine, Guid messageId, Guid blobId) =>
+        Execute("UPDATE attachments SET receipt_sent = 1 WHERE from_machine = $from AND message_id = $id AND blob_id = $blob;",
+            ("$from", fromMachine), ("$id", ClientStore.Id(messageId)), ("$blob", ClientStore.Id(blobId)));
+
+    /// <summary>An endpoint is done with a file it received. True if this release was new.</summary>
+    public bool ReleaseAttachment(string fromMachine, Guid messageId, Guid blobId) =>
+        Execute("UPDATE attachments SET released_on = $now WHERE from_machine = $from AND message_id = $id AND blob_id = $blob AND released_on IS NULL;",
+            ("$from", fromMachine), ("$id", ClientStore.Id(messageId)), ("$blob", ClientStore.Id(blobId)), ("$now", ClientStore.Stamp(Now))) == 1;
+
+    public LocalBlob? GetLocalBlob(Guid blobId) =>
+        ClientStore.Query(_connection, _transaction, $"SELECT {ClientStore.LocalBlobColumns} FROM blobs WHERE blob_id = $id;", ClientStore.ReadLocalBlob,
+            ("$id", ClientStore.Id(blobId))).FirstOrDefault();
+
+    /// <summary>Records the local copy's state: downloaded (with its path), failed (with why) or deleted.</summary>
+    public void SetLocalBlob(Guid blobId, string fromMachine, string name, long size, string state, string? path = null, string? detail = null)
+    {
+        var now = ClientStore.Stamp(Now);
+        Execute("""
+            INSERT INTO blobs (blob_id, from_machine, name, size, state, local_path, detail, fetched_on, deleted_on)
+            VALUES ($id, $from, $name, $size, $state, $path, $detail, CASE WHEN $state = 'downloaded' THEN $now END, CASE WHEN $state = 'deleted' THEN $now END)
+            ON CONFLICT (blob_id) DO UPDATE SET state = $state, local_path = coalesce($path, local_path), detail = $detail,
+                fetched_on = CASE WHEN $state = 'downloaded' THEN $now ELSE fetched_on END,
+                deleted_on = CASE WHEN $state = 'deleted' THEN $now ELSE deleted_on END;
+            """, ("$id", ClientStore.Id(blobId)), ("$from", fromMachine), ("$name", name), ("$size", size), ("$state", state), ("$path", path),
+            ("$detail", detail), ("$now", now));
+    }
+
+    public void MarkBlobReleasedOnRouter(Guid blobId) =>
+        Execute("UPDATE blobs SET released_on = $now WHERE blob_id = $id AND released_on IS NULL;", ("$id", ClientStore.Id(blobId)), ("$now", ClientStore.Stamp(Now)));
 
     /// <summary>The record of an operation a sender endpoint asked of this machine, unless it has expired.</summary>
     public OperationRecord? GetOperation(string fromMachine, string fromEndpoint, Guid operationId) =>
@@ -835,6 +994,35 @@ public sealed record LocalEndpointRecord(string Name, EndpointState State, DateT
 
 /// <summary>An endpoint another machine has announced.</summary>
 public sealed record PeerEndpoint(string Machine, string Endpoint, EndpointState State, long Counter, DateTimeOffset ChangedOn);
+
+/// <summary>
+/// One message's attachment. <see cref="LastEvent"/> is the file track's latest event (see <see cref="AttachmentEvents"/>);
+/// <see cref="LocalState"/> and <see cref="LocalPath"/> describe this machine's copy of the blob, shared by every message carrying it.
+/// </summary>
+public sealed record AttachmentRecord(string FromMachine, Guid MessageId, Guid BlobId, MessageDirection Direction, string Endpoint, string Name, long Size,
+    string ContentType, bool ReceiptSent, DateTimeOffset? ReleasedOn, string? LastEvent, string? LastDetail, string? LocalState, string? LocalPath);
+
+public sealed record AttachmentEvent(Guid BlobId, MessageDirection Direction, string Endpoint, string Event, DateTimeOffset OccurredOn, string? Detail);
+
+/// <summary>This machine's copy of a blob it received: <see cref="State"/> is downloaded, failed or deleted.</summary>
+public sealed record LocalBlob(Guid BlobId, string FromMachine, string Name, long Size, string State, string? LocalPath, string? Detail,
+    DateTimeOffset? FetchedOn, DateTimeOffset? ReleasedOn, DateTimeOffset? DeletedOn);
+
+/// <summary>
+/// The file track, in <c>attachment_events</c>. Incoming: waiting → verified (a <c>downloaded</c> receipt went back) →
+/// released, or download-failed. Outgoing: uploaded → downloaded or download-failed (the recipient's signed file
+/// receipts) or cancelled.
+/// </summary>
+public static class AttachmentEvents
+{
+    public const string Waiting = "waiting";
+    public const string Verified = "verified";
+    public const string Released = "released";
+    public const string Uploaded = "uploaded";
+    public const string Downloaded = "downloaded";
+    public const string DownloadFailed = "download-failed";
+    public const string Cancelled = "cancelled";
+}
 
 /// <summary>A conversation as one local endpoint sees it. <see cref="State"/> is open or finished.</summary>
 public sealed record ConversationRecord(Guid Id, string LocalEndpoint, string PeerMachine, string PeerEndpoint, string? Subject, string StartedBy,

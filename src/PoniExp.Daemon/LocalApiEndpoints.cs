@@ -73,7 +73,7 @@ public static class LocalApiEndpoints
                 ContentType = request.ContentType ?? "text/plain",
                 Metadata = request.Metadata,
                 ExpiresIn = request.ExpiresIn,
-            }, ct);
+            }, ct, request.Attachments);
             return Results.Ok(sent.Select(d.ToLocal).ToList());
         }));
 
@@ -87,7 +87,7 @@ public static class LocalApiEndpoints
                 ContentType = request.ContentType ?? "text/plain",
                 Metadata = request.Metadata,
                 ExpiresIn = request.ExpiresIn,
-            }, ct);
+            }, ct, request.Attachments);
             return Results.Ok(d.ToLocal(sent));
         }));
 
@@ -137,6 +137,26 @@ public static class LocalApiEndpoints
                 : d.Relay.Machines.FirstOrDefault(m => m.Name == peer || m.Id == peer)?.Id ?? throw new KeyNotFoundException($"no machine '{peer}'");
             var entries = d.Store.GetLog(d.MachineId, new LogQuery(conversation, operation, peerId, endpoint, since, automatic ?? false, limit ?? 1000));
             return Task.FromResult(Results.Ok(entries.Select(e => ToLog(d, e, bodies ?? false)).ToList()));
+        }));
+
+        app.MapPost("/endpoints/{endpoint}/fetch", (Daemon d, string endpoint, LocalFileRequest request, CancellationToken ct) => Handle(async () =>
+        {
+            RequireEndpoint(endpoint);
+            return Results.Ok(await d.FetchAsync(endpoint, request.Id, request.BlobId, ct));
+        }));
+
+        app.MapPost("/endpoints/{endpoint}/release", (Daemon d, string endpoint, LocalFileRequest request) => Handle(() =>
+        {
+            RequireEndpoint(endpoint);
+            return Task.FromResult(Results.Ok(d.Release(endpoint, request.Id, request.BlobId)));
+        }));
+
+        app.MapGet("/blobs", (Daemon d, CancellationToken ct) => Handle(async () => Results.Ok(await d.Relay.GetBlobsAsync(ct))));
+
+        app.MapPost("/blobs/{id:guid}/cancel", (Daemon d, Guid id, CancellationToken ct) => Handle(async () =>
+        {
+            await d.CancelAsync(id, ct);
+            return Results.Ok(new LocalOk(true));
         }));
 
         app.MapGet("/endpoints", (Daemon d) => Results.Ok(Endpoints(d)));
@@ -325,7 +345,15 @@ public static class LocalApiEndpoints
         }
         catch (HubException e)
         {
-            return Error(StatusCodes.Status502BadGateway, $"the router refused it: {e.Message}");
+            return Error(StatusCodes.Status502BadGateway, $"the router refused it: {RelayClient.ReasonOf(e)}");
+        }
+        catch (BlobTransferException e)
+        {
+            return Error(e.Definitive ? StatusCodes.Status422UnprocessableEntity : StatusCodes.Status502BadGateway, $"download failed: {e.Message}");
+        }
+        catch (Exception e) when (e is FileNotFoundException or DirectoryNotFoundException or UnauthorizedAccessException)
+        {
+            return Error(StatusCodes.Status400BadRequest, $"can't read the file: {e.Message}");
         }
     }
 

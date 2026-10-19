@@ -32,6 +32,11 @@ only has to build on the ones before it; a protection that arrives in a later ph
 - **History (phase 5):** conversations (open or finished), doing a request once (retries answered by
   the daemon), `log` with filters and JSONL export, retention with a size cap, the router's traffic
   log (`admin traffic-log`).
+- **Files (phase 6):** blobs encrypted in 4 MB AES-GCM chunks with an encrypted manifest, uploaded once
+  per send and shared with its recipients' machines; tickets; verified fetch shared by local endpoints;
+  file receipts; release; limits with per-machine overrides; the message queue's own cap; `send/reply
+  --attach`, `fetch`, `release`, `blobs`, `cancel`, `listen --auto-fetch`; MCP `attach`, `fetch`, `release`;
+  `admin blobs`. Protocol 5.
 - **Executables:**
   - `poniexp` (`src/PoniExp.Server`), with the subcommands `router` and `admin`.
   - `poniexp-client` (`src/PoniExp.Cli`).
@@ -433,7 +438,7 @@ status `done` or `failed` (a later message reopens it).
   id, size, sequence. Endpoints are encrypted, so the log shows which machines talk, not which
   agents.
 
-## Phase 6: Encrypted files
+## Phase 6: Encrypted files (done)
 
 A file is uploaded **once**, however many recipients it goes to. Each recipient gets its own
 message (see Recipients) pointing at the same blob. Adds `blobs` and `attachments` to the client

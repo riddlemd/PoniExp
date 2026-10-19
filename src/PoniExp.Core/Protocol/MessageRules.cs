@@ -52,6 +52,21 @@ public static class MessageRules
             return $"the body is at most {Limits.MaxBodyBytes} bytes";
         }
 
+        if (content.Attachments is { } attachments)
+        {
+            if (content.Type != MessageType.Message || attachments.Count > Limits.MaxAttachments)
+            {
+                return $"only messages carry attachments, at most {Limits.MaxAttachments}";
+            }
+
+            if (attachments.Any(a => a is null || a.BlobId == Guid.Empty || !Files.BlobCrypto.IsValidFileName(a.Name) || !Limits.IsValidContentType(a.ContentType)
+                                     || a.Size < 0 || a.ChunkCount != Files.BlobCrypto.ChunkCountOf(a.Size) || a.ChunksHash is not { Length: 64 }
+                                     || !Files.BlobCrypto.IsValidKey(a.Key)))
+            {
+                return "an attachment needs a blob id, a plain file name, a content type, its size and chunk count, a 256-bit key and its chunks' hash";
+            }
+        }
+
         return null;
     }
 }

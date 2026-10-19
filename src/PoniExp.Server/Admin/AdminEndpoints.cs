@@ -37,6 +37,18 @@ public static class AdminEndpoints
                 e.ToMachine is { } t ? names.GetValueOrDefault(t, t[..Math.Min(8, t.Length)]) : null,
                 e.MessageId, e.Size, e.Sequence, e.Address, e.Detail)).ToList());
         });
+        admin.MapGet("/blobs", (AdminService service) => Results.Ok(service.Blobs()));
+        admin.MapPost("/blobs/clear/{selector}", (string selector, AdminService service) =>
+        {
+            try
+            {
+                return Results.Ok(new { released = service.ClearBlobsFor(selector) });
+            }
+            catch (RouterException e)
+            {
+                return Results.Problem(e.Message, statusCode: StatusCodes.Status404NotFound);
+            }
+        });
         admin.MapPost("/clear-pending", async (AdminService service) => Results.Ok(await service.ClearPendingAsync()));
         admin.MapGet("/backup", (AdminService service, RouterCertificateInfo certificate) => Results.Ok(service.Backup(certificate)));
         admin.MapPost("/restore", async (RouterBackup backup, AdminService service, RouterCertificateInfo certificate) =>

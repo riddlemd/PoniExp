@@ -33,6 +33,7 @@ public static class RouterHost
         {
             kestrel.Limits.MaxConcurrentConnections = options.MaxConnections;
             kestrel.Limits.MaxConcurrentUpgradedConnections = options.MaxConnections;
+            kestrel.Limits.MaxRequestBodySize = Core.Files.BlobCrypto.MaxSealedChunk + 64 * 1024; // a chunk is the largest request
             kestrel.Listen(IPAddress.Parse(options.BindAddress), options.Port, listen =>
             {
                 if (certificate is not null)
@@ -51,6 +52,8 @@ public static class RouterHost
             .PostConfigure(o => configure?.Invoke(o))
             .ValidateOnStart();
         builder.Services.AddSingleton<IValidateOptions<RouterOptions>, RouterOptionsValidator>();
+        builder.Services.AddOptions<Blobs.BlobOptions>().Bind(builder.Configuration.GetSection(Blobs.BlobOptions.Section)).ValidateOnStart();
+        builder.Services.AddSingleton<IValidateOptions<Blobs.BlobOptions>, Blobs.BlobOptionsValidator>();
         builder.Services.AddSingleton(time);
         builder.Services.AddSingleton(certificateInfo);
         // Within docker stop's 10 s grace; daemons reconnect to the next instance anyway.
@@ -62,6 +65,7 @@ public static class RouterHost
         builder.Services.AddHostedService<RouterMaintenance>();
         builder.Services.AddSingleton<MessageQueue>();
         builder.Services.AddSingleton<PresenceTracker>();
+        builder.Services.AddSingleton<Blobs.BlobRegistry>();
         builder.Services.AddSingleton<AdminService>();
         builder.Services.AddSignalR(signalR =>
             {
@@ -73,6 +77,7 @@ public static class RouterHost
         var app = builder.Build();
         app.MapHub<RelayHub>(HubMethods.Path);
         app.MapAdmin();
+        Blobs.BlobEndpoints.MapBlobs(app);
         app.MapGet("/", () => Results.Text("PoniExp router\n"));
         // Says only whether the router works: no counts or names, since the relay port may face the internet.
         app.MapGet("/health", (RouterStore store) => store.IsHealthy()

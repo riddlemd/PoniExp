@@ -2,7 +2,7 @@
 
 What each party can and can't do, as built. Updated each phase (see `docs/plan.md`).
 
-**Current state: phase 5** (conversations, doing a request once, client log and retention, traffic log).
+**Current state: phase 6** (encrypted files: uploaded once, verified on download, file receipts, limits).
 
 ## Parties
 
@@ -83,6 +83,29 @@ Endpoints, conversation, subject, type, metadata, body and `createdOn` are encry
 
 - TLS with a self-signed certificate pinned by SHA-256 on every client: no public CA, and a man in the
   middle is refused.
+
+## Files
+
+- **What the router sees of a file:** a random blob id, who uploaded it and which machines it is shared
+  with (it routes their messages anyway), the number and sizes of its chunks (so the file's size, give
+  or take 16 bytes a chunk), and when each machine fetches it. Not its name, type or contents: those
+  are in the encrypted manifest and chunks.
+- **Keys:** a random 256-bit key per upload, carried only in the messages (encrypted to the recipient
+  and the sender, and signed). Chunks are AES-256-GCM with the chunk's index as nonce and the blob id,
+  index and a last-chunk flag as associated data, so chunks can't be reordered, swapped between blobs,
+  dropped or truncated unnoticed. The manifest lists every chunk's hash, and the message pins that
+  list by its hash, so the router can't swap in another blob even one sealed with the same key.
+- **Who may read it:** download tickets go only to the sender and the machines named at upload. A
+  machine it isn't shared with is told "no such blob", never who it is shared with. Tickets are random,
+  for one blob and one direction, and last 15 minutes.
+- **No deduplication:** each upload is its own blob, so the router can't tell two uploads are the same
+  file, and having a blob's id lets no one fetch it.
+- **Local copies:** written to `<home>/files/<blob>/` only after verification (a `.part` file
+  until then), and deleted when every endpoint that received them has released them, or after 90 days.
+- **Limits:** space is reserved when an upload starts, against the file, sender, recipient and relay
+  limits and a free-disk floor, so a full disk or one machine's backlog can't stop messages, which
+  have their own cap per recipient (100 MB queued).
+- In system mode the daemon reads files to send, and writes fetched ones, as the service's account.
 
 ## Logs
 

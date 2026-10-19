@@ -1,3 +1,5 @@
+using PoniExp.Core.Files;
+using System.Net.Http.Json;
 using System.Net.Security;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -36,6 +38,8 @@ public sealed class RelayClient : IAsyncDisposable
     private volatile bool _authenticated;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, byte> _unconfirmed = new();
     private Dictionary<string, MachineInfo> _machines = [];
+    private readonly Func<HttpMessageHandler, HttpMessageHandler>? _handlerFactory;
+    private readonly string? _pin;
 
     /// <exception cref="OptionsValidationException">The messaging settings are invalid.</exception>
     public RelayClient(MachineKeys keys, RelayClientOptions options, ClientStore store,
@@ -49,6 +53,8 @@ public sealed class RelayClient : IAsyncDisposable
         _confirm = options.ConfirmMessages;
         _time = time ?? TimeProvider.System;
         _reconnectDelays = options.ReconnectDelays;
+        _handlerFactory = options.HttpMessageHandlerFactory;
+        _pin = options.PinnedCertificateSha256;
         _connection = new HubConnectionBuilder()
             .WithUrl(new Uri(options.RouterUrl, HubMethods.Path), http =>
             {
@@ -240,6 +246,261 @@ public sealed class RelayClient : IAsyncDisposable
         return (await RelayComposedAsync([envelope], cancellationToken))[0];
     }
 
+    // ---- files ----
+
+    /// <summary>
+    /// Encrypts and uploads a file once, shared with <paramref name="shareWith"/> (machine ids; fixed from here
+    /// on), and returns the attachment to put in each recipient's message. A chunk that fails to go up is
+    /// retried with a fresh ticket; the encryption is deterministic for a key, so a retry sends the same bytes.
+    /// </summary>
+    public async Task<Attachment> UploadAsync(string path, IReadOnlyCollection<string> shareWith, string? contentType = null, string? name = null,
+        CancellationToken cancellationToken = default)
+    {
+        var info = new FileInfo(path);
+        if (!info.Exists)
+        {
+            throw new FileNotFoundException($"no file {path}", path);
+        }
+
+        name ??= info.Name;
+        contentType ??= "application/octet-stream";
+        if (!BlobCrypto.IsValidFileName(name))
+        {
+            throw new ArgumentException($"'{name}' isn't a plain file name");
+        }
+
+        var size = info.Length;
+        var chunks = BlobCrypto.ChunkCountOf(size);
+        var key = BlobCrypto.NewKey();
+        var ticket = await InvokeBlobAsync<BlobTicket>(HubMethods.BeginUpload,
+            new BeginUploadRequest([.. shareWith], BlobCrypto.EncryptedSizeOf(size), chunks), cancellationToken);
+        var id = ticket.BlobId;
+        using var http = BlobHttp();
+        var hashes = new List<string>(chunks);
+        await using (var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16, useAsync: true))
+        {
+            var buffer = new byte[BlobCrypto.ChunkSize];
+            for (var i = 0; i < chunks; i++)
+            {
+                var read = await file.ReadAtLeastAsync(buffer, BlobCrypto.ChunkSize, throwOnEndOfStream: false, cancellationToken);
+                var sealedChunk = BlobCrypto.SealChunk(key, id, i, i == chunks - 1, buffer.AsSpan(0, read));
+                hashes.Add(BlobCrypto.HashOf(sealedChunk));
+                ticket = await PutWithRetryAsync(http, ticket, $"chunks/{i}", sealedChunk, cancellationToken);
+            }
+        }
+
+        var manifest = BlobCrypto.SealManifest(key, id, new BlobManifest(name, contentType, size, chunks, hashes));
+        await PutWithRetryAsync(http, ticket, "manifest", manifest, cancellationToken);
+        await InvokeBlobAsync<BlobStatus>(HubMethods.CompleteUpload, id, cancellationToken);
+        return new Attachment(id, name, contentType, size, chunks, Convert.ToBase64String(key), BlobCrypto.ChunksHashOf(hashes));
+    }
+
+    /// <summary>
+    /// Fetches an attachment to <paramref name="destination"/>, verifying everything against the message: the
+    /// manifest's chunk list against its hash, each chunk against the list, each chunk's place (index, last).
+    /// Written to a <c>.part</c> file first, so a file at <paramref name="destination"/> is always complete.
+    /// </summary>
+    /// <exception cref="BlobTransferException">With why; <see cref="BlobTransferException.Definitive"/> unless retrying may help.</exception>
+    public async Task DownloadAsync(Attachment attachment, string destination, CancellationToken cancellationToken = default)
+    {
+        var key = Convert.FromBase64String(attachment.Key);
+        var id = attachment.BlobId;
+        BlobTicket ticket;
+        try
+        {
+            ticket = await InvokeBlobAsync<BlobTicket>(HubMethods.RequestDownload, id, cancellationToken);
+        }
+        catch (HubException e)
+        {
+            throw new BlobTransferException(ReasonOf(e), definitive: true);
+        }
+
+        using var http = BlobHttp();
+        BlobManifest manifest;
+        try
+        {
+            manifest = BlobCrypto.OpenManifest(key, id, await GetAsync(http, ticket, "manifest", cancellationToken));
+        }
+        catch (CryptographicException)
+        {
+            throw new BlobTransferException("the manifest doesn't verify (tampered with, or not this message's file)", definitive: true);
+        }
+
+        if (manifest.ChunkHashes.Count != attachment.ChunkCount || manifest.ChunkCount != attachment.ChunkCount || manifest.Size != attachment.Size
+            || BlobCrypto.ChunksHashOf(manifest.ChunkHashes) != attachment.ChunksHash)
+        {
+            throw new BlobTransferException("the manifest doesn't match the message (hash or size mismatch)", definitive: true);
+        }
+
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(destination))!);
+        var part = destination + ".part";
+        try
+        {
+            long written = 0;
+            await using (var file = new FileStream(part, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16, useAsync: true))
+            {
+                for (var i = 0; i < manifest.ChunkCount; i++)
+                {
+                    var sealedChunk = await GetAsync(http, ticket, $"chunks/{i}", cancellationToken);
+                    if (BlobCrypto.HashOf(sealedChunk) != manifest.ChunkHashes[i])
+                    {
+                        throw new BlobTransferException($"chunk {i} doesn't match its hash (tampered with)", definitive: true);
+                    }
+
+                    byte[] plain;
+                    try
+                    {
+                        plain = BlobCrypto.OpenChunk(key, id, i, i == manifest.ChunkCount - 1, sealedChunk);
+                    }
+                    catch (CryptographicException)
+                    {
+                        throw new BlobTransferException($"chunk {i} doesn't decrypt (tampered with, or out of place)", definitive: true);
+                    }
+
+                    await file.WriteAsync(plain, cancellationToken);
+                    written += plain.Length;
+                }
+            }
+
+            if (written != attachment.Size)
+            {
+                throw new BlobTransferException($"the file is {written} bytes, not the {attachment.Size} the message says", definitive: true);
+            }
+
+            File.Move(part, destination, overwrite: true);
+        }
+        catch
+        {
+            File.Delete(part);
+            throw;
+        }
+    }
+
+    /// <summary>Tells the router this machine is done with a blob (it may delete it once every machine has).</summary>
+    public Task ReleaseBlobAsync(Guid blobId, CancellationToken cancellationToken = default) =>
+        _connection.InvokeAsync(HubMethods.ReleaseBlob, blobId, cancellationToken);
+
+    public Task CancelBlobAsync(Guid blobId, CancellationToken cancellationToken = default) =>
+        InvokeBlobAsync<object?>(HubMethods.CancelBlob, blobId, cancellationToken, noResult: true);
+
+    public Task<IReadOnlyList<SenderBlob>> GetBlobsAsync(CancellationToken cancellationToken = default) =>
+        InvokeBlobAsync<IReadOnlyList<SenderBlob>>(HubMethods.GetBlobs, null, cancellationToken);
+
+    /// <summary>A refusal's own words, without SignalR's "An unexpected error occurred invoking ..." wrapper.</summary>
+    public static string ReasonOf(Exception e)
+    {
+        const string Marker = "HubException: ";
+        var at = e.Message.IndexOf(Marker, StringComparison.Ordinal);
+        return at < 0 ? e.Message : e.Message[(at + Marker.Length)..];
+    }
+
+    private async Task<T> InvokeBlobAsync<T>(string method, object? argument, CancellationToken cancellationToken, bool noResult = false)
+    {
+        if (!IsConnected)
+        {
+            throw new InvalidOperationException("not connected to the router: files need it (messages wait in the outbox, files don't)");
+        }
+
+        if (noResult)
+        {
+            await _connection.InvokeAsync(method, argument, cancellationToken);
+            return default!;
+        }
+
+        return argument is null
+            ? await _connection.InvokeAsync<T>(method, cancellationToken)
+            : await _connection.InvokeAsync<T>(method, argument, cancellationToken);
+    }
+
+    private async Task<BlobTicket> PutWithRetryAsync(HttpClient http, BlobTicket ticket, string part, byte[] data, CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Put, $"{HubMethods.BlobsPath}/{ticket.BlobId}/{part}") { Content = new ByteArrayContent(data) };
+                request.Headers.TryAddWithoutValidation("Authorization", "Ticket " + ticket.Ticket);
+                using var response = await http.SendAsync(request, cancellationToken);
+                if (response.IsSuccessStatusCode)
+                {
+                    return ticket;
+                }
+
+                var detail = await ProblemOf(response, cancellationToken);
+                if (response.StatusCode != System.Net.HttpStatusCode.Unauthorized || attempt >= 3)
+                {
+                    throw new BlobTransferException($"the router refused {part}: {detail}", definitive: response.StatusCode != System.Net.HttpStatusCode.Unauthorized);
+                }
+            }
+            catch (HttpRequestException) when (attempt < 3)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(attempt), _time, cancellationToken);
+            }
+
+            ticket = await InvokeBlobAsync<BlobTicket>(HubMethods.ResumeUpload, ticket.BlobId, cancellationToken);
+        }
+    }
+
+    private static async Task<byte[]> GetAsync(HttpClient http, BlobTicket ticket, string part, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"{HubMethods.BlobsPath}/{ticket.BlobId}/{part}");
+        request.Headers.TryAddWithoutValidation("Authorization", "Ticket " + ticket.Ticket);
+        HttpResponseMessage response;
+        try
+        {
+            response = await http.SendAsync(request, cancellationToken);
+        }
+        catch (HttpRequestException e)
+        {
+            throw new BlobTransferException($"can't reach the router: {e.Message}", definitive: false);
+        }
+
+        using (response)
+        {
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new BlobTransferException($"the router has no {part} ({(int)response.StatusCode}{await ProblemOf(response, cancellationToken)})",
+                    definitive: response.StatusCode == System.Net.HttpStatusCode.NotFound);
+            }
+
+            var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+            if (bytes.Length > BlobCrypto.MaxSealedChunk)
+            {
+                throw new BlobTransferException($"{part} is larger than a chunk can be", definitive: true);
+            }
+
+            return bytes;
+        }
+    }
+
+    private static async Task<string> ProblemOf(HttpResponseMessage response, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var problem = await response.Content.ReadFromJsonAsync<System.Text.Json.JsonElement>(cancellationToken);
+            return problem.TryGetProperty("detail", out var d) ? ": " + d.GetString() : "";
+        }
+        catch (Exception e) when (e is System.Text.Json.JsonException or NotSupportedException or InvalidOperationException)
+        {
+            return "";
+        }
+    }
+
+    /// <summary>An HTTP client for the router's <c>/blobs</c> calls, with the same certificate pin as the hub connection.</summary>
+    private HttpClient BlobHttp()
+    {
+        HttpMessageHandler handler = new HttpClientHandler
+        {
+            ServerCertificateCustomValidationCallback = _pin is { } pin ? (_, cert, _, _) => cert is not null && Matches(cert, pin) : null,
+        };
+        if (_handlerFactory is not null)
+        {
+            handler = _handlerFactory(handler);
+        }
+
+        return new HttpClient(handler) { BaseAddress = RouterUrl, Timeout = TimeSpan.FromMinutes(5) };
+    }
+
     /// <summary>The reply's fields filled in from the message it answers: its conversation, from the endpoint it was sent to.</summary>
     public static OutgoingMessage ReplyTo(Guid originalId, MessageContent original, OutgoingMessage reply) => reply with
     {
@@ -282,7 +543,8 @@ public sealed class RelayClient : IAsyncDisposable
             message.ContentType,
             message.Metadata ?? new Dictionary<string, string>(),
             message.Body,
-            now);
+            now,
+            message.Attachments is { Count: > 0 } a ? a : null);
         if (MessageRules.CheckContent(content) is { } problem)
         {
             throw new ArgumentException(problem, nameof(message));
@@ -692,6 +954,9 @@ public sealed record OutgoingMessage(string Body)
 
     public TimeSpan? ExpiresIn { get; init; }
 
+    /// <summary>Files already uploaded (see <see cref="RelayClient.UploadAsync"/>), shared with this message's recipient machine.</summary>
+    public IReadOnlyList<Attachment>? Attachments { get; init; }
+
     /// <summary>Protocol level; only the daemon sends anything but <see cref="MessageType.Message"/>.</summary>
     public MessageType Type { get; init; } = MessageType.Message;
 }
@@ -705,3 +970,9 @@ public interface IIncomingHandler
 
 /// <summary>A message sent. <see cref="State"/> is the router's; null when it is still in the outbox (no connection).</summary>
 public sealed record SentMessage(Guid Id, string ToMachine, string ToEndpoint, Guid ConversationId, long Sequence, DateTimeOffset ExpiresOn, DeliveryState? State);
+
+/// <summary>A file transfer that failed. <see cref="Definitive"/>: retrying won't help (tampered, cancelled, expired, over a limit).</summary>
+public sealed class BlobTransferException(string reason, bool definitive) : Exception(reason)
+{
+    public bool Definitive { get; } = definitive;
+}
