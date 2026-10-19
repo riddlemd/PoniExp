@@ -113,7 +113,7 @@ public class FileTests
     }
 
     [Fact]
-    public async Task SeveralEndpointsShareOneFetchAndTheCopyGoesWhenAllHaveReleased()
+    public async Task SeveralAgentsShareOneFetchAndTheCopyGoesWhenAllHaveReleased()
     {
         await using var router = await RouterFixture.StartAsync();
         await using var ise = await DaemonFixture.StartAsync(router, "ise");
@@ -301,15 +301,15 @@ public class FileTests
         return (path, bytes);
     }
 
-    private static async Task<LocalMessage> InboxOneAsync(DaemonFixture daemon, string endpoint)
+    private static async Task<LocalMessage> InboxOneAsync(DaemonFixture daemon, string agent)
     {
-        await RouterFixture.EventuallyAsync(async () => (await daemon.Api.InboxAsync(endpoint)).Count >= 1);
-        return (await daemon.Api.InboxAsync(endpoint)).First();
+        await RouterFixture.EventuallyAsync(async () => (await daemon.Api.InboxAsync(agent)).Count >= 1);
+        return (await daemon.Api.InboxAsync(agent)).First();
     }
 
-    private static async Task RegisterAndLeaveAsync(DaemonFixture daemon, string endpoint)
+    private static async Task RegisterAndLeaveAsync(DaemonFixture daemon, string agent)
     {
-        await using var connection = new EndpointConnection(daemon.Api, endpoint, _ => Task.CompletedTask);
+        await using var connection = new AgentConnection(daemon.Api, agent, _ => Task.CompletedTask);
         await connection.Registered.WaitAsync(TimeSpan.FromSeconds(10));
     }
 }

@@ -39,7 +39,7 @@ public sealed record LocalAddress(string? PipeName, string? SocketPath)
     public override string ToString() => PipeName is not null ? $@"\\.\pipe\{PipeName}" : SocketPath!;
 }
 
-/// <summary>A refusal from the local API (bad request, unknown endpoint, ...), with the daemon's reason.</summary>
+/// <summary>A refusal from the local API (bad request, unknown agent, ...), with the daemon's reason.</summary>
 public sealed class LocalApiException(HttpStatusCode status, string message) : Exception(message)
 {
     public HttpStatusCode Status { get; } = status;
@@ -47,7 +47,7 @@ public sealed class LocalApiException(HttpStatusCode status, string message) : E
 
 /// <summary>
 /// The daemon's local API, for the CLI, the MCP servers and other local agents. Each call names the
-/// endpoint it acts for, and is shown only that endpoint's messages (scoping, not a security boundary:
+/// agent it acts for, and is shown only that agent's messages (scoping, not a security boundary:
 /// every local process of the machine's user is trusted).
 /// </summary>
 public sealed class LocalApiClient : IDisposable
@@ -141,24 +141,24 @@ public sealed class LocalApiClient : IDisposable
 
     public Task<List<LocalSent>> SendAsync(LocalSendRequest request, CancellationToken ct = default) => PostAsync<List<LocalSent>>("send", request, ct);
 
-    public Task<LocalSent> ReplyAsync(string endpoint, LocalReplyRequest request, CancellationToken ct = default) =>
-        PostAsync<LocalSent>($"endpoints/{endpoint}/reply", request, ct);
+    public Task<LocalSent> ReplyAsync(string agent, LocalReplyRequest request, CancellationToken ct = default) =>
+        PostAsync<LocalSent>($"agents/{agent}/reply", request, ct);
 
-    public Task<LocalMessage> AckAsync(string endpoint, Guid id, CancellationToken ct = default) =>
-        PostAsync<LocalMessage>($"endpoints/{endpoint}/ack", new LocalAckRequest(id), ct);
+    public Task<LocalMessage> AckAsync(string agent, Guid id, CancellationToken ct = default) =>
+        PostAsync<LocalMessage>($"agents/{agent}/ack", new LocalAckRequest(id), ct);
 
-    /// <summary>Messages for the endpoint that haven't been acknowledged; fetching them doesn't acknowledge them.</summary>
-    public Task<List<LocalMessage>> InboxAsync(string endpoint, CancellationToken ct = default) => GetAsync<List<LocalMessage>>($"endpoints/{endpoint}/inbox", ct);
+    /// <summary>Messages for the agent that haven't been acknowledged; fetching them doesn't acknowledge them.</summary>
+    public Task<List<LocalMessage>> InboxAsync(string agent, CancellationToken ct = default) => GetAsync<List<LocalMessage>>($"agents/{agent}/inbox", ct);
 
-    public Task<LocalMessageDetail> MessageAsync(string endpoint, Guid id, CancellationToken ct = default) =>
-        GetAsync<LocalMessageDetail>($"endpoints/{endpoint}/messages/{id}", ct);
+    public Task<LocalMessageDetail> MessageAsync(string agent, Guid id, CancellationToken ct = default) =>
+        GetAsync<LocalMessageDetail>($"agents/{agent}/messages/{id}", ct);
 
-    public Task<List<LocalMessage>> ConversationAsync(string endpoint, Guid conversationId, CancellationToken ct = default) =>
-        GetAsync<List<LocalMessage>>($"endpoints/{endpoint}/conversations/{conversationId}", ct);
+    public Task<List<LocalMessage>> ConversationAsync(string agent, Guid conversationId, CancellationToken ct = default) =>
+        GetAsync<List<LocalMessage>>($"agents/{agent}/conversations/{conversationId}", ct);
 
-    /// <summary>The endpoint's conversations, most recent first: what an agent picks up again after a restart.</summary>
-    public Task<List<LocalConversation>> ConversationsAsync(string endpoint, CancellationToken ct = default) =>
-        GetAsync<List<LocalConversation>>($"endpoints/{endpoint}/conversations", ct);
+    /// <summary>The agent's conversations, most recent first: what an agent picks up again after a restart.</summary>
+    public Task<List<LocalConversation>> ConversationsAsync(string agent, CancellationToken ct = default) =>
+        GetAsync<List<LocalConversation>>($"agents/{agent}/conversations", ct);
 
     /// <summary>The machine's message log (see <see cref="LocalLogQuery"/>), oldest first.</summary>
     public Task<List<LocalLogEntry>> LogAsync(LocalLogQuery q, CancellationToken ct = default)
@@ -175,7 +175,7 @@ public sealed class LocalApiClient : IDisposable
         Add("conversation", q.Conversation);
         Add("operation", q.Operation);
         Add("peer", q.Peer);
-        Add("endpoint", q.Endpoint);
+        Add("agent", q.Agent);
         Add("since", q.Since);
         Add("limit", q.Limit);
         Add("automatic", q.Automatic ? "true" : null);
@@ -184,21 +184,21 @@ public sealed class LocalApiClient : IDisposable
     }
 
     /// <summary>Fetches a received message's files to this machine (verified); returns where they are.</summary>
-    public Task<List<LocalAttachment>> FetchAsync(string endpoint, LocalFileRequest request, CancellationToken ct = default) =>
-        PostAsync<List<LocalAttachment>>($"endpoints/{endpoint}/fetch", request, ct);
+    public Task<List<LocalAttachment>> FetchAsync(string agent, LocalFileRequest request, CancellationToken ct = default) =>
+        PostAsync<List<LocalAttachment>>($"agents/{agent}/fetch", request, ct);
 
-    /// <summary>The endpoint is done with the files; the local copy goes once every endpoint that received it is.</summary>
-    public Task<List<LocalAttachment>> ReleaseAsync(string endpoint, LocalFileRequest request, CancellationToken ct = default) =>
-        PostAsync<List<LocalAttachment>>($"endpoints/{endpoint}/release", request, ct);
+    /// <summary>The agent is done with the files; the local copy goes once every agent that received it is.</summary>
+    public Task<List<LocalAttachment>> ReleaseAsync(string agent, LocalFileRequest request, CancellationToken ct = default) =>
+        PostAsync<List<LocalAttachment>>($"agents/{agent}/release", request, ct);
 
     /// <summary>The files this machine has uploaded, as the router sees them.</summary>
     public Task<List<SenderBlob>> BlobsAsync(CancellationToken ct = default) => GetAsync<List<SenderBlob>>("blobs", ct);
 
     public async Task CancelBlobAsync(Guid blobId, CancellationToken ct = default) => await PostAsync<LocalOk>($"blobs/{blobId}/cancel", new { }, ct);
 
-    /// <summary>Rooms with a member here (or just <paramref name="endpoint"/>'s).</summary>
-    public Task<List<LocalRoom>> RoomsAsync(string? endpoint = null, CancellationToken ct = default) =>
-        GetAsync<List<LocalRoom>>("rooms" + (endpoint is null ? "" : "?endpoint=" + Uri.EscapeDataString(endpoint)), ct);
+    /// <summary>Rooms with a member here (or just <paramref name="agent"/>'s).</summary>
+    public Task<List<LocalRoom>> RoomsAsync(string? agent = null, CancellationToken ct = default) =>
+        GetAsync<List<LocalRoom>>("rooms" + (agent is null ? "" : "?agent=" + Uri.EscapeDataString(agent)), ct);
 
     public Task<LocalRoom> CreateRoomAsync(LocalRoomCreate request, CancellationToken ct = default) => PostAsync<LocalRoom>("rooms", request, ct);
 
@@ -209,14 +209,14 @@ public sealed class LocalApiClient : IDisposable
         PostAsync<LocalSent>($"rooms/{Uri.EscapeDataString(room)}/send", request, ct);
 
     /// <summary>A room's messages, oldest first: the most recent <paramref name="limit"/>, after <paramref name="since"/> if given.</summary>
-    public Task<List<LocalMessage>> ReadRoomAsync(string room, string endpoint, DateTimeOffset? since = null, int? limit = null, CancellationToken ct = default) =>
-        GetAsync<List<LocalMessage>>($"rooms/{Uri.EscapeDataString(room)}/messages?endpoint={Uri.EscapeDataString(endpoint)}" +
+    public Task<List<LocalMessage>> ReadRoomAsync(string room, string agent, DateTimeOffset? since = null, int? limit = null, CancellationToken ct = default) =>
+        GetAsync<List<LocalMessage>>($"rooms/{Uri.EscapeDataString(room)}/messages?agent={Uri.EscapeDataString(agent)}" +
                                      (since is { } s ? "&since=" + Uri.EscapeDataString(s.ToString("O")) : "") + (limit is { } l ? $"&limit={l}" : ""), ct);
 
-    public Task<List<LocalEndpointInfo>> EndpointsAsync(CancellationToken ct = default) => GetAsync<List<LocalEndpointInfo>>("endpoints", ct);
+    public Task<List<LocalAgentInfo>> AgentsAsync(CancellationToken ct = default) => GetAsync<List<LocalAgentInfo>>("agents", ct);
 
-    public Task<LocalEndpointInfo> RetireAsync(string endpoint, CancellationToken ct = default) =>
-        PostAsync<LocalEndpointInfo>($"endpoints/{endpoint}/retire", new { }, ct);
+    public Task<LocalAgentInfo> RetireAsync(string agent, CancellationToken ct = default) =>
+        PostAsync<LocalAgentInfo>($"agents/{agent}/retire", new { }, ct);
 
     public Task<List<Diagnostic>> DiagnosticsAsync(CancellationToken ct = default) => GetAsync<List<Diagnostic>>("diagnostics", ct);
 
@@ -232,27 +232,27 @@ public sealed class LocalApiClient : IDisposable
         await EnsureAsync(response, timeout.Token);
     }
 
-    public async Task HeartbeatAsync(string endpoint, CancellationToken ct = default) =>
-        await PostAsync<JsonElement>($"endpoints/{endpoint}/heartbeat", new { }, ct);
+    public async Task HeartbeatAsync(string agent, CancellationToken ct = default) =>
+        await PostAsync<JsonElement>($"agents/{agent}/heartbeat", new { }, ct);
 
-    /// <summary>Unregisters the endpoint cleanly (it shows as left, not timed out).</summary>
-    public async Task LeaveAsync(string endpoint, CancellationToken ct = default)
+    /// <summary>Unregisters the agent cleanly (it shows as left, not timed out).</summary>
+    public async Task LeaveAsync(string agent, CancellationToken ct = default)
     {
         using var timeout = WithTimeout(ct);
-        using var response = await _http.DeleteAsync($"endpoints/{endpoint}", timeout.Token);
+        using var response = await _http.DeleteAsync($"agents/{agent}", timeout.Token);
         await EnsureAsync(response, timeout.Token);
     }
 
     /// <summary>
-    /// Registers the endpoint (it is online while this runs) and yields what arrives for it: its messages,
+    /// Registers the agent (it is online while this runs) and yields what arrives for it: its messages,
     /// and receipts for what it sent. Messages not yet acknowledged are delivered again on each registration.
-    /// Keep it alive with <see cref="HeartbeatAsync"/>, or use <see cref="EndpointConnection"/>.
+    /// Keep it alive with <see cref="HeartbeatAsync"/>, or use <see cref="AgentConnection"/>.
     /// </summary>
-    public async IAsyncEnumerable<LocalEvent> StreamAsync(string endpoint, [EnumeratorCancellation] CancellationToken ct = default,
+    public async IAsyncEnumerable<LocalEvent> StreamAsync(string agent, [EnumeratorCancellation] CancellationToken ct = default,
         IReadOnlyList<string>? roles = null)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get,
-            $"endpoints/{endpoint}/stream{(roles is { Count: > 0 } ? "?roles=" + Uri.EscapeDataString(string.Join(',', roles)) : "")}");
+            $"agents/{agent}/stream{(roles is { Count: > 0 } ? "?roles=" + Uri.EscapeDataString(string.Join(',', roles)) : "")}");
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         await EnsureAsync(response, ct);
         await using var body = await response.Content.ReadAsStreamAsync(ct);
@@ -319,30 +319,30 @@ public sealed class LocalApiClient : IDisposable
 }
 
 /// <summary>
-/// Keeps an endpoint registered with its daemon: holds the stream, sends heartbeats, and reconnects if the
+/// Keeps an agent registered with its daemon: holds the stream, sends heartbeats, and reconnects if the
 /// daemon restarts. Dispose (or cancel) to leave cleanly.
 /// </summary>
-public sealed class EndpointConnection : IAsyncDisposable
+public sealed class AgentConnection : IAsyncDisposable
 {
     private readonly LocalApiClient _api;
     private readonly CancellationTokenSource _stop = new();
     private readonly Task _run;
 
-    /// <param name="roles">The roles this endpoint declares (announced to the other machines); null keeps what it declared before.</param>
-    public EndpointConnection(LocalApiClient api, string endpoint, Func<LocalEvent, Task> onEvent, TimeSpan? heartbeat = null,
+    /// <param name="roles">The roles this agent declares (announced to the other machines); null keeps what it declared before.</param>
+    public AgentConnection(LocalApiClient api, string agent, Func<LocalEvent, Task> onEvent, TimeSpan? heartbeat = null,
         Action<Exception>? onError = null, IReadOnlyList<string>? roles = null)
     {
         _api = api;
-        Endpoint = endpoint;
+        Agent = agent;
         _roles = roles;
         _run = Task.Run(() => RunAsync(onEvent, heartbeat ?? TimeSpan.FromSeconds(15), onError));
     }
 
-    public string Endpoint { get; }
+    public string Agent { get; }
 
     private readonly IReadOnlyList<string>? _roles;
 
-    /// <summary>Completes once the endpoint is registered (each time after a reconnect it is set again).</summary>
+    /// <summary>Completes once the agent is registered (each time after a reconnect it is set again).</summary>
     public Task Registered => _registered.Task;
 
     private TaskCompletionSource _registered = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -351,7 +351,7 @@ public sealed class EndpointConnection : IAsyncDisposable
     {
         try
         {
-            await _api.LeaveAsync(Endpoint);
+            await _api.LeaveAsync(Agent);
         }
         catch (Exception e) when (e is HttpRequestException or IOException or LocalApiException or OperationCanceledException)
         {
@@ -380,7 +380,7 @@ public sealed class EndpointConnection : IAsyncDisposable
                 {
                     try
                     {
-                        await _api.HeartbeatAsync(Endpoint, session.Token);
+                        await _api.HeartbeatAsync(Agent, session.Token);
                     }
                     catch (Exception e) when (e is not OperationCanceledException)
                     {
@@ -390,7 +390,7 @@ public sealed class EndpointConnection : IAsyncDisposable
             });
             try
             {
-                await foreach (var e in _api.StreamAsync(Endpoint, session.Token, _roles))
+                await foreach (var e in _api.StreamAsync(Agent, session.Token, _roles))
                 {
                     if (e.Kind == LocalEventKinds.Registered)
                     {
@@ -440,19 +440,19 @@ public sealed class EndpointConnection : IAsyncDisposable
 
 public static class LocalEventKinds
 {
-    /// <summary>The first event on a stream: the endpoint is registered and online.</summary>
+    /// <summary>The first event on a stream: the agent is registered and online.</summary>
     public const string Registered = "registered";
-    /// <summary>A message for the endpoint.</summary>
+    /// <summary>A message for the agent.</summary>
     public const string Message = "message";
-    /// <summary>A delivery receipt for a message the endpoint sent.</summary>
+    /// <summary>A delivery receipt for a message the agent sent.</summary>
     public const string Receipt = "receipt";
-    /// <summary>A message in a room the endpoint is a member of.</summary>
+    /// <summary>A message in a room the agent is a member of.</summary>
     public const string RoomMessage = "room-message";
-    /// <summary>A file receipt (downloaded, download-failed) for a file the endpoint sent.</summary>
+    /// <summary>A file receipt (downloaded, download-failed) for a file the agent sent.</summary>
     public const string FileReceipt = "file-receipt";
 }
 
-/// <summary>A message as an agent sees it, decrypted. <see cref="From"/> and <see cref="To"/> are <c>machine-name/endpoint</c>.</summary>
+/// <summary>A message as an agent sees it, decrypted. <see cref="From"/> and <see cref="To"/> are <c>machine-name/agent</c>.</summary>
 public sealed record LocalMessage(
     Guid Id,
     string FromMachine,
@@ -519,12 +519,12 @@ public sealed record LocalReplyRequest(
 
 public sealed record LocalAckRequest(Guid Id);
 
-/// <summary>A conversation as one local endpoint sees it; <see cref="Peer"/> is <c>machine-name/endpoint</c>, <see cref="State"/> open or finished.</summary>
+/// <summary>A conversation as one local agent sees it; <see cref="Peer"/> is <c>machine-name/agent</c>, <see cref="State"/> open or finished.</summary>
 public sealed record LocalConversation(Guid Id, string Peer, string? Subject, string StartedBy, DateTimeOffset StartedOn, DateTimeOffset LastActivityOn,
     string State);
 
 /// <summary>Log filters; null means any. <see cref="Peer"/> is a machine name or id. Bodies are decrypted only with <see cref="Bodies"/>.</summary>
-public sealed record LocalLogQuery(Guid? Conversation = null, Guid? Operation = null, string? Peer = null, string? Endpoint = null,
+public sealed record LocalLogQuery(Guid? Conversation = null, Guid? Operation = null, string? Peer = null, string? Agent = null,
     DateTimeOffset? Since = null, int? Limit = null, bool Automatic = false, bool Bodies = false);
 
 /// <summary>
@@ -535,16 +535,16 @@ public sealed record LocalLogEntry(Guid Id, string From, string To, string Direc
     string? Status, string? Subject, string ContentType, long Sequence, DateTimeOffset CreatedOn, DateTimeOffset StoredOn, DateTimeOffset ExpiresOn,
     string? State, string? StateDetail, bool BodyDropped, string? Body = null, IReadOnlyDictionary<string, string>? Metadata = null);
 
-/// <summary>A message sent: to <c>machine-name/endpoint</c>; <see cref="State"/> is pushed, queued (by the router) or outbox (not relayed yet).</summary>
+/// <summary>A message sent: to <c>machine-name/agent</c>; <see cref="State"/> is pushed, queued (by the router) or outbox (not relayed yet).</summary>
 public sealed record LocalSent(Guid Id, string To, Guid ConversationId, long Sequence, DateTimeOffset ExpiresOn, string State);
 
-public sealed record LocalEndpointInfo(string Name, string State, DateTimeOffset ChangedOn, DateTimeOffset? RetiredOn, IReadOnlyList<string>? Roles = null);
+public sealed record LocalAgentInfo(string Name, string State, DateTimeOffset ChangedOn, DateTimeOffset? RetiredOn, IReadOnlyList<string>? Roles = null);
 
-public sealed record LocalPeerEndpoint(string Name, string State, DateTimeOffset ChangedOn, IReadOnlyList<string>? Roles = null);
+public sealed record LocalPeerAgent(string Name, string State, DateTimeOffset ChangedOn, IReadOnlyList<string>? Roles = null);
 
-/// <summary>An approved machine and its announced endpoints (all offline when the machine is).</summary>
+/// <summary>An approved machine and its announced agents (all offline when the machine is).</summary>
 public sealed record LocalMachine(string Id, string Name, bool Online, DateTimeOffset? LastSeenOn, string OperatingSystem,
-    IReadOnlyList<LocalPeerEndpoint> Endpoints);
+    IReadOnlyList<LocalPeerAgent> Agents);
 
 public sealed record LocalStatus(
     string MachineId,
@@ -557,7 +557,7 @@ public sealed record LocalStatus(
     TimeSpan? RouterClockSkew,
     string Home,
     int Outbox,
-    IReadOnlyList<LocalEndpointInfo> Endpoints,
+    IReadOnlyList<LocalAgentInfo> Agents,
     IReadOnlyList<ClientMetric> Metrics);
 
 public sealed record LocalError(string Error);
@@ -569,17 +569,17 @@ public sealed record LocalJoinResult(string Membership, string? Name, string Mac
 
 public sealed record LocalOk(bool Ok);
 
-/// <summary>A room as a member machine knows it. Members and admins are <c>machine-name/endpoint</c>.</summary>
+/// <summary>A room as a member machine knows it. Members and admins are <c>machine-name/agent</c>.</summary>
 public sealed record LocalRoom(Guid Id, string Name, long Version, IReadOnlyList<string> Members, IReadOnlyList<string> Admins, bool Closed);
 
-public sealed record LocalRoomCreate(string Endpoint, string Name, IReadOnlyList<string>? Members = null);
+public sealed record LocalRoomCreate(string Agent, string Name, IReadOnlyList<string>? Members = null);
 
 /// <summary>A change to a room by one of its admins (or <see cref="RoomChange.Leave"/> by any member).</summary>
-public sealed record LocalRoomChange(string Endpoint, RoomChange Change);
+public sealed record LocalRoomChange(string Agent, RoomChange Change);
 
-/// <summary>What to change. Addresses may be <c>machine/endpoint</c>, roles or groups (resolved when the change is made).</summary>
+/// <summary>What to change. Addresses may be <c>machine/agent</c>, roles or groups (resolved when the change is made).</summary>
 public sealed record RoomChange(IReadOnlyList<string>? Add = null, IReadOnlyList<string>? Remove = null, IReadOnlyList<string>? AddAdmins = null,
     IReadOnlyList<string>? RemoveAdmins = null, string? Name = null, bool? Close = null, bool Leave = false);
 
-public sealed record LocalRoomSend(string Endpoint, string Body, Guid? ReplyTo = null, string? Subject = null, string? ContentType = null,
+public sealed record LocalRoomSend(string Agent, string Body, Guid? ReplyTo = null, string? Subject = null, string? ContentType = null,
     IReadOnlyDictionary<string, string>? Metadata = null);

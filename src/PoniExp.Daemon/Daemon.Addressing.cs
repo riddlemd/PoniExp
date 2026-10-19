@@ -5,7 +5,7 @@ namespace PoniExp.Daemon;
 
 /// <summary>
 /// Roles and groups (see docs/plan.md, Phase 7), resolved here, by the sender's daemon, into plain
-/// <c>machine/endpoint</c> addresses: the router only ever sees ordinary messages.
+/// <c>machine/agent</c> addresses: the router only ever sees ordinary messages.
 /// </summary>
 public sealed partial class Daemon
 {
@@ -45,27 +45,27 @@ public sealed partial class Daemon
         return distinct.Count > 0 ? distinct : throw new KeyNotFoundException("those addresses resolve to no one");
     }
 
-    /// <summary>Endpoints (here and announced by other machines) that declare <paramref name="role"/>, as <c>machine/endpoint</c>.</summary>
+    /// <summary>Agents (here and announced by other machines) that declare <paramref name="role"/>, as <c>machine/agent</c>.</summary>
     private IReadOnlyList<string> HoldersOf(string role, bool all, string from, bool quiet = false)
     {
         var holders = new List<(string Address, bool Online, DateTimeOffset ChangedOn)>();
-        foreach (var e in Store.GetEndpoints().Where(e => e.RetiredOn is null && e.Name != from && (e.Roles?.Contains(role) ?? false)))
+        foreach (var e in Store.GetAgents().Where(e => e.RetiredOn is null && e.Name != from && (e.Roles?.Contains(role) ?? false)))
         {
             holders.Add(($"{MachineId}/{e.Name}", _sessions.IsOnline(e.Name), e.ChangedOn));
         }
 
         var machines = _relay.Machines.ToDictionary(m => m.Id);
-        foreach (var e in Store.GetPeerEndpoints().Where(e => e.Machine != MachineId && (e.Roles?.Contains(role) ?? false)))
+        foreach (var e in Store.GetPeerAgents().Where(e => e.Machine != MachineId && (e.Roles?.Contains(role) ?? false)))
         {
             if (machines.TryGetValue(e.Machine, out var machine))
             {
-                holders.Add(($"{e.Machine}/{e.Endpoint}", machine.Online && e.State == EndpointState.Online, e.ChangedOn));
+                holders.Add(($"{e.Machine}/{e.Agent}", machine.Online && e.State == AgentState.Online, e.ChangedOn));
             }
         }
 
         if (holders.Count == 0)
         {
-            return quiet ? [] : throw new KeyNotFoundException($"no endpoint declares the role '{role}'");
+            return quiet ? [] : throw new KeyNotFoundException($"no agent declares the role '{role}'");
         }
 
         if (all)

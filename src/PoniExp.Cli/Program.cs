@@ -25,11 +25,11 @@ const string Usage = """
       doctor                               check the router, certificate pin, clock, membership and daemon
 
     Messaging (through the daemon)
-      status                               this machine, its endpoints, and message metrics
-      machines                             the other machines and their endpoints
-      send --to <machine[/endpoint] | role:<r>[/all] | group:<g>> [--to ...] [options] <body|->
+      status                               this machine, its agents, and message metrics
+      machines                             the other machines and their agents
+      send --to <machine[/agent] | role:<r>[/all] | group:<g>> [--to ...] [options] <body|->
                                            one separate message per --to
-          --from <endpoint>        sending endpoint (default: "default")
+          --from <agent>        sending agent (default: "default")
           --subject <text>         a title for conversation lists
           --conversation <id>      continue a conversation (one --to only)
           --operation <id>         the same id across retries of one action (one --to only)
@@ -37,40 +37,40 @@ const string Usage = """
           --content-type <type>    how to read the body (default: text/plain)
           --meta <key=value>       metadata; repeatable
           --attach <path>          a file, uploaded once for all recipients; repeatable
-      inbox [--endpoint <name>] [--json]   unacknowledged messages for an endpoint (default: "default")
-      ack <id> [--endpoint <name>]         acknowledge a message (tell its sender you've taken it on)
-      reply <id> [--endpoint <name>] [--status progress|done|failed] [--meta k=v] [--attach <path>] <body|->
+      inbox [--agent <name>] [--json]   unacknowledged messages for an agent (default: "default")
+      ack <id> [--agent <name>]         acknowledge a message (tell its sender you've taken it on)
+      reply <id> [--agent <name>] [--status progress|done|failed] [--meta k=v] [--attach <path>] <body|->
                                            reply in its conversation (acknowledges it too)
-      message <id> [--endpoint <name>]     one message and its delivery history
-      conversation <id> [--endpoint <name>] [--json]
-      fetch <id> [--endpoint <name>] [--blob <id>]
+      message <id> [--agent <name>]     one message and its delivery history
+      conversation <id> [--agent <name>] [--json]
+      fetch <id> [--agent <name>] [--blob <id>]
                                            download a message's files (verified) and print where they are
-      release <id> [--endpoint <name>] [--blob <id>]
-                                           done with them: the copy goes once every endpoint has released it
+      release <id> [--agent <name>] [--blob <id>]
+                                           done with them: the copy goes once every agent has released it
       blobs | cancel <blob-id>             files this machine uploaded; cancel one (the router deletes it)
-      listen [--endpoint <name>] [--json] [--ack] [--auto-fetch]
-                                           be the endpoint: print messages and receipts as they arrive
-      conversations [--endpoint <name>]    an endpoint's conversations, most recent first
+      listen [--agent <name>] [--json] [--ack] [--auto-fetch]
+                                           be the agent: print messages and receipts as they arrive
+      conversations [--agent <name>]    an agent's conversations, most recent first
       log [filters] [--json | --export <path|->] [--bodies]
                                            the machine's message log, oldest first
-          --conversation <id> --operation <id> --peer <machine> --endpoint <name>
+          --conversation <id> --operation <id> --peer <machine> --agent <name>
           --since <2h|3d|date> --limit <n> --automatic (receipts, announcements too)
           --bodies                 decrypt bodies into the output (they're then in the clear)
-      room list [--endpoint <name>]        rooms with a member here
-      room create <name> --as <endpoint> [--member <address>]...
-      room add|remove|admin <room> --as <endpoint> <address>...
-      room leave|close <room> --as <endpoint>
-      room read <room> --as <endpoint> [--since <time>] [--json]
-      room send <room> --as <endpoint> [--reply <id>] <body|->
+      room list [--agent <name>]        rooms with a member here
+      room create <name> --as <agent> [--member <address>]...
+      room add|remove|admin <room> --as <agent> <address>...
+      room leave|close <room> --as <agent>
+      room read <room> --as <agent> [--since <time>] [--json]
+      room send <room> --as <agent> [--reply <id>] <body|->
                                            rooms: everyone in one sees its messages (addresses may be roles or groups)
-      endpoint list | endpoint retire <name>
-                                           the endpoint registry; a retired endpoint's messages are rejected
+      agent list | agent retire <name>
+                                           the agent registry; a retired agent's messages are rejected
       diagnostics                          recent connection, signature and delivery problems
-      mcp --endpoint <name> [--role <r>]...
-                                           an MCP server (stdio) for an agent, as that endpoint, declaring its roles
+      mcp --agent <name> [--role <r>]...
+                                           an MCP server (stdio) for an agent, as that agent, declaring its roles
 
     "-" as a body reads stdin. Settings: <home>/settings.json, e.g.
-      { "Messaging": { "DefaultExpiry": "1.00:00:00" }, "Daemon": { "EndpointTimeout": "00:01:00" } }
+      { "Messaging": { "DefaultExpiry": "1.00:00:00" }, "Daemon": { "AgentTimeout": "00:01:00" } }
     """;
 
 args = TakeHome(args);
@@ -93,24 +93,24 @@ try
         ["status"] => await StatusAsync(),
         ["machines"] => await MachinesAsync(),
         ["send", .. var rest] => await SendAsync(rest),
-        ["inbox", .. var rest] => await InboxAsync(EndpointOf(rest), rest.Contains("--json")),
-        ["ack", var id, .. var rest] => await AckAsync(EndpointOf(rest), Guid.Parse(id)),
+        ["inbox", .. var rest] => await InboxAsync(AgentOf(rest), rest.Contains("--json")),
+        ["ack", var id, .. var rest] => await AckAsync(AgentOf(rest), Guid.Parse(id)),
         ["reply", var id, .. var rest] => await ReplyAsync(Guid.Parse(id), rest),
-        ["message", var id, .. var rest] => await MessageAsync(EndpointOf(rest), Guid.Parse(id)),
-        ["conversation", var id, .. var rest] => await ConversationAsync(EndpointOf(rest), Guid.Parse(id), rest.Contains("--json")),
-        ["listen", .. var rest] => await ListenAsync(EndpointOf(rest), rest.Contains("--json"), rest.Contains("--ack"), rest.Contains("--auto-fetch"),
+        ["message", var id, .. var rest] => await MessageAsync(AgentOf(rest), Guid.Parse(id)),
+        ["conversation", var id, .. var rest] => await ConversationAsync(AgentOf(rest), Guid.Parse(id), rest.Contains("--json")),
+        ["listen", .. var rest] => await ListenAsync(AgentOf(rest), rest.Contains("--json"), rest.Contains("--ack"), rest.Contains("--auto-fetch"),
             Options(rest, "--role")),
-        ["fetch", var id, .. var rest] => await FetchAsync(EndpointOf(rest), Guid.Parse(id), Option(rest, "--blob") is { } b ? Guid.Parse(b) : null),
-        ["release", var id, .. var rest] => await ReleaseAsync(EndpointOf(rest), Guid.Parse(id), Option(rest, "--blob") is { } b ? Guid.Parse(b) : null),
+        ["fetch", var id, .. var rest] => await FetchAsync(AgentOf(rest), Guid.Parse(id), Option(rest, "--blob") is { } b ? Guid.Parse(b) : null),
+        ["release", var id, .. var rest] => await ReleaseAsync(AgentOf(rest), Guid.Parse(id), Option(rest, "--blob") is { } b ? Guid.Parse(b) : null),
         ["blobs"] => await BlobsAsync(),
         ["room", .. var rest] => await RoomAsync(rest),
         ["cancel", var blob] => await CancelBlobAsync(Guid.Parse(blob)),
-        ["conversations", .. var rest] => await ConversationsAsync(EndpointOf(rest)),
+        ["conversations", .. var rest] => await ConversationsAsync(AgentOf(rest)),
         ["log", .. var rest] => await LogAsync(rest),
-        ["endpoint", "list"] => await EndpointsAsync(),
-        ["endpoint", "retire", var name] => await RetireAsync(name),
+        ["agent", "list"] => await AgentsAsync(),
+        ["agent", "retire", var name] => await RetireAsync(name),
         ["diagnostics"] => await DiagnosticsAsync(),
-        ["mcp", .. var rest] => await McpAsync(Option(rest, "--endpoint") ?? throw new ArgumentException("mcp needs --endpoint <name>"), Options(rest, "--role")),
+        ["mcp", .. var rest] => await McpAsync(Option(rest, "--agent") ?? throw new ArgumentException("mcp needs --agent <name>"), Options(rest, "--role")),
         ["service", "install", .. var rest] => await ServiceInstallAsync(rest.Contains("--system") ? ServiceMode.System : ServiceMode.User, rest.Contains("--dry-run")),
         ["service", "uninstall", .. var rest] => await ServiceUninstallAsync(rest.Contains("--system") ? ServiceMode.System : ServiceMode.User, rest.Contains("--dry-run")),
         ["service", "status"] => await ServiceStatusAsync(),
@@ -455,8 +455,8 @@ async Task<int> StatusAsync()
     var s = await api.StatusAsync(cancel.Token);
     Console.WriteLine($"{s.Membership}{(s.Name is null ? string.Empty : $" as {s.Name}")} ({s.MachineId[..8]}), " +
                       $"{(s.Connected ? "connected" : s.Reachable ? "reaching" : "not connected")} to {s.RouterUrl}{(s.Outbox > 0 ? $", {s.Outbox} in the outbox" : string.Empty)}");
-    Console.WriteLine("endpoints:");
-    foreach (var e in s.Endpoints)
+    Console.WriteLine("agents:");
+    foreach (var e in s.Agents)
     {
         Console.WriteLine($"  {e.Name,-20} {e.State,-10} since {e.ChangedOn.ToLocalTime():yyyy-MM-dd HH:mm}{(e.Roles is { Count: > 0 } rs ? $"  roles: {string.Join(", ", rs)}" : "")}");
     }
@@ -483,7 +483,7 @@ async Task<int> MachinesAsync()
     {
         var seen = m.Online ? "online" : m.LastSeenOn is { } on ? $"last seen {on.ToLocalTime():yyyy-MM-dd HH:mm}" : "never seen";
         Console.WriteLine($"{m.Name,-16} {m.Id[..8]}  {seen,-28} {m.OperatingSystem}");
-        foreach (var e in m.Endpoints)
+        foreach (var e in m.Agents)
         {
             Console.WriteLine($"  {m.Name}/{e.Name,-20} {e.State}{(e.Roles is { Count: > 0 } rs ? $"  roles: {string.Join(", ", rs)}" : "")}");
         }
@@ -497,7 +497,7 @@ async Task<int> SendAsync(string[] rest)
     var to = new List<string>();
     var files = new List<string>();
     var metadata = new Dictionary<string, string>();
-    string from = Address.DefaultEndpoint;
+    string from = Address.DefaultAgent;
     string? subject = null, contentType = null, body = null;
     Guid? conversation = null, operation = null;
     TimeSpan? expires = null;
@@ -541,10 +541,10 @@ async Task<int> SendAsync(string[] rest)
     return 0;
 }
 
-async Task<int> InboxAsync(string endpoint, bool json)
+async Task<int> InboxAsync(string agent, bool json)
 {
     using var api = await DaemonAsync2();
-    var messages = await api.InboxAsync(endpoint, cancel.Token);
+    var messages = await api.InboxAsync(agent, cancel.Token);
     foreach (var m in messages)
     {
         Console.WriteLine(json ? JsonSerializer.Serialize(m, WireProtocol.Json) : Format(m));
@@ -552,16 +552,16 @@ async Task<int> InboxAsync(string endpoint, bool json)
 
     if (!json && messages.Count == 0)
     {
-        Console.Error.WriteLine($"* nothing waiting for {endpoint}");
+        Console.Error.WriteLine($"* nothing waiting for {agent}");
     }
 
     return 0;
 }
 
-async Task<int> AckAsync(string endpoint, Guid id)
+async Task<int> AckAsync(string agent, Guid id)
 {
     using var api = await DaemonAsync2();
-    var m = await api.AckAsync(endpoint, id, cancel.Token);
+    var m = await api.AckAsync(agent, id, cancel.Token);
     Console.WriteLine($"acknowledged {m.Id} from {m.From}");
     return 0;
 }
@@ -570,14 +570,14 @@ async Task<int> ReplyAsync(Guid id, string[] rest)
 {
     var metadata = new Dictionary<string, string>();
     var files = new List<string>();
-    string endpoint = Address.DefaultEndpoint;
+    string agent = Address.DefaultAgent;
     string? status = null, body = null;
     for (var i = 0; i < rest.Length; i++)
     {
         string Next() => i + 1 < rest.Length ? rest[++i] : throw new ArgumentException($"{rest[i]} needs a value.");
         switch (rest[i])
         {
-            case "--endpoint": endpoint = Next(); break;
+            case "--agent": agent = Next(); break;
             case "--status": status = Next(); break;
             case "--meta": AddMeta(metadata, Next()); break;
             case "--attach": files.Add(Path.GetFullPath(Next())); break;
@@ -595,16 +595,16 @@ async Task<int> ReplyAsync(Guid id, string[] rest)
     }
 
     using var api = await DaemonAsync2();
-    var sent = await api.ReplyAsync(endpoint, new LocalReplyRequest(id, body == "-" ? await Console.In.ReadToEndAsync() : body, status,
+    var sent = await api.ReplyAsync(agent, new LocalReplyRequest(id, body == "-" ? await Console.In.ReadToEndAsync() : body, status,
         Metadata: metadata.Count == 0 ? null : metadata, Attachments: files.Count == 0 ? null : files), cancel.Token);
     Console.WriteLine($"{sent.State}: {sent.Id} to {sent.To} (#{sent.Sequence})");
     return 0;
 }
 
-async Task<int> MessageAsync(string endpoint, Guid id)
+async Task<int> MessageAsync(string agent, Guid id)
 {
     using var api = await DaemonAsync2();
-    var detail = await api.MessageAsync(endpoint, id, cancel.Token);
+    var detail = await api.MessageAsync(agent, id, cancel.Token);
     Console.WriteLine(Format(detail.Message));
     foreach (var e in detail.Events)
     {
@@ -614,10 +614,10 @@ async Task<int> MessageAsync(string endpoint, Guid id)
     return 0;
 }
 
-async Task<int> ConversationAsync(string endpoint, Guid id, bool json)
+async Task<int> ConversationAsync(string agent, Guid id, bool json)
 {
     using var api = await DaemonAsync2();
-    foreach (var m in await api.ConversationAsync(endpoint, id, cancel.Token))
+    foreach (var m in await api.ConversationAsync(agent, id, cancel.Token))
     {
         Console.WriteLine(json ? JsonSerializer.Serialize(m, WireProtocol.Json) : Format(m));
     }
@@ -625,10 +625,10 @@ async Task<int> ConversationAsync(string endpoint, Guid id, bool json)
     return 0;
 }
 
-async Task<int> ListenAsync(string endpoint, bool json, bool ack, bool autoFetch, IReadOnlyList<string> roles)
+async Task<int> ListenAsync(string agent, bool json, bool ack, bool autoFetch, IReadOnlyList<string> roles)
 {
     using var api = await DaemonAsync2();
-    await using var connection = new EndpointConnection(api, endpoint, async e =>
+    await using var connection = new AgentConnection(api, agent, async e =>
     {
         if (e.Kind == LocalEventKinds.Message && e.Message is { } m)
         {
@@ -637,7 +637,7 @@ async Task<int> ListenAsync(string endpoint, bool json, bool ack, bool autoFetch
             {
                 try
                 {
-                    foreach (var a in await api.FetchAsync(endpoint, new LocalFileRequest(m.Id), cancel.Token))
+                    foreach (var a in await api.FetchAsync(agent, new LocalFileRequest(m.Id), cancel.Token))
                     {
                         Console.Error.WriteLine($"* fetched {a.Name}: {a.Path}");
                     }
@@ -650,7 +650,7 @@ async Task<int> ListenAsync(string endpoint, bool json, bool ack, bool autoFetch
 
             if (ack)
             {
-                await api.AckAsync(endpoint, m.Id, cancel.Token);
+                await api.AckAsync(agent, m.Id, cancel.Token);
             }
         }
         else if (e.Kind == LocalEventKinds.RoomMessage && e.Message is { } rm)
@@ -669,7 +669,7 @@ async Task<int> ListenAsync(string endpoint, bool json, bool ack, bool autoFetch
         }
     }, onError: e => Console.Error.WriteLine($"* {e.Message}; retrying"), roles: roles.Count > 0 ? roles : null);
     await connection.Registered.WaitAsync(TimeSpan.FromSeconds(30), cancel.Token);
-    Console.Error.WriteLine($"* listening as {endpoint}; Ctrl+C to stop");
+    Console.Error.WriteLine($"* listening as {agent}; Ctrl+C to stop");
     try
     {
         await Task.Delay(Timeout.Infinite, cancel.Token);
@@ -681,10 +681,10 @@ async Task<int> ListenAsync(string endpoint, bool json, bool ack, bool autoFetch
     return 0;
 }
 
-async Task<int> ConversationsAsync(string endpoint)
+async Task<int> ConversationsAsync(string agent)
 {
     using var api = await DaemonAsync2();
-    foreach (var c in await api.ConversationsAsync(endpoint, cancel.Token))
+    foreach (var c in await api.ConversationsAsync(agent, cancel.Token))
     {
         Console.WriteLine($"{c.Id.ToString()[..8]}  {c.LastActivityOn.ToLocalTime():yyyy-MM-dd HH:mm}  {c.State,-8}  {c.Peer,-28}  {c.Subject}");
     }
@@ -695,7 +695,7 @@ async Task<int> ConversationsAsync(string endpoint)
 async Task<int> LogAsync(string[] rest)
 {
     Guid? conversation = null, operation = null;
-    string? peer = null, endpoint = null, export = null;
+    string? peer = null, agent = null, export = null;
     DateTimeOffset? since = null;
     int? limit = null;
     bool json = false, bodies = false, automatic = false;
@@ -707,7 +707,7 @@ async Task<int> LogAsync(string[] rest)
             case "--conversation": conversation = Guid.Parse(Next()); break;
             case "--operation": operation = Guid.Parse(Next()); break;
             case "--peer": peer = Next(); break;
-            case "--endpoint": endpoint = Next(); break;
+            case "--agent": agent = Next(); break;
             case "--since":
                 var value = Next();
                 since = DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var on) ? on
@@ -723,7 +723,7 @@ async Task<int> LogAsync(string[] rest)
     }
 
     using var api = await DaemonAsync2();
-    var entries = await api.LogAsync(new LocalLogQuery(conversation, operation, peer, endpoint, since, limit, automatic, bodies), cancel.Token);
+    var entries = await api.LogAsync(new LocalLogQuery(conversation, operation, peer, agent, since, limit, automatic, bodies), cancel.Token);
     using var file = export is null or "-" ? null : new StreamWriter(PrivateFiles.Create(export));
     var output = file ?? Console.Out;
     foreach (var e in entries)
@@ -745,11 +745,11 @@ async Task<int> LogAsync(string[] rest)
 async Task<int> RoomAsync(string[] rest)
 {
     using var api = await DaemonAsync2();
-    string As() => Option(rest, "--as") ?? throw new ArgumentException("say which endpoint you are: --as <endpoint>");
+    string As() => Option(rest, "--as") ?? throw new ArgumentException("say which agent you are: --as <agent>");
     var positional = new List<string>();
     for (var i = 0; i < rest.Length; i++)
     {
-        if (rest[i] is "--as" or "--member" or "--since" or "--reply" or "--endpoint")
+        if (rest[i] is "--as" or "--member" or "--since" or "--reply" or "--agent")
         {
             i++;
         }
@@ -765,7 +765,7 @@ async Task<int> RoomAsync(string[] rest)
     switch (positional)
     {
         case ["list"]:
-            var rooms = await api.RoomsAsync(Option(rest, "--endpoint"), cancel.Token);
+            var rooms = await api.RoomsAsync(Option(rest, "--agent"), cancel.Token);
             if (rooms.Count == 0)
             {
                 Console.WriteLine("no rooms");
@@ -808,10 +808,10 @@ async Task<int> RoomAsync(string[] rest)
     }
 }
 
-async Task<int> FetchAsync(string endpoint, Guid id, Guid? blob)
+async Task<int> FetchAsync(string agent, Guid id, Guid? blob)
 {
     using var api = await DaemonAsync2();
-    foreach (var a in await api.FetchAsync(endpoint, new LocalFileRequest(id, blob), cancel.Token))
+    foreach (var a in await api.FetchAsync(agent, new LocalFileRequest(id, blob), cancel.Token))
     {
         Console.WriteLine($"{a.Name} ({FormatBytes(a.Size)}, {a.State}): {a.Path}");
     }
@@ -819,10 +819,10 @@ async Task<int> FetchAsync(string endpoint, Guid id, Guid? blob)
     return 0;
 }
 
-async Task<int> ReleaseAsync(string endpoint, Guid id, Guid? blob)
+async Task<int> ReleaseAsync(string agent, Guid id, Guid? blob)
 {
     using var api = await DaemonAsync2();
-    foreach (var a in await api.ReleaseAsync(endpoint, new LocalFileRequest(id, blob), cancel.Token))
+    foreach (var a in await api.ReleaseAsync(agent, new LocalFileRequest(id, blob), cancel.Token))
     {
         Console.WriteLine($"{a.Name}: {a.State}");
     }
@@ -856,10 +856,10 @@ async Task<int> CancelBlobAsync(Guid blob)
     return 0;
 }
 
-async Task<int> EndpointsAsync()
+async Task<int> AgentsAsync()
 {
     using var api = await DaemonAsync2();
-    foreach (var e in await api.EndpointsAsync(cancel.Token))
+    foreach (var e in await api.AgentsAsync(cancel.Token))
     {
         Console.WriteLine($"{e.Name,-20} {e.State,-10} since {e.ChangedOn.ToLocalTime():yyyy-MM-dd HH:mm}{(e.Roles is { Count: > 0 } rs ? $"  roles: {string.Join(", ", rs)}" : "")}");
     }
@@ -886,10 +886,10 @@ async Task<int> DiagnosticsAsync()
     return 0;
 }
 
-async Task<int> McpAsync(string endpoint, IReadOnlyList<string> roles)
+async Task<int> McpAsync(string agent, IReadOnlyList<string> roles)
 {
     using var api = await LocalApiClient.FindAsync(ClientConfig.HomeDirectory, cancel.Token);
-    await PoniExp.Mcp.McpServer.RunAsync(api, endpoint, cancel.Token, roles.Count > 0 ? roles : null);
+    await PoniExp.Mcp.McpServer.RunAsync(api, agent, cancel.Token, roles.Count > 0 ? roles : null);
     return 0;
 }
 
@@ -952,7 +952,7 @@ static void AddMeta(Dictionary<string, string> metadata, string pair)
     metadata[pair[..eq]] = pair[(eq + 1)..];
 }
 
-static string EndpointOf(string[] rest) => Option(rest, "--endpoint") ?? Address.DefaultEndpoint;
+static string AgentOf(string[] rest) => Option(rest, "--agent") ?? Address.DefaultAgent;
 
 static TimeSpan ParseDuration(string text)
 {

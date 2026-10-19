@@ -10,13 +10,13 @@ using PoniExp.Mcp;
 
 namespace PoniExp.Tests;
 
-/// <summary>Phase 3: the daemon, its local API, receipts, endpoint announcements, the outbox and the MCP tools.</summary>
+/// <summary>Phase 3: the daemon, its local API, receipts, agent announcements, the outbox and the MCP tools.</summary>
 public class DaemonTests
 {
     // ---- receipts ----
 
     [Fact]
-    public async Task ReceivedArrivesWhileTheEndpointIsOfflineAndAcknowledgedOnlyAfterAnAck()
+    public async Task ReceivedArrivesWhileTheAgentIsOfflineAndAcknowledgedOnlyAfterAnAck()
     {
         await using var router = await RouterFixture.StartAsync();
         await using var ise = await DaemonFixture.StartAsync(router, "ise");
@@ -55,15 +55,15 @@ public class DaemonTests
         await RouterFixture.EventuallyAsync(async () => (await ise.Api.InboxAsync("ops")).Count == 1);
         var reply = (await ise.Api.InboxAsync("ops")).Single();
         Assert.Equal(("three", "done", sent.Id, sent.ConversationId, "wojtek/agent"), (reply.Body, reply.Status, reply.ReplyTo, reply.ConversationId, reply.From));
-        foreach (var (side, endpoint) in new[] { (ise, "ops"), (wojtek, "agent") })
+        foreach (var (side, agent) in new[] { (ise, "ops"), (wojtek, "agent") })
         {
-            var conversation = await side.Api.ConversationAsync(endpoint, sent.ConversationId);
+            var conversation = await side.Api.ConversationAsync(agent, sent.ConversationId);
             Assert.Equal(["how many?", "three"], conversation.Select(m => m.Body));
         }
     }
 
     [Fact]
-    public async Task AMessageForAnUnknownOrRetiredEndpointIsRejectedWithAReason()
+    public async Task AMessageForAnUnknownOrRetiredAgentIsRejectedWithAReason()
     {
         await using var router = await RouterFixture.StartAsync();
         await using var ise = await DaemonFixture.StartAsync(router, "ise");
@@ -71,7 +71,7 @@ public class DaemonTests
 
         var unknown = (await ise.Api.SendAsync(new LocalSendRequest("ops", ["wojtek/nobody"], "hello?"))).Single();
         await ise.WaitForOutgoingAsync(unknown.Id, MessageEvents.Rejected);
-        Assert.Contains("unknown endpoint 'nobody'", (await ise.Api.MessageAsync("ops", unknown.Id)).Message.StateDetail);
+        Assert.Contains("unknown agent 'nobody'", (await ise.Api.MessageAsync("ops", unknown.Id)).Message.StateDetail);
         Assert.Equal(MessageEvents.Rejected, wojtek.Store.GetState(ise.Keys.MachineId, unknown.Id, MessageDirection.In));
 
         await RegisterAndLeaveAsync(wojtek, "temp");
@@ -81,7 +81,7 @@ public class DaemonTests
         await wojtek.Api.RetireAsync("temp");
         var after = (await ise.Api.SendAsync(new LocalSendRequest("ops", ["wojtek/temp"], "and now?"))).Single();
         await ise.WaitForOutgoingAsync(after.Id, MessageEvents.Rejected);
-        Assert.Equal("retired", (await wojtek.Api.EndpointsAsync()).Single(e => e.Name == "temp").State);
+        Assert.Equal("retired", (await wojtek.Api.AgentsAsync()).Single(e => e.Name == "temp").State);
     }
 
     [Fact]
@@ -124,7 +124,7 @@ public class DaemonTests
 
         foreach (var side in new[] { ise, wojtek })
         {
-            Assert.True(side.CountMessages("r.type = 'endpoint'") > 0);
+            Assert.True(side.CountMessages("r.type = 'agent'") > 0);
             Assert.True(side.CountMessages("r.type = 'receipt'") > 0);
             // Every receipt answers a message; nothing answers a receipt or an announcement.
             Assert.Equal(0, side.CountMessages("r.reply_to IN (SELECT id FROM messages WHERE type <> 'message')"));
@@ -132,16 +132,16 @@ public class DaemonTests
         }
     }
 
-    // ---- endpoint announcements ----
+    // ---- agent announcements ----
 
     [Fact]
-    public async Task AnEndpointsOnlineLeftAndTimedOutStatesReachAnotherMachine()
+    public async Task AnAgentsOnlineLeftAndTimedOutStatesReachAnotherMachine()
     {
         await using var router = await RouterFixture.StartAsync();
         await using var ise = await DaemonFixture.StartAsync(router, "ise");
         await using var wojtek = await DaemonFixture.StartAsync(router, "wojtek");
 
-        var connection = new EndpointConnection(ise.Api, "agent", _ => Task.CompletedTask);
+        var connection = new AgentConnection(ise.Api, "agent", _ => Task.CompletedTask);
         await connection.Registered.WaitAsync(TimeSpan.FromSeconds(10));
         await PeerStateAsync(wojtek, "ise", "agent", "online");
         await connection.DisposeAsync();
@@ -159,7 +159,7 @@ public class DaemonTests
 
         await PeerStateAsync(wojtek, "ise", "agent", "timed-out");
 
-        // Connected but silent (no heartbeats): timed out after Daemon:EndpointTimeout.
+        // Connected but silent (no heartbeats): timed out after Daemon:AgentTimeout.
         var silent = ise.Api.StreamAsync("agent").GetAsyncEnumerator();
         await silent.MoveNextAsync();
         await PeerStateAsync(wojtek, "ise", "agent", "online");
@@ -176,12 +176,12 @@ public class DaemonTests
         await using var blinky = await DaemonFixture.StartAsync(router, "blinky");
         await blinky.StopAsync();
 
-        await using var late = new EndpointConnection(ise.Api, "late", _ => Task.CompletedTask);
+        await using var late = new AgentConnection(ise.Api, "late", _ => Task.CompletedTask);
         await late.Registered.WaitAsync(TimeSpan.FromSeconds(10));
         await blinky.StartAsync();
 
         await PeerStateAsync(blinky, "ise", "late", "online");
-        await ise.StopAsync(); // a machine that goes away takes its endpoints with it
+        await ise.StopAsync(); // a machine that goes away takes its agents with it
         await PeerStateAsync(blinky, "ise", "late", "offline");
     }
 
@@ -190,14 +190,14 @@ public class DaemonTests
     {
         var store = new ClientStore(Path.Combine(Path.GetTempPath(), "poniexp-tests", Guid.NewGuid().ToString("N") + ".db"));
         var now = DateTimeOffset.UtcNow;
-        AnnouncedEndpoint Agent(EndpointState state) => new("agent", state, now);
+        AnnouncedAgent Agent(AgentState state) => new("agent", state, now);
 
-        Assert.True(store.Transact(now, tx => tx.ApplyAnnouncement("ise", new EndpointAnnouncement(5, [Agent(EndpointState.Online)]))));
-        Assert.False(store.Transact(now, tx => tx.ApplyAnnouncement("ise", new EndpointAnnouncement(4, [Agent(EndpointState.Left)]))));
-        Assert.False(store.Transact(now, tx => tx.ApplyAnnouncement("ise", new EndpointAnnouncement(5, [Agent(EndpointState.Left)]))));
-        Assert.Equal(EndpointState.Online, store.GetPeerEndpoints().Single().State);
-        Assert.True(store.Transact(now, tx => tx.ApplyAnnouncement("ise", new EndpointAnnouncement(6, []))));
-        Assert.Empty(store.GetPeerEndpoints()); // a newer list without it: retired
+        Assert.True(store.Transact(now, tx => tx.ApplyAnnouncement("ise", new AgentAnnouncement(5, [Agent(AgentState.Online)]))));
+        Assert.False(store.Transact(now, tx => tx.ApplyAnnouncement("ise", new AgentAnnouncement(4, [Agent(AgentState.Left)]))));
+        Assert.False(store.Transact(now, tx => tx.ApplyAnnouncement("ise", new AgentAnnouncement(5, [Agent(AgentState.Left)]))));
+        Assert.Equal(AgentState.Online, store.GetPeerAgents().Single().State);
+        Assert.True(store.Transact(now, tx => tx.ApplyAnnouncement("ise", new AgentAnnouncement(6, []))));
+        Assert.Empty(store.GetPeerAgents()); // a newer list without it: retired
     }
 
     // ---- outbox ----
@@ -245,10 +245,10 @@ public class DaemonTests
         await router.DisposeAsync();
     }
 
-    // ---- delivery to endpoints ----
+    // ---- delivery to agents ----
 
     [Fact]
-    public async Task HeldMessagesAreDeliveredWhenTheEndpointRegistersAndAgainUntilAcknowledged()
+    public async Task HeldMessagesAreDeliveredWhenTheAgentRegistersAndAgainUntilAcknowledged()
     {
         await using var router = await RouterFixture.StartAsync();
         await using var ise = await DaemonFixture.StartAsync(router, "ise");
@@ -261,7 +261,7 @@ public class DaemonTests
         for (var round = 0; round < 2; round++)
         {
             var delivered = new TaskCompletionSource<LocalMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
-            await using (new EndpointConnection(wojtek.Api, "agent", e =>
+            await using (new AgentConnection(wojtek.Api, "agent", e =>
                          {
                              if (e.Message is { } m)
                              {
@@ -277,7 +277,7 @@ public class DaemonTests
 
         await wojtek.Api.AckAsync("agent", sent.Id);
         var after = new List<LocalMessage>();
-        await using (var connection = new EndpointConnection(wojtek.Api, "agent", e =>
+        await using (var connection = new AgentConnection(wojtek.Api, "agent", e =>
                      {
                          if (e.Message is { } m)
                          {
@@ -295,14 +295,14 @@ public class DaemonTests
     }
 
     [Fact]
-    public async Task AReceiptReachesTheSendingEndpointsStream()
+    public async Task AReceiptReachesTheSendingAgentsStream()
     {
         await using var router = await RouterFixture.StartAsync();
         await using var ise = await DaemonFixture.StartAsync(router, "ise");
         await using var wojtek = await DaemonFixture.StartAsync(router, "wojtek");
         await RegisterAndLeaveAsync(wojtek, "agent");
         var receipts = new List<LocalReceipt>();
-        await using var ops = new EndpointConnection(ise.Api, "ops", e =>
+        await using var ops = new AgentConnection(ise.Api, "ops", e =>
         {
             if (e.Receipt is { } r)
             {
@@ -331,17 +331,17 @@ public class DaemonTests
     }
 
     [Fact]
-    public async Task AnEndpointCanBeHeldByOneProcessAtATimeAndTheDaemonsEndpointIsReserved()
+    public async Task AnAgentCanBeHeldByOneProcessAtATimeAndTheDaemonsAgentIsReserved()
     {
         await using var router = await RouterFixture.StartAsync();
         await using var ise = await DaemonFixture.StartAsync(router, "ise");
-        await using var first = new EndpointConnection(ise.Api, "agent", _ => Task.CompletedTask);
+        await using var first = new AgentConnection(ise.Api, "agent", _ => Task.CompletedTask);
         await first.Registered.WaitAsync(TimeSpan.FromSeconds(10));
 
         var second = await Assert.ThrowsAsync<LocalApiException>(async () => await ise.Api.StreamAsync("agent").GetAsyncEnumerator().MoveNextAsync());
         Assert.Equal(System.Net.HttpStatusCode.Conflict, second.Status);
         var reserved = await Assert.ThrowsAsync<LocalApiException>(() => ise.Api.SendAsync(new LocalSendRequest("daemon", ["ise"], "x")));
-        Assert.Contains("daemon's own endpoint", reserved.Message);
+        Assert.Contains("daemon's own agent", reserved.Message);
         await Assert.ThrowsAsync<InvalidOperationException>(() => DaemonHost.StartAsync(DaemonHost.Build(ise.Daemon.Context), ise.Daemon.Context));
     }
 
@@ -354,8 +354,8 @@ public class DaemonTests
         await using var ise = await DaemonFixture.StartAsync(router, "ise");
         await using var wojtek = await DaemonFixture.StartAsync(router, "wojtek");
         await RegisterAndLeaveAsync(wojtek, "hermes-default");
-        var asker = new PoniExpTools(new McpEndpoint(ise.Api, "claude"));
-        var answerer = new PoniExpTools(new McpEndpoint(wojtek.Api, "hermes-default"));
+        var asker = new PoniExpTools(new McpAgent(ise.Api, "claude"));
+        var answerer = new PoniExpTools(new McpAgent(wojtek.Api, "hermes-default"));
 
         var sent = JsonSerializer.Deserialize<List<LocalSent>>(await asker.SendAsync(["wojtek/hermes-default"], "what's the build status?",
             subject: "build", metadata: new() { ["priority"] = "high" }), WireProtocol.Json)!.Single();
@@ -383,19 +383,19 @@ public class DaemonTests
     public async Task ADaemonSettingChangeAppliesWithoutARestartAndABadOneStopsStartup()
     {
         await using var router = await RouterFixture.StartAsync();
-        await using var ise = await DaemonFixture.StartAsync(router, "ise", new Dictionary<string, string?> { ["Daemon:EndpointTimeout"] = "01:00:00" });
+        await using var ise = await DaemonFixture.StartAsync(router, "ise", new Dictionary<string, string?> { ["Daemon:AgentTimeout"] = "01:00:00" });
         var silent = ise.Api.StreamAsync("agent").GetAsyncEnumerator();
         await silent.MoveNextAsync();
         await Task.Delay(500);
-        Assert.Equal("online", (await ise.Api.EndpointsAsync()).Single().State);
+        Assert.Equal("online", (await ise.Api.AgentsAsync()).Single().State);
 
-        TestSettings.Set(ise.Configuration, "Daemon:EndpointTimeout", "00:00:00.300");
-        await RouterFixture.EventuallyAsync(async () => (await ise.Api.EndpointsAsync()).Single().State == "timed-out");
+        TestSettings.Set(ise.Configuration, "Daemon:AgentTimeout", "00:00:00.300");
+        await RouterFixture.EventuallyAsync(async () => (await ise.Api.AgentsAsync()).Single().State == "timed-out");
         await silent.DisposeAsync();
 
         var context = ise.Daemon.Context with { Address = LocalAddress.ForHome(ise.Home + "-other") };
         var bad = DaemonHost.Build(context, ["--Logging:LogLevel:Default=None"],
-            c => c.AddInMemoryCollection(new Dictionary<string, string?> { ["Daemon:EndpointTimeout"] = "00:00:00", ["Daemon:SweepInterval"] = "00:00:01" }));
+            c => c.AddInMemoryCollection(new Dictionary<string, string?> { ["Daemon:AgentTimeout"] = "00:00:00", ["Daemon:SweepInterval"] = "00:00:01" }));
         await Assert.ThrowsAsync<OptionsValidationException>(() => bad.StartAsync());
         await bad.DisposeAsync();
     }
@@ -440,13 +440,13 @@ public class DaemonTests
 
     // ---- helpers ----
 
-    private static async Task RegisterAndLeaveAsync(DaemonFixture daemon, string endpoint)
+    private static async Task RegisterAndLeaveAsync(DaemonFixture daemon, string agent)
     {
-        await using var connection = new EndpointConnection(daemon.Api, endpoint, _ => Task.CompletedTask);
+        await using var connection = new AgentConnection(daemon.Api, agent, _ => Task.CompletedTask);
         await connection.Registered.WaitAsync(TimeSpan.FromSeconds(10));
     }
 
-    private static Task PeerStateAsync(DaemonFixture observer, string machine, string endpoint, string state) =>
+    private static Task PeerStateAsync(DaemonFixture observer, string machine, string agent, string state) =>
         RouterFixture.EventuallyAsync(async () =>
-            (await observer.Api.MachinesAsync()).SingleOrDefault(m => m.Name == machine)?.Endpoints.SingleOrDefault(e => e.Name == endpoint)?.State == state);
+            (await observer.Api.MachinesAsync()).SingleOrDefault(m => m.Name == machine)?.Agents.SingleOrDefault(e => e.Name == agent)?.State == state);
 }

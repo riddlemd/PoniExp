@@ -172,7 +172,7 @@ public static class AdminCli
                 default:
                     output.WriteLine("usage: poniexp admin [list | approve <id|name> | reject <id|name> | remove <id|name> | clear-pending | certificate\n" +
                                      "                      | backup <path|-> | restore <path|-> | blobs [clear --for <machine>]\n" +
-                                     "                      | groups | group set <name> <machine/endpoint|role:x[/all]>... | group remove <name>\n" +
+                                     "                      | groups | group set <name> <machine/agent|role:x[/all]>... | group remove <name>\n" +
                                      "                      | traffic-log [on | off | status | show [--since 2h|date] [--machine name] [--limit n] [--json]]] [--url URL]");
                     return 2;
             }

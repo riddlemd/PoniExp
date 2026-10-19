@@ -61,8 +61,8 @@ public class HistoryTests
         var one = Assert.Single(await ise.Api.LogAsync(new LocalLogQuery(Conversation: sent.ConversationId, Bodies: true)));
         Assert.Equal("the secret plan", one.Body);
         Assert.Single(await wojtek.Api.LogAsync(new LocalLogQuery(Operation: sent.Id))); // operationId defaults to the message id
-        Assert.Equal(2, (await wojtek.Api.LogAsync(new LocalLogQuery(Peer: "ise", Endpoint: "agent"))).Count);
-        Assert.Empty(await wojtek.Api.LogAsync(new LocalLogQuery(Endpoint: "elsewhere")));
+        Assert.Equal(2, (await wojtek.Api.LogAsync(new LocalLogQuery(Peer: "ise", Agent: "agent"))).Count);
+        Assert.Empty(await wojtek.Api.LogAsync(new LocalLogQuery(Agent: "elsewhere")));
         Assert.Single(await wojtek.Api.LogAsync(new LocalLogQuery(Limit: 1))); // the most recent
         Assert.True((await ise.Api.LogAsync(new LocalLogQuery(Automatic: true))).Count > 2);
         Assert.Empty(await ise.Api.LogAsync(new LocalLogQuery(Since: DateTimeOffset.UtcNow.AddMinutes(1))));
@@ -299,9 +299,9 @@ public class HistoryTests
         await ise.DisposeAsync();
     }
 
-    private static async Task RegisterAndLeaveAsync(DaemonFixture daemon, string endpoint)
+    private static async Task RegisterAndLeaveAsync(DaemonFixture daemon, string agent)
     {
-        await using var connection = new EndpointConnection(daemon.Api, endpoint, _ => Task.CompletedTask);
+        await using var connection = new AgentConnection(daemon.Api, agent, _ => Task.CompletedTask);
         await connection.Registered.WaitAsync(TimeSpan.FromSeconds(10));
     }
 }

@@ -43,7 +43,7 @@ public static class DaemonHost
         builder.Services.AddSingleton(context);
         builder.Services.AddSingleton(sp => new RelayClient(context.Keys, context.Relay, context.Store,
             sp.GetRequiredService<IOptionsMonitor<MessagingOptions>>(), sp.GetRequiredService<TimeProvider>()));
-        builder.Services.AddSingleton<EndpointSessions>();
+        builder.Services.AddSingleton<AgentSessions>();
         builder.Services.AddSingleton<Daemon>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<Daemon>());
         builder.Services.ConfigureHttpJsonOptions(o => WireProtocol.Configure(o.SerializerOptions));

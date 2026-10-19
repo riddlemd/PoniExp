@@ -45,11 +45,11 @@ public class RelayTests
         var (wojtek, _) = await router.MemberAsync("wojtek");
         var received = Wait.For<ReceivedMessageArgs>(h => wojtek.MessageReceived += m =>
         {
-            h(new ReceivedMessageArgs(m.From.ToString(), m.Content.ToEndpoint, m.Content.Body));
+            h(new ReceivedMessageArgs(m.From.ToString(), m.Content.ToAgent, m.Content.Body));
             return Task.CompletedTask;
         });
 
-        var result = await ise.SendAsync("wojtek/agent", new OutgoingMessage("hello wojtek") { FromEndpoint = "cli" });
+        var result = await ise.SendAsync("wojtek/agent", new OutgoingMessage("hello wojtek") { FromAgent = "cli" });
 
         Assert.Equal(DeliveryState.Pushed, result.State);
         Assert.Equal(new ReceivedMessageArgs("ise/cli", "agent", "hello wojtek"), await received);
@@ -295,5 +295,5 @@ public class RelayTests
         return Convert.ToBase64String(bytes);
     }
 
-    private sealed record ReceivedMessageArgs(string From, string ToEndpoint, string Body);
+    private sealed record ReceivedMessageArgs(string From, string ToAgent, string Body);
 }

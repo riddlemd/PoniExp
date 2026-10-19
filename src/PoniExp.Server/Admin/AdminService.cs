@@ -116,14 +116,14 @@ public sealed class AdminService(
     public IReadOnlyList<GroupInfo> Groups() => store.LoadGroups();
 
     /// <summary>
-    /// Sets a group (<c>poniexp admin group set</c>): members are <c>machine/endpoint</c> (an approved machine, by name)
+    /// Sets a group (<c>poniexp admin group set</c>): members are <c>machine/agent</c> (an approved machine, by name)
     /// or <c>role:x</c> / <c>role:x/all</c>. Groups don't nest. No members removes it.
     /// </summary>
     public GroupInfo SetGroup(string name, IReadOnlyList<string> members)
     {
-        if (!Limits.IsValidEndpoint(name))
+        if (!Limits.IsValidAgent(name))
         {
-            throw new RouterException($"A group name is {Limits.EndpointRule}.");
+            throw new RouterException($"A group name is {Limits.AgentRule}.");
         }
 
         if (members.Count > 256)

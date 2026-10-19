@@ -119,13 +119,13 @@ public class EncryptionTests
         var (wojtek, _) = await router.MemberAsync("wojtek");
         await wojtek.DisposeAsync(); // offline, so the message waits in the router's database
 
-        await ise.SendAsync("wojtek/vault", new OutgoingMessage("the eagle lands at 0400") { Subject = "landing", FromEndpoint = "ops" });
+        await ise.SendAsync("wojtek/vault", new OutgoingMessage("the eagle lands at 0400") { Subject = "landing", FromAgent = "ops" });
         await RouterFixture.Eventually(() => router.Queue.Count == 1);
 
         var onDisk = string.Concat(Directory.GetFiles(router.DataDirectory, "router.db*").Select(ReadShared));
         Assert.DoesNotContain("eagle", onDisk);
         Assert.DoesNotContain("landing", onDisk);
-        Assert.DoesNotContain("vault", onDisk); // endpoints too
+        Assert.DoesNotContain("vault", onDisk); // agents too
         Assert.Contains("ciphertext", onDisk);
     }
 

@@ -12,7 +12,7 @@ namespace PoniExp.Daemon;
 
 /// <summary>
 /// The local API (HTTP over the daemon's pipe or socket). See <see cref="LocalApiClient"/> for the calls.
-/// Each endpoint is shown only its own messages: scoping for convenience, not a security boundary.
+/// Each agent is shown only its own messages: scoping for convenience, not a security boundary.
 /// </summary>
 public static class LocalApiEndpoints
 {
@@ -33,7 +33,7 @@ public static class LocalApiEndpoints
             }
         }
 
-        return new LocalLogEntry(m.Id, $"{d.NameOf(m.FromMachine)}/{m.FromEndpoint}", $"{d.NameOf(m.ToMachine)}/{m.ToEndpoint}", incoming ? "in" : "out",
+        return new LocalLogEntry(m.Id, $"{d.NameOf(m.FromMachine)}/{m.FromAgent}", $"{d.NameOf(m.ToMachine)}/{m.ToAgent}", incoming ? "in" : "out",
             m.Type, e.ConversationId, e.ReplyTo, e.OperationId, e.Status, e.Subject, e.ContentType, e.Sequence, m.CreatedOn, m.StoredOn, m.ExpiresOn,
             m.State, m.StateDetail, m.Envelope is null, content?.Body, content?.Metadata);
     }
@@ -47,24 +47,24 @@ public static class LocalApiEndpoints
             var relay = d.Relay;
             return Results.Ok(new LocalStatus(d.MachineId, relay.Name, WireProtocol.NameOf(relay.Status), relay.IsConnected, relay.IsReachable,
                 relay.RouterUrl.ToString(),
-                relay.ClockOffset, relay.RouterClockSkew, d.Context.Home, d.Store.GetOutbox(d.MachineId).Count, Endpoints(d),
+                relay.ClockOffset, relay.RouterClockSkew, d.Context.Home, d.Store.GetOutbox(d.MachineId).Count, Agents(d),
                 await d.Store.GetMetricsAsync()));
         }));
 
         app.MapGet("/machines", (Daemon d) => Handle(() =>
         {
-            var announced = d.Store.GetPeerEndpoints().ToLookup(e => e.Machine);
+            var announced = d.Store.GetPeerAgents().ToLookup(e => e.Machine);
             return Task.FromResult(Results.Ok(d.Relay.Machines.Where(m => m.Id != d.MachineId).OrderBy(m => m.Name).Select(m =>
                 new LocalMachine(m.Id, m.Name, m.Online, m.LastSeenOn, m.Description.OperatingSystem, [.. announced[m.Id].Select(e =>
-                    new LocalPeerEndpoint(e.Endpoint, m.Online ? WireProtocol.NameOf(e.State) : "offline", e.ChangedOn, e.Roles))])).ToList()));
+                    new LocalPeerAgent(e.Agent, m.Online ? WireProtocol.NameOf(e.State) : "offline", e.ChangedOn, e.Roles))])).ToList()));
         }));
 
         app.MapPost("/send", (Daemon d, LocalSendRequest request, CancellationToken ct) => Handle(async () =>
         {
-            RequireEndpoint(request.From);
+            RequireAgent(request.From);
             var sent = await d.SendAsync(request.To, new OutgoingMessage(request.Body ?? throw new ArgumentException("a body is required"))
             {
-                FromEndpoint = request.From,
+                FromAgent = request.From,
                 Subject = request.Subject,
                 ConversationId = request.ConversationId,
                 ReplyTo = request.ReplyTo,
@@ -77,10 +77,10 @@ public static class LocalApiEndpoints
             return Results.Ok(sent.Select(d.ToLocal).ToList());
         }));
 
-        app.MapPost("/endpoints/{endpoint}/reply", (Daemon d, string endpoint, LocalReplyRequest request, CancellationToken ct) => Handle(async () =>
+        app.MapPost("/agents/{agent}/reply", (Daemon d, string agent, LocalReplyRequest request, CancellationToken ct) => Handle(async () =>
         {
-            RequireEndpoint(endpoint);
-            var sent = await d.ReplyAsync(endpoint, request.Id, new OutgoingMessage(request.Body ?? throw new ArgumentException("a body is required"))
+            RequireAgent(agent);
+            var sent = await d.ReplyAsync(agent, request.Id, new OutgoingMessage(request.Body ?? throw new ArgumentException("a body is required"))
             {
                 Subject = request.Subject,
                 Status = ParseStatus(request.Status),
@@ -91,64 +91,64 @@ public static class LocalApiEndpoints
             return Results.Ok(d.ToLocal(sent));
         }));
 
-        app.MapPost("/endpoints/{endpoint}/ack", (Daemon d, string endpoint, LocalAckRequest request, CancellationToken ct) => Handle(async () =>
+        app.MapPost("/agents/{agent}/ack", (Daemon d, string agent, LocalAckRequest request, CancellationToken ct) => Handle(async () =>
         {
-            RequireEndpoint(endpoint);
-            return Results.Ok(d.ToLocal(await d.AcknowledgeAsync(endpoint, request.Id, ct), MessageDirection.In));
+            RequireAgent(agent);
+            return Results.Ok(d.ToLocal(await d.AcknowledgeAsync(agent, request.Id, ct), MessageDirection.In));
         }));
 
-        app.MapGet("/endpoints/{endpoint}/inbox", (Daemon d, string endpoint) => Handle(() =>
+        app.MapGet("/agents/{agent}/inbox", (Daemon d, string agent) => Handle(() =>
         {
-            RequireEndpoint(endpoint);
-            var inbox = d.Store.GetInbox(d.MachineId, endpoint);
+            RequireAgent(agent);
+            var inbox = d.Store.GetInbox(d.MachineId, agent);
             var messages = inbox.Select(m => d.ToLocal(m, MessageDirection.In)).ToList();
             d.MarkFetched(inbox);
             return Task.FromResult(Results.Ok(messages));
         }));
 
-        app.MapGet("/endpoints/{endpoint}/messages/{id:guid}", (Daemon d, string endpoint, Guid id) => Handle(() =>
+        app.MapGet("/agents/{agent}/messages/{id:guid}", (Daemon d, string agent, Guid id) => Handle(() =>
         {
-            RequireEndpoint(endpoint);
-            var (stored, direction) = d.Store.FindIncoming(d.MachineId, endpoint, id) is { } incoming ? (incoming, MessageDirection.In)
-                : d.Store.FindOutgoing(d.MachineId, endpoint, id) is { } outgoing ? (outgoing, MessageDirection.Out)
-                : throw new KeyNotFoundException($"endpoint '{endpoint}' has no message {id}");
+            RequireAgent(agent);
+            var (stored, direction) = d.Store.FindIncoming(d.MachineId, agent, id) is { } incoming ? (incoming, MessageDirection.In)
+                : d.Store.FindOutgoing(d.MachineId, agent, id) is { } outgoing ? (outgoing, MessageDirection.Out)
+                : throw new KeyNotFoundException($"agent '{agent}' has no message {id}");
             return Task.FromResult(Results.Ok(new LocalMessageDetail(d.ToLocal(stored, direction),
                 [.. d.Store.GetEvents(stored.FromMachine, id).Where(e => e.Direction == direction)])));
         }));
 
-        app.MapGet("/endpoints/{endpoint}/conversations/{id:guid}", (Daemon d, string endpoint, Guid id) => Handle(() =>
+        app.MapGet("/agents/{agent}/conversations/{id:guid}", (Daemon d, string agent, Guid id) => Handle(() =>
         {
-            RequireEndpoint(endpoint);
-            return Task.FromResult(Results.Ok(d.Store.GetConversation(d.MachineId, endpoint, id)
-                .Select(m => d.ToLocal(m, m.ToMachine == d.MachineId && m.ToEndpoint == endpoint ? MessageDirection.In : MessageDirection.Out)).ToList()));
+            RequireAgent(agent);
+            return Task.FromResult(Results.Ok(d.Store.GetConversation(d.MachineId, agent, id)
+                .Select(m => d.ToLocal(m, m.ToMachine == d.MachineId && m.ToAgent == agent ? MessageDirection.In : MessageDirection.Out)).ToList()));
         }));
 
-        app.MapGet("/endpoints/{endpoint}/conversations", (Daemon d, string endpoint) => Handle(() =>
+        app.MapGet("/agents/{agent}/conversations", (Daemon d, string agent) => Handle(() =>
         {
-            RequireEndpoint(endpoint);
-            return Task.FromResult(Results.Ok(d.Store.GetConversations(endpoint).Select(c => new LocalConversation(c.Id,
-                $"{d.NameOf(c.PeerMachine)}/{c.PeerEndpoint}", c.Subject, c.StartedBy, c.StartedOn, c.LastActivityOn, c.State)).ToList()));
+            RequireAgent(agent);
+            return Task.FromResult(Results.Ok(d.Store.GetConversations(agent).Select(c => new LocalConversation(c.Id,
+                $"{d.NameOf(c.PeerMachine)}/{c.PeerAgent}", c.Subject, c.StartedBy, c.StartedOn, c.LastActivityOn, c.State)).ToList()));
         }));
 
-        app.MapGet("/log", (Daemon d, Guid? conversation, Guid? operation, string? peer, string? endpoint, DateTimeOffset? since, int? limit,
+        app.MapGet("/log", (Daemon d, Guid? conversation, Guid? operation, string? peer, string? agent, DateTimeOffset? since, int? limit,
             bool? automatic, bool? bodies) => Handle(() =>
         {
             var peerId = peer is null ? null
                 : d.Relay.Machines.FirstOrDefault(m => m.Name == peer || m.Id == peer)?.Id ?? throw new KeyNotFoundException($"no machine '{peer}'");
-            var entries = d.Store.GetLog(d.MachineId, new LogQuery(conversation, operation, peerId, endpoint, since, automatic ?? false, limit ?? 1000));
+            var entries = d.Store.GetLog(d.MachineId, new LogQuery(conversation, operation, peerId, agent, since, automatic ?? false, limit ?? 1000));
             return Task.FromResult(Results.Ok(entries.Select(e => ToLog(d, e, bodies ?? false)).ToList()));
         }));
 
-        app.MapPost("/endpoints/{endpoint}/fetch", (Daemon d, string endpoint, LocalFileRequest request, CancellationToken ct) => Handle(async () =>
+        app.MapPost("/agents/{agent}/fetch", (Daemon d, string agent, LocalFileRequest request, CancellationToken ct) => Handle(async () =>
         {
-            RequireEndpoint(endpoint);
-            return Results.Ok(await d.FetchAsync(endpoint, request.Id, request.BlobId, ct));
+            RequireAgent(agent);
+            return Results.Ok(await d.FetchAsync(agent, request.Id, request.BlobId, ct));
         }));
 
-        app.MapPost("/endpoints/{endpoint}/release", (Daemon d, string endpoint, LocalFileRequest request) => Handle(() =>
+        app.MapPost("/agents/{agent}/release", (Daemon d, string agent, LocalFileRequest request) => Handle(() =>
         {
-            RequireEndpoint(endpoint);
-            return Task.FromResult(Results.Ok(d.Release(endpoint, request.Id, request.BlobId)));
+            RequireAgent(agent);
+            return Task.FromResult(Results.Ok(d.Release(agent, request.Id, request.BlobId)));
         }));
 
         app.MapGet("/blobs", (Daemon d, CancellationToken ct) => Handle(async () => Results.Ok(await d.Relay.GetBlobsAsync(ct))));
@@ -159,24 +159,24 @@ public static class LocalApiEndpoints
             return Results.Ok(new LocalOk(true));
         }));
 
-        app.MapGet("/rooms", (Daemon d, string? endpoint) => Results.Ok(d.Rooms(endpoint)));
+        app.MapGet("/rooms", (Daemon d, string? agent) => Results.Ok(d.Rooms(agent)));
 
         app.MapPost("/rooms", (Daemon d, LocalRoomCreate request, CancellationToken ct) => Handle(async () =>
         {
-            RequireEndpoint(request.Endpoint);
-            return Results.Ok(d.ToLocalRoom(await d.CreateRoomAsync(request.Endpoint, request.Name, request.Members ?? [], ct)));
+            RequireAgent(request.Agent);
+            return Results.Ok(d.ToLocalRoom(await d.CreateRoomAsync(request.Agent, request.Name, request.Members ?? [], ct)));
         }));
 
         app.MapPost("/rooms/{room}/change", (Daemon d, string room, LocalRoomChange request, CancellationToken ct) => Handle(async () =>
         {
-            RequireEndpoint(request.Endpoint);
-            return Results.Ok(d.ToLocalRoom(await d.ChangeRoomAsync(request.Endpoint, room, request.Change, ct)));
+            RequireAgent(request.Agent);
+            return Results.Ok(d.ToLocalRoom(await d.ChangeRoomAsync(request.Agent, room, request.Change, ct)));
         }));
 
         app.MapPost("/rooms/{room}/send", (Daemon d, string room, LocalRoomSend request, CancellationToken ct) => Handle(async () =>
         {
-            RequireEndpoint(request.Endpoint);
-            var sent = await d.SendToRoomAsync(request.Endpoint, room, new OutgoingMessage(request.Body ?? throw new ArgumentException("a body is required"))
+            RequireAgent(request.Agent);
+            var sent = await d.SendToRoomAsync(request.Agent, room, new OutgoingMessage(request.Body ?? throw new ArgumentException("a body is required"))
             {
                 ReplyTo = request.ReplyTo,
                 Subject = request.Subject,
@@ -187,28 +187,28 @@ public static class LocalApiEndpoints
                 sent.State is { } s ? WireProtocol.NameOf(s) : "outbox"));
         }));
 
-        app.MapGet("/rooms/{room}/messages", (Daemon d, string room, string endpoint, DateTimeOffset? since, int? limit) => Handle(() =>
+        app.MapGet("/rooms/{room}/messages", (Daemon d, string room, string agent, DateTimeOffset? since, int? limit) => Handle(() =>
         {
-            RequireEndpoint(endpoint);
-            return Task.FromResult(Results.Ok(d.ReadRoom(endpoint, room, since, limit ?? 200)));
+            RequireAgent(agent);
+            return Task.FromResult(Results.Ok(d.ReadRoom(agent, room, since, limit ?? 200)));
         }));
 
-        app.MapGet("/endpoints", (Daemon d) => Results.Ok(Endpoints(d)));
+        app.MapGet("/agents", (Daemon d) => Results.Ok(Agents(d)));
 
-        app.MapPost("/endpoints/{endpoint}/retire", (Daemon d, string endpoint) => Handle(async () =>
+        app.MapPost("/agents/{agent}/retire", (Daemon d, string agent) => Handle(async () =>
         {
-            RequireEndpoint(endpoint);
-            if (d.Sessions.IsOnline(endpoint))
+            RequireAgent(agent);
+            if (d.Sessions.IsOnline(agent))
             {
-                throw new InvalidOperationException($"endpoint '{endpoint}' is online; stop it before retiring it");
+                throw new InvalidOperationException($"agent '{agent}' is online; stop it before retiring it");
             }
 
-            if (!await d.RetireAsync(endpoint))
+            if (!await d.RetireAsync(agent))
             {
-                throw new KeyNotFoundException($"endpoint '{endpoint}' isn't registered (or is already retired)");
+                throw new KeyNotFoundException($"agent '{agent}' isn't registered (or is already retired)");
             }
 
-            return Results.Ok(Endpoints(d).Single(e => e.Name == endpoint));
+            return Results.Ok(Agents(d).Single(e => e.Name == agent));
         }));
 
         app.MapGet("/diagnostics", (Daemon d) => Results.Ok(d.Store.GetDiagnostics()));
@@ -232,45 +232,45 @@ public static class LocalApiEndpoints
             return Results.Accepted();
         });
 
-        app.MapPost("/endpoints/{endpoint}/heartbeat", (Daemon d, string endpoint) =>
+        app.MapPost("/agents/{agent}/heartbeat", (Daemon d, string agent) =>
         {
-            if (d.Sessions.Get(endpoint) is not { } session)
+            if (d.Sessions.Get(agent) is not { } session)
             {
-                return Error(StatusCodes.Status404NotFound, $"endpoint '{endpoint}' isn't connected");
+                return Error(StatusCodes.Status404NotFound, $"agent '{agent}' isn't connected");
             }
 
             session.Beat(d.Now);
             return Results.Ok(new { ok = true });
         });
 
-        app.MapDelete("/endpoints/{endpoint}", (Daemon d, string endpoint) =>
+        app.MapDelete("/agents/{agent}", (Daemon d, string agent) =>
         {
-            if (d.Sessions.Get(endpoint) is not { } session)
+            if (d.Sessions.Get(agent) is not { } session)
             {
-                return Error(StatusCodes.Status404NotFound, $"endpoint '{endpoint}' isn't connected");
+                return Error(StatusCodes.Status404NotFound, $"agent '{agent}' isn't connected");
             }
 
             session.End(leaving: true);
             return Results.NoContent();
         });
 
-        app.MapGet("/endpoints/{endpoint}/stream", StreamAsync);
+        app.MapGet("/agents/{agent}/stream", StreamAsync);
     }
 
     /// <summary>
-    /// An endpoint's live connection: registers it (online), delivers what is waiting for it, then streams
+    /// An agent's live connection: registers it (online), delivers what is waiting for it, then streams
     /// messages and receipts as server-sent events until it leaves, stops or misses its heartbeat.
     /// </summary>
-    private static async Task StreamAsync(HttpContext http, Daemon d, string endpoint, IOptionsMonitor<DaemonOptions> options)
+    private static async Task StreamAsync(HttpContext http, Daemon d, string agent, IOptionsMonitor<DaemonOptions> options)
     {
         IReadOnlyList<string> roles;
         try
         {
-            RequireEndpoint(endpoint);
+            RequireAgent(agent);
             roles = http.Request.Query["roles"].ToString() is { Length: > 0 } text ? text.Split(',') : [];
-            if (roles.Count > Limits.MaxRoles || roles.Any(r => !Limits.IsValidEndpoint(r)))
+            if (roles.Count > Limits.MaxRoles || roles.Any(r => !Limits.IsValidAgent(r)))
             {
-                throw new ArgumentException($"at most {Limits.MaxRoles} roles, each {Limits.EndpointRule}");
+                throw new ArgumentException($"at most {Limits.MaxRoles} roles, each {Limits.AgentRule}");
             }
         }
         catch (ArgumentException e)
@@ -279,21 +279,21 @@ public static class LocalApiEndpoints
             return;
         }
 
-        var session = d.Sessions.TryOpen(endpoint, d.Now);
+        var session = d.Sessions.TryOpen(agent, d.Now);
         if (session is null)
         {
-            await Error(StatusCodes.Status409Conflict, $"endpoint '{endpoint}' is already connected (another process holds it)").ExecuteAsync(http);
+            await Error(StatusCodes.Status409Conflict, $"agent '{agent}' is already connected (another process holds it)").ExecuteAsync(http);
             return;
         }
 
         using var done = CancellationTokenSource.CreateLinkedTokenSource(http.RequestAborted, session.Ended);
         try
         {
-            await d.SetEndpointStateAsync(endpoint, EndpointState.Online, roles);
+            await d.SetAgentStateAsync(agent, AgentState.Online, roles);
             http.Response.ContentType = "text/event-stream";
             http.Response.Headers.CacheControl = "no-cache";
             await WriteAsync(http, new LocalEvent(LocalEventKinds.Registered), done.Token);
-            foreach (var waiting in d.Store.GetInbox(d.MachineId, endpoint))
+            foreach (var waiting in d.Store.GetInbox(d.MachineId, agent))
             {
                 d.Deliver(session, waiting);
             }
@@ -326,12 +326,12 @@ public static class LocalApiEndpoints
         }
         catch (IOException)
         {
-            // the endpoint went away mid-write
+            // the agent went away mid-write
         }
         finally
         {
             d.Sessions.Close(session);
-            await d.SetEndpointStateAsync(endpoint, session.Leaving ? EndpointState.Left : EndpointState.TimedOut);
+            await d.SetAgentStateAsync(agent, session.Leaving ? AgentState.Left : AgentState.TimedOut);
         }
     }
 
@@ -341,21 +341,21 @@ public static class LocalApiEndpoints
         await http.Response.Body.FlushAsync(ct);
     }
 
-    private static List<LocalEndpointInfo> Endpoints(Daemon d) =>
-        [.. d.Store.GetEndpoints().Select(e => new LocalEndpointInfo(e.Name,
-            e.RetiredOn is not null ? "retired" : d.Sessions.IsOnline(e.Name) ? "online" : WireProtocol.NameOf(e.State == EndpointState.Online
-                ? EndpointState.TimedOut : e.State), e.ChangedOn, e.RetiredOn, e.Roles))];
+    private static List<LocalAgentInfo> Agents(Daemon d) =>
+        [.. d.Store.GetAgents().Select(e => new LocalAgentInfo(e.Name,
+            e.RetiredOn is not null ? "retired" : d.Sessions.IsOnline(e.Name) ? "online" : WireProtocol.NameOf(e.State == AgentState.Online
+                ? AgentState.TimedOut : e.State), e.ChangedOn, e.RetiredOn, e.Roles))];
 
-    private static void RequireEndpoint(string? endpoint)
+    private static void RequireAgent(string? agent)
     {
-        if (!Limits.IsValidEndpoint(endpoint))
+        if (!Limits.IsValidAgent(agent))
         {
-            throw new ArgumentException($"an endpoint must be {Limits.EndpointRule}");
+            throw new ArgumentException($"an agent must be {Limits.AgentRule}");
         }
 
-        if (endpoint is Address.DaemonEndpoint or RoomAddress.Endpoint)
+        if (agent is Address.DaemonAgent or RoomAddress.Agent)
         {
-            throw new ArgumentException($"'{endpoint}' is reserved (the daemon's own endpoint, or a room's)");
+            throw new ArgumentException($"'{agent}' is reserved (the daemon's own agent, or a room's)");
         }
     }
 

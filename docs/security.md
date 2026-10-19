@@ -19,7 +19,7 @@ What each party can and can't do, as built. Updated each phase (see `docs/plan.m
 
 Only what routing needs: message id, sender and recipient machine, `expiresOn`, sequence number,
 ciphertext size, and which machines the content key is wrapped for (the recipient and the sender).
-Endpoints, conversation, subject, type, metadata, body and `createdOn` are encrypted.
+Agents, conversation, subject, type, metadata, body and `createdOn` are encrypted.
 
 ## The router
 
@@ -46,14 +46,14 @@ Endpoints, conversation, subject, type, metadata, body and `createdOn` are encry
 
 ## Receipts and announcements
 
-- Delivery receipts (`received`, `acknowledged`, `rejected`) and endpoint announcements are messages:
+- Delivery receipts (`received`, `acknowledged`, `rejected`) and agent announcements are messages:
   signed by the machine that sends them and encrypted, so the router can't fake, read or alter one.
   It can drop or delay them like any message.
 - A receipt counts only from the machine the message was sent to: one claiming to be about a message
   sent elsewhere is ignored (and recorded in diagnostics).
 - Each announcement carries the announcing daemon's counter, which only increases. A receiver keeps
   the newest list per machine, so a replayed or late announcement can't bring back an old state.
-- Endpoint names travel encrypted inside announcements: the router doesn't learn which agents a
+- Agent names travel encrypted inside announcements: the router doesn't learn which agents a
   machine has.
 
 ## Limits on the relay port
@@ -86,19 +86,19 @@ Endpoints, conversation, subject, type, metadata, body and `createdOn` are encry
 
 ## Roles, groups and rooms
 
-- **Roles** are declared by each machine for its own endpoints, in its signed announcements: the router
-  can't add or hide a holder, but any approved machine can claim any role for its endpoints until
+- **Roles** are declared by each machine for its own agents, in its signed announcements: the router
+  can't add or hide a holder, but any approved machine can claim any role for its agents until
   phase 9 restricts them.
 - **Groups** are the owner's lists, served by the router: a compromised router could point a group
   at another approved machine (still encrypted to that machine, so only it could read). Owner-signed
   lists come with phase 9.
 - **Rooms:** each message's key is wrapped only for the machines of the members its sender knows of,
   so a removed member can't read later messages and the router can't add a reader. Membership
-  snapshots count only from an admin (by machine signature and sender endpoint), or a member removing
+  snapshots count only from an admin (by machine signature and sender agent), or a member removing
   themselves; a machine that first hears of a room trusts the snapshot's own admin list, as for a
   new room. The router sees a room's id, its member machines (it fans out to them) and message sizes,
-  never its name, members' endpoints or contents. A member machine stores the room's history; a
-  machine whose endpoints are all removed stops accepting its messages.
+  never its name, members' agents or contents. A member machine stores the room's history; a
+  machine whose agents are all removed stops accepting its messages.
 - A message sent by a member whose machine hasn't yet heard of a change goes to the old member set.
 
 ## Files
@@ -118,7 +118,7 @@ Endpoints, conversation, subject, type, metadata, body and `createdOn` are encry
 - **No deduplication:** each upload is its own blob, so the router can't tell two uploads are the same
   file, and having a blob's id lets no one fetch it.
 - **Local copies:** written to `<home>/files/<blob>/` only after verification (a `.part` file
-  until then), and deleted when every endpoint that received them has released them, or after 90 days.
+  until then), and deleted when every agent that received them has released them, or after 90 days.
 - **Limits:** space is reserved when an upload starts, against the file, sender, recipient and relay
   limits and a free-disk floor, so a full disk or one machine's backlog can't stop messages, which
   have their own cap per recipient (100 MB queued).
@@ -127,33 +127,33 @@ Endpoints, conversation, subject, type, metadata, body and `createdOn` are encry
 ## Logs
 
 - **Client log:** the client database keeps envelopes, not decrypted bodies, so `log` shows
-  metadata (machines, endpoints, conversation, operation, subject, status, times and states) unless
+  metadata (machines, agents, conversation, operation, subject, status, times and states) unless
   `--bodies` decrypts them. A `--bodies` export is a plaintext file: it's written owner-only (on
   Unix; on Windows it inherits the folder's ACL), and keeping it safe is up to its owner.
 - Events aren't hash-chained: a local process could rewrite the whole chain anyway (see Parties).
   What a peer said is proved by its signed envelope, kept for 90 days by default.
-- **Retries:** a retry is matched by `(sender machine, sender endpoint, operationId)`, all of them
+- **Retries:** a retry is matched by `(sender machine, sender agent, operationId)`, all of them
   signed by the sender, so one machine can't answer, or block, another's operation. Records are kept
   for MaxExpiry plus ClockSkew, as long as a message can be accepted, so a replay is a duplicate,
   not a new request.
 - **Traffic log:** off by default. When on, the router records what it already sees (machines, id,
   size, sequence, times) and, for refusals and join requests, the connection's address and the
-  reason. It never has endpoints, subjects or bodies. It's kept 30 days (`TrafficLogRetention`).
+  reason. It never has agents, subjects or bodies. It's kept 30 days (`TrafficLogRetention`).
 
 ## The local API
 
 - HTTP over a named pipe (Windows) or a Unix socket, never a TCP port. The pipe is the current
   user's only; the socket is mode 0600 in the (0700) home directory. In system mode on Windows the
   service's pipe admits only the service and the user who installed it.
-- Inside a machine, endpoints don't authenticate to the daemon: every local process of the user is
-  trusted (see Parties). The daemon shows each endpoint only its own messages, for convenience, not
+- Inside a machine, agents don't authenticate to the daemon: every local process of the user is
+  trusted (see Parties). The daemon shows each agent only its own messages, for convenience, not
   as a security boundary.
 
 ## Machines
 
 - A member machine can only send as itself: the router checks the envelope's sender against the key
   the connection proved, and the recipient checks the signature again.
-- Any approved machine can message any endpoint on any other. Phase 9 permissions are per machine; endpoint
+- Any approved machine can message any agent on any other. Phase 9 permissions are per machine; agent
   names are never a security boundary (any local process can use any name), so agents that must not
   impersonate each other belong on separate machines or containers.
 - Private keys are kept in the OS's secret store: DPAPI (current user) on Windows, the login keychain
@@ -161,6 +161,6 @@ Endpoints, conversation, subject, type, metadata, body and `createdOn` are encry
 - In system mode (a boot-time service) the daemon has its own keys, under its own account (Windows:
   `NT SERVICE\PoniExp`, DPAPI; macOS: root). It is a separate machine identity, joined separately.
 - The client database (`~/.poniexp/client.db`) keeps messages as their encrypted envelopes. Routing and
-  conversation metadata (endpoints, subject, type, ids, times) is in the clear there for searching;
+  conversation metadata (agents, subject, type, ids, times) is in the clear there for searching;
   bodies are not.
 - Not yet: rotating or revoking keys (phase 11). A stolen machine's keys stay valid until it is removed.

@@ -13,18 +13,18 @@ public sealed record DaemonContext(MachineKeys Keys, string Home, RelayClientOpt
 
 /// <summary>
 /// The machine's daemon: its only connection to the router. It routes incoming messages to local
-/// endpoints (holding them while an endpoint is offline, rejecting them for an unknown one), sends the
-/// delivery receipts, keeps the endpoint registry and announces it to other machines, applies their
+/// agents (holding them while an agent is offline, rejecting them for an unknown one), sends the
+/// delivery receipts, keeps the agent registry and announces it to other machines, applies their
 /// announcements, and runs the outbox. Everything a message causes (its event, its receipt) is written in
 /// the transaction that stores it, so a crash never loses or doubles a receipt.
 /// </summary>
 public sealed partial class Daemon : BackgroundService, IIncomingHandler
 {
-    internal const string AnnouncementCounter = "endpoint-announcements";
+    internal const string AnnouncementCounter = "agent-announcements";
 
     private readonly DaemonContext _context;
     private readonly RelayClient _relay;
-    private readonly EndpointSessions _sessions;
+    private readonly AgentSessions _sessions;
     private readonly IOptionsMonitor<DaemonOptions> _options;
     private readonly IOptionsMonitor<MessagingOptions> _messaging;
     private readonly IOptionsMonitor<RetentionOptions> _retention;
@@ -32,10 +32,10 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
     private readonly TimeProvider _time;
     private readonly ILogger<Daemon> _logger;
 
-    public Daemon(DaemonContext context, RelayClient relay, EndpointSessions sessions, IOptionsMonitor<DaemonOptions> options,
+    public Daemon(DaemonContext context, RelayClient relay, AgentSessions sessions, IOptionsMonitor<DaemonOptions> options,
         IOptionsMonitor<MessagingOptions> messaging, IOptionsMonitor<RetentionOptions> retention, TimeProvider time, ILogger<Daemon> logger, IHostApplicationLifetime lifetime)
     {
-        // End the endpoints' streams first, so the server isn't left waiting for them to drain.
+        // End the agents' streams first, so the server isn't left waiting for them to drain.
         lifetime.ApplicationStopping.Register(() =>
         {
             Stopping = true;
@@ -58,7 +58,7 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
         {
             if (change.Online && change.MachineId != MachineId)
             {
-                Background(() => AnnounceAsync([change.MachineId])); // it catches up on our endpoints
+                Background(() => AnnounceAsync([change.MachineId])); // it catches up on our agents
             }
         };
         relay.ConnectionChanged += (up, error) =>
@@ -83,7 +83,7 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
 
     public ClientStore Store => _context.Store;
 
-    public EndpointSessions Sessions => _sessions;
+    public AgentSessions Sessions => _sessions;
 
     public DaemonContext Context => _context;
 
@@ -94,12 +94,12 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // Endpoints that were online when the daemon last stopped aren't any more.
+        // Agents that were online when the daemon last stopped aren't any more.
         Store.Transact(Now, tx =>
         {
-            foreach (var e in tx.GetEndpoints().Where(e => e.State == EndpointState.Online))
+            foreach (var e in tx.GetAgents().Where(e => e.State == AgentState.Online))
             {
-                tx.SetEndpointState(e.Name, EndpointState.TimedOut);
+                tx.SetAgentState(e.Name, AgentState.TimedOut);
             }
         });
 
@@ -129,10 +129,10 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
         await base.StopAsync(cancellationToken);
     }
 
-    /// <summary>One pass of the periodic work: timed-out endpoints, expired incoming messages, the outbox.</summary>
+    /// <summary>One pass of the periodic work: timed-out agents, expired incoming messages, the outbox.</summary>
     internal async Task SweepAsync(CancellationToken cancellationToken = default)
     {
-        _sessions.TimeOut(Now, _options.CurrentValue.EndpointTimeout);
+        _sessions.TimeOut(Now, _options.CurrentValue.AgentTimeout);
         var skew = _messaging.CurrentValue.ClockSkew;
         Store.Transact(Now, tx => tx.ExpireIncoming(skew));
         await _relay.FlushOutboxAsync(cancellationToken);
@@ -180,26 +180,26 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
                 break;
 
             case MessageType.Message:
-                var endpoint = content.ToEndpoint == Address.DaemonEndpoint ? null : tx.GetEndpoint(content.ToEndpoint);
-                if (endpoint is { RetiredOn: null })
+                var agent = content.ToAgent == Address.DaemonAgent ? null : tx.GetAgent(content.ToAgent);
+                if (agent is { RetiredOn: null })
                 {
-                    if (content.ReplyTo is null && tx.GetOperation(envelope.FromMachine, content.FromEndpoint, content.OperationId) is { } operation)
+                    if (content.ReplyTo is null && tx.GetOperation(envelope.FromMachine, content.FromAgent, content.OperationId) is { } operation)
                     {
                         AnswerRetry(tx, envelope, content, operation);
                         break;
                     }
 
-                    tx.AddEvent(envelope.FromMachine, envelope.Id, MessageDirection.In, content.ToEndpoint, MessageEvents.Stored);
+                    tx.AddEvent(envelope.FromMachine, envelope.Id, MessageDirection.In, content.ToAgent, MessageEvents.Stored);
                     ComposeReceipt(tx, envelope, content, new ReceiptBody(ReceiptKind.Received));
                     if (content.ReplyTo is null)
                     {
-                        tx.StartOperation(envelope.FromMachine, content.FromEndpoint, content.OperationId, content.ToEndpoint, envelope.Id, Now + OperationWindow);
+                        tx.StartOperation(envelope.FromMachine, content.FromAgent, content.OperationId, content.ToAgent, envelope.Id, Now + OperationWindow);
                     }
                 }
                 else
                 {
-                    var reason = $"unknown endpoint '{content.ToEndpoint}'";
-                    tx.AddEvent(envelope.FromMachine, envelope.Id, MessageDirection.In, content.ToEndpoint, MessageEvents.Rejected, reason);
+                    var reason = $"unknown agent '{content.ToAgent}'";
+                    tx.AddEvent(envelope.FromMachine, envelope.Id, MessageDirection.In, content.ToAgent, MessageEvents.Rejected, reason);
                     ComposeReceipt(tx, envelope, content, new ReceiptBody(ReceiptKind.Rejected, reason));
                 }
 
@@ -218,7 +218,7 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
                     break;
                 }
 
-                tx.AddEvent(MachineId, about, MessageDirection.Out, sent.FromEndpoint, receipt.Receipt switch
+                tx.AddEvent(MachineId, about, MessageDirection.Out, sent.FromAgent, receipt.Receipt switch
                 {
                     ReceiptKind.Received => MessageEvents.Received,
                     ReceiptKind.Acknowledged => MessageEvents.Acknowledged,
@@ -230,14 +230,14 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
                 OnFileReceipt(tx, envelope, content);
                 break;
 
-            case MessageType.Endpoint: // automatic: applied, never answered
-                if (Parse<EndpointAnnouncement>(content.Body) is { } announcement)
+            case MessageType.Agent: // automatic: applied, never answered
+                if (Parse<AgentAnnouncement>(content.Body) is { } announcement)
                 {
                     tx.ApplyAnnouncement(envelope.FromMachine, announcement);
                 }
                 else
                 {
-                    tx.Diagnose("warning", "delivery", "a malformed endpoint announcement", envelope.FromMachine, envelope.Id);
+                    tx.Diagnose("warning", "delivery", "a malformed agent announcement", envelope.FromMachine, envelope.Id);
                 }
 
                 break;
@@ -256,7 +256,7 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
     private void AnswerRetry(StoreTransaction tx, Envelope envelope, MessageContent content, OperationRecord operation)
     {
         var detail = $"retry of operation {operation.OperationId} (first message {operation.FirstMessageId}); answered by the daemon";
-        tx.AddEvent(envelope.FromMachine, envelope.Id, MessageDirection.In, content.ToEndpoint, MessageEvents.Acknowledged, detail);
+        tx.AddEvent(envelope.FromMachine, envelope.Id, MessageDirection.In, content.ToAgent, MessageEvents.Acknowledged, detail);
         ComposeReceipt(tx, envelope, content, new ReceiptBody(ReceiptKind.Acknowledged));
         if (_relay.Machine(envelope.FromMachine) is not { } sender)
         {
@@ -288,14 +288,14 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
         }
 
         tx.Diagnose("info", "delivery", detail, envelope.FromMachine, envelope.Id);
-        _relay.Compose(tx, sender, content.FromEndpoint, RelayClient.ReplyTo(envelope.Id, content, answer with
+        _relay.Compose(tx, sender, content.FromAgent, RelayClient.ReplyTo(envelope.Id, content, answer with
         {
-            FromEndpoint = content.ToEndpoint,
+            FromAgent = content.ToAgent,
             OperationId = content.OperationId,
         }));
     }
 
-    /// <summary>After the transaction: hand the message to its endpoint if it's online; tell a sender endpoint about its receipts.</summary>
+    /// <summary>After the transaction: hand the message to its agent if it's online; tell a sender agent about its receipts.</summary>
     private Task OnDeliveredAsync(ReceivedMessage message)
     {
         var content = message.Content;
@@ -309,30 +309,30 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
         }
         else if (content.Type == MessageType.Message)
         {
-            if (_sessions.Get(content.ToEndpoint) is { } session
+            if (_sessions.Get(content.ToAgent) is { } session
                 && Store.GetState(message.Envelope.FromMachine, message.Envelope.Id, MessageDirection.In) == MessageEvents.Stored)
             {
-                Deliver(session, Store.FindIncoming(MachineId, content.ToEndpoint, message.Envelope.Id)!, content);
+                Deliver(session, Store.FindIncoming(MachineId, content.ToAgent, message.Envelope.Id)!, content);
             }
         }
         else if (content.Type == MessageType.FileReceipt && Parse<FileReceiptBody>(content.Body) is { } fileReceipt && content.ReplyTo is { } carried
-                 && _sessions.Get(content.ToEndpoint) is { } owner)
+                 && _sessions.Get(content.ToAgent) is { } owner)
         {
             owner.Push(new LocalEvent(LocalEventKinds.FileReceipt, FileReceipt: new LocalFileReceipt(carried, fileReceipt.BlobId,
-                WireProtocol.NameOf(fileReceipt.Receipt), fileReceipt.Reason, $"{message.FromName}/{content.FromEndpoint}")));
+                WireProtocol.NameOf(fileReceipt.Receipt), fileReceipt.Reason, $"{message.FromName}/{content.FromAgent}")));
         }
         else if (content.Type == MessageType.Receipt && Parse<ReceiptBody>(content.Body) is { } receipt && content.ReplyTo is { } about
-                 && _sessions.Get(content.ToEndpoint) is { } sender)
+                 && _sessions.Get(content.ToAgent) is { } sender)
         {
             sender.Push(new LocalEvent(LocalEventKinds.Receipt, Receipt: new LocalReceipt(about, WireProtocol.NameOf(receipt.Receipt), receipt.Reason,
-                $"{message.FromName}/{content.FromEndpoint}")));
+                $"{message.FromName}/{content.FromAgent}")));
         }
 
         return Task.CompletedTask;
     }
 
-    /// <summary>Pushes a stored message to its endpoint's stream and records that it was fetched.</summary>
-    internal void Deliver(EndpointSession session, StoredMessage stored, MessageContent? content = null)
+    /// <summary>Pushes a stored message to its agent's stream and records that it was fetched.</summary>
+    internal void Deliver(AgentSession session, StoredMessage stored, MessageContent? content = null)
     {
         content ??= _relay.Open(stored.Envelope!);
         if (session.Push(new LocalEvent(LocalEventKinds.Message, Message: ToLocal(stored, MessageDirection.In, content) with { State = MessageEvents.Fetched })))
@@ -346,7 +346,7 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
         {
             foreach (var m in messages.Where(m => tx.GetState(m.FromMachine, m.Id, MessageDirection.In) == MessageEvents.Stored))
             {
-                tx.AddEvent(m.FromMachine, m.Id, MessageDirection.In, m.ToEndpoint, MessageEvents.Fetched);
+                tx.AddEvent(m.FromMachine, m.Id, MessageDirection.In, m.ToAgent, MessageEvents.Fetched);
             }
         });
 
@@ -356,13 +356,13 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
     /// An agent takes the message on: records <c>acknowledged</c> and sends the receipt, once. Acknowledging
     /// again is harmless; a rejected or expired message can't be acknowledged.
     /// </summary>
-    internal async Task<StoredMessage> AcknowledgeAsync(string endpoint, Guid id, CancellationToken cancellationToken)
+    internal async Task<StoredMessage> AcknowledgeAsync(string agent, Guid id, CancellationToken cancellationToken)
     {
-        var stored = Store.FindIncoming(MachineId, endpoint, id) ?? throw new KeyNotFoundException($"no message {id} for endpoint '{endpoint}'");
+        var stored = Store.FindIncoming(MachineId, agent, id) ?? throw new KeyNotFoundException($"no message {id} for agent '{agent}'");
         await _relay.ResolveAsync(stored.FromMachine, cancellationToken);
         Store.Transact(Now, tx => Acknowledge(tx, stored));
         await _relay.FlushOutboxAsync(cancellationToken);
-        return Store.FindIncoming(MachineId, endpoint, id)!;
+        return Store.FindIncoming(MachineId, agent, id)!;
     }
 
     private void Acknowledge(StoreTransaction tx, StoredMessage stored)
@@ -378,16 +378,16 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
             throw new InvalidOperationException($"message {stored.Id} is {state}; it can't be acknowledged");
         }
 
-        tx.AddEvent(stored.FromMachine, stored.Id, MessageDirection.In, stored.ToEndpoint, MessageEvents.Acknowledged);
+        tx.AddEvent(stored.FromMachine, stored.Id, MessageDirection.In, stored.ToAgent, MessageEvents.Acknowledged);
         var content = _relay.Open(stored.Envelope!);
         ComposeReceipt(tx, stored.Envelope!, content, new ReceiptBody(ReceiptKind.Acknowledged));
     }
 
-    /// <summary>Replies to a message for <paramref name="endpoint"/>; replying acknowledges it too (once).</summary>
-    internal async Task<SentMessage> ReplyAsync(string endpoint, Guid id, OutgoingMessage reply, CancellationToken cancellationToken,
+    /// <summary>Replies to a message for <paramref name="agent"/>; replying acknowledges it too (once).</summary>
+    internal async Task<SentMessage> ReplyAsync(string agent, Guid id, OutgoingMessage reply, CancellationToken cancellationToken,
         IReadOnlyList<string>? files = null)
     {
-        var stored = Store.FindIncoming(MachineId, endpoint, id) ?? throw new KeyNotFoundException($"no message {id} for endpoint '{endpoint}'");
+        var stored = Store.FindIncoming(MachineId, agent, id) ?? throw new KeyNotFoundException($"no message {id} for agent '{agent}'");
         var content = _relay.Open(stored.Envelope!);
         var target = await _relay.ResolveAsync(stored.FromMachine, cancellationToken);
         if (files is { Count: > 0 })
@@ -397,10 +397,10 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
 
         var envelope = Store.Transact(Now, tx =>
         {
-            var sent = _relay.Compose(tx, target, content.FromEndpoint, RelayClient.ReplyTo(id, content, reply with { FromEndpoint = endpoint }));
+            var sent = _relay.Compose(tx, target, content.FromAgent, RelayClient.ReplyTo(id, content, reply with { FromAgent = agent }));
             if (content.ReplyTo is null && reply.Status is ReplyStatus.Done or ReplyStatus.Failed)
             {
-                tx.FinishOperation(stored.FromMachine, content.FromEndpoint, content.OperationId, sent.Id, Now + OperationWindow);
+                tx.FinishOperation(stored.FromMachine, content.FromAgent, content.OperationId, sent.Id, Now + OperationWindow);
             }
             if (!MessageEvents.IsFinal(tx.GetState(stored.FromMachine, stored.Id, MessageDirection.In)))
             {
@@ -412,11 +412,11 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
         return (await _relay.RelayComposedAsync([envelope], cancellationToken))[0];
     }
 
-    /// <summary>Sends from a local endpoint. An endpoint that sends is entered in the registry, so replies to it are held, not rejected.</summary>
+    /// <summary>Sends from a local agent. An agent that sends is entered in the registry, so replies to it are held, not rejected.</summary>
     internal async Task<IReadOnlyList<SentMessage>> SendAsync(IReadOnlyCollection<string> to, OutgoingMessage message, CancellationToken cancellationToken,
         IReadOnlyList<string>? files = null)
     {
-        var from = message.FromEndpoint ?? Address.DefaultEndpoint;
+        var from = message.FromAgent ?? Address.DefaultAgent;
         to = await ResolveAddressesAsync(to, from, cancellationToken);
         if (files is { Count: > 0 })
         {
@@ -431,29 +431,29 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
         }
 
         if (message is { OperationId: { } operation, ConversationId: null }
-            && Store.GetLog(MachineId, new LogQuery(Operation: operation, Endpoint: from, Limit: 1)).FirstOrDefault() is { } earlier)
+            && Store.GetLog(MachineId, new LogQuery(Operation: operation, Agent: from, Limit: 1)).FirstOrDefault() is { } earlier)
         {
             message = message with { ConversationId = earlier.ConversationId }; // a retry stays in the first attempt's conversation
         }
 
         Store.Transact(Now, tx =>
         {
-            if (tx.GetEndpoint(from) is null)
+            if (tx.GetAgent(from) is null)
             {
-                tx.SetEndpointState(from, EndpointState.Left);
+                tx.SetAgentState(from, AgentState.Left);
             }
         });
-        return await _relay.SendAsync(to, message with { FromEndpoint = from }, cancellationToken);
+        return await _relay.SendAsync(to, message with { FromAgent = from }, cancellationToken);
     }
 
-    // ---- the endpoint registry ----
+    // ---- the agent registry ----
 
-    /// <summary>Records a local endpoint's new state and announces the endpoint list to every online machine.</summary>
-    internal async Task SetEndpointStateAsync(string name, EndpointState state, IReadOnlyList<string>? roles = null)
+    /// <summary>Records a local agent's new state and announces the agent list to every online machine.</summary>
+    internal async Task SetAgentStateAsync(string name, AgentState state, IReadOnlyList<string>? roles = null)
     {
         Store.Transact(Now, tx =>
         {
-            tx.SetEndpointState(name, state, roles);
+            tx.SetAgentState(name, state, roles);
             if (!Stopping)
             {
                 ComposeAnnouncements(tx, null);
@@ -465,12 +465,12 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
         }
     }
 
-    /// <summary>Retires an endpoint: its messages get a <c>rejected</c> receipt from now on, and it drops out of the announcements.</summary>
+    /// <summary>Retires an agent: its messages get a <c>rejected</c> receipt from now on, and it drops out of the announcements.</summary>
     internal async Task<bool> RetireAsync(string name)
     {
         var retired = Store.Transact(Now, tx =>
         {
-            if (!tx.RetireEndpoint(name))
+            if (!tx.RetireAgent(name))
             {
                 return false;
             }
@@ -482,7 +482,7 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
         return retired;
     }
 
-    /// <summary>Sends this daemon's endpoint list to <paramref name="machines"/> (null: every online machine).</summary>
+    /// <summary>Sends this daemon's agent list to <paramref name="machines"/> (null: every online machine).</summary>
     internal async Task AnnounceAsync(IReadOnlyCollection<string>? machines)
     {
         if (!_relay.IsConnected)
@@ -502,16 +502,16 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
             return;
         }
 
-        var announcement = new EndpointAnnouncement(tx.NextCounter(AnnouncementCounter), [.. tx.GetEndpoints()
+        var announcement = new AgentAnnouncement(tx.NextCounter(AnnouncementCounter), [.. tx.GetAgents()
             .Where(e => e.RetiredOn is null)
-            .Select(e => new AnnouncedEndpoint(e.Name, _sessions.IsOnline(e.Name) ? EndpointState.Online : e.State == EndpointState.Online
-                ? EndpointState.TimedOut : e.State, e.ChangedOn, e.Roles is { Count: > 0 } r ? r : null))]);
+            .Select(e => new AnnouncedAgent(e.Name, _sessions.IsOnline(e.Name) ? AgentState.Online : e.State == AgentState.Online
+                ? AgentState.TimedOut : e.State, e.ChangedOn, e.Roles is { Count: > 0 } r ? r : null))]);
         var body = JsonSerializer.Serialize(announcement, WireProtocol.Json);
         foreach (var machine in targets)
         {
             try
             {
-                _relay.Compose(tx, machine, Address.DaemonEndpoint, Automatic(body, MessageType.Endpoint) with { FromEndpoint = Address.DaemonEndpoint });
+                _relay.Compose(tx, machine, Address.DaemonAgent, Automatic(body, MessageType.Agent) with { FromAgent = Address.DaemonAgent });
             }
             catch (InvalidOperationException e)
             {
@@ -533,9 +533,9 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
             return;
         }
 
-        _relay.Compose(tx, sender, content.FromEndpoint, Automatic(body, type) with
+        _relay.Compose(tx, sender, content.FromAgent, Automatic(body, type) with
         {
-            FromEndpoint = content.ToEndpoint,
+            FromAgent = content.ToAgent,
             ConversationId = content.ConversationId,
             ReplyTo = envelope.Id,
         });
@@ -556,8 +556,8 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
         content ??= _relay.Open(stored.Envelope!);
         var incoming = direction == MessageDirection.In;
         var to = RoomAddress.TryParse(stored.ToMachine, out var roomId) ? $"room:{Store.GetRoom(roomId)?.Snapshot.Name ?? roomId.ToString()}"
-            : $"{NameOf(stored.ToMachine)}/{content.ToEndpoint}";
-        return new LocalMessage(stored.Id, stored.FromMachine, $"{NameOf(stored.FromMachine)}/{content.FromEndpoint}", to, incoming ? "in" : "out", content.ConversationId, content.ReplyTo, content.OperationId,
+            : $"{NameOf(stored.ToMachine)}/{content.ToAgent}";
+        return new LocalMessage(stored.Id, stored.FromMachine, $"{NameOf(stored.FromMachine)}/{content.FromAgent}", to, incoming ? "in" : "out", content.ConversationId, content.ReplyTo, content.OperationId,
             content.Status is { } s ? WireProtocol.NameOf(s) : null, content.Subject, WireProtocol.NameOf(content.Type), content.ContentType,
             content.Metadata, content.Body, content.CreatedOn, stored.ExpiresOn, stored.State, stored.StateDetail,
             content.Attachments is { Count: > 0 } ? AttachmentsOf(stored, direction) : null);
@@ -566,7 +566,7 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
     internal string NameOf(string machineId) => _relay.Machine(machineId)?.Name ?? machineId[..Math.Min(8, machineId.Length)];
 
     internal LocalSent ToLocal(SentMessage sent) =>
-        new(sent.Id, $"{NameOf(sent.ToMachine)}/{sent.ToEndpoint}", sent.ConversationId, sent.Sequence, sent.ExpiresOn,
+        new(sent.Id, $"{NameOf(sent.ToMachine)}/{sent.ToAgent}", sent.ConversationId, sent.Sequence, sent.ExpiresOn,
             sent.State is { } state ? WireProtocol.NameOf(state) : "outbox");
 
     internal void Diagnose(string level, string category, string detail, string? machine = null, Guid? messageId = null)

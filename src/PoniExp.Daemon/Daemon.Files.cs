@@ -7,9 +7,9 @@ namespace PoniExp.Daemon;
 
 /// <summary>
 /// Files (see docs/plan.md, Phase 6). A file is uploaded once, shared with exactly the machines its messages
-/// go to. On a receiving machine the daemon fetches a blob once, however many local endpoints received it,
+/// go to. On a receiving machine the daemon fetches a blob once, however many local agents received it,
 /// keeps one verified copy under <c>&lt;home&gt;/files/&lt;blob&gt;/</c>, sends a signed file receipt for every
-/// message that carried it, and deletes the copy when every one of those endpoints has released it.
+/// message that carried it, and deletes the copy when every one of those agents has released it.
 /// </summary>
 public sealed partial class Daemon
 {
@@ -44,11 +44,11 @@ public sealed partial class Daemon
 
     /// <summary>
     /// Fetches a received message's files (or one of them) to this machine, verified, and returns where they are.
-    /// A blob another endpoint already fetched isn't fetched again. Acknowledging doesn't fetch; fetching doesn't release.
+    /// A blob another agent already fetched isn't fetched again. Acknowledging doesn't fetch; fetching doesn't release.
     /// </summary>
-    internal async Task<IReadOnlyList<LocalAttachment>> FetchAsync(string endpoint, Guid id, Guid? blobId, CancellationToken cancellationToken)
+    internal async Task<IReadOnlyList<LocalAttachment>> FetchAsync(string agent, Guid id, Guid? blobId, CancellationToken cancellationToken)
     {
-        var stored = Store.FindIncoming(MachineId, endpoint, id) ?? throw new KeyNotFoundException($"no message {id} for endpoint '{endpoint}'");
+        var stored = Store.FindIncoming(MachineId, agent, id) ?? throw new KeyNotFoundException($"no message {id} for agent '{agent}'");
         if (stored.Envelope is not { } envelope)
         {
             throw new InvalidOperationException($"message {id}'s envelope was dropped by retention, and with it the file keys");
@@ -69,12 +69,12 @@ public sealed partial class Daemon
     }
 
     /// <summary>
-    /// An endpoint is done with a file it received. The local copy is deleted once every local endpoint that
+    /// An agent is done with a file it received. The local copy is deleted once every local agent that
     /// received it has released it.
     /// </summary>
-    internal IReadOnlyList<LocalAttachment> Release(string endpoint, Guid id, Guid? blobId)
+    internal IReadOnlyList<LocalAttachment> Release(string agent, Guid id, Guid? blobId)
     {
-        var stored = Store.FindIncoming(MachineId, endpoint, id) ?? throw new KeyNotFoundException($"no message {id} for endpoint '{endpoint}'");
+        var stored = Store.FindIncoming(MachineId, agent, id) ?? throw new KeyNotFoundException($"no message {id} for agent '{agent}'");
         var rows = Store.GetAttachments(stored.FromMachine, id).Where(a => a.Direction == MessageDirection.In && (blobId is null || a.BlobId == blobId)).ToList();
         if (rows.Count == 0)
         {
@@ -86,7 +86,7 @@ public sealed partial class Daemon
         {
             foreach (var row in rows.Where(row => tx.ReleaseAttachment(row.FromMachine, row.MessageId, row.BlobId)))
             {
-                tx.AddAttachmentEvent(row.FromMachine, row.MessageId, row.BlobId, MessageDirection.In, row.Endpoint, AttachmentEvents.Released);
+                tx.AddAttachmentEvent(row.FromMachine, row.MessageId, row.BlobId, MessageDirection.In, row.Agent, AttachmentEvents.Released);
             }
 
             foreach (var blob in rows.Select(r => r.BlobId).Distinct())
@@ -122,7 +122,7 @@ public sealed partial class Daemon
         {
             foreach (var row in tx.GetAttachmentsOf(blobId, MessageDirection.Out))
             {
-                tx.AddAttachmentEvent(row.FromMachine, row.MessageId, blobId, MessageDirection.Out, row.Endpoint, AttachmentEvents.Cancelled);
+                tx.AddAttachmentEvent(row.FromMachine, row.MessageId, blobId, MessageDirection.Out, row.Agent, AttachmentEvents.Cancelled);
             }
         });
     }
@@ -209,7 +209,7 @@ public sealed partial class Daemon
             ComposeAutomatic(tx, envelope, _relay.Open(envelope), JsonSerializer.Serialize(new FileReceiptBody(kind, blobId, reason), WireProtocol.Json),
                 MessageType.FileReceipt);
             tx.MarkFileReceiptSent(row.FromMachine, row.MessageId, blobId);
-            tx.AddAttachmentEvent(row.FromMachine, row.MessageId, blobId, MessageDirection.In, row.Endpoint,
+            tx.AddAttachmentEvent(row.FromMachine, row.MessageId, blobId, MessageDirection.In, row.Agent,
                 kind == FileReceiptKind.Downloaded ? AttachmentEvents.Verified : AttachmentEvents.DownloadFailed, reason);
         }
     }
@@ -230,7 +230,7 @@ public sealed partial class Daemon
             return;
         }
 
-        tx.AddAttachmentEvent(MachineId, about, receipt.BlobId, MessageDirection.Out, sent.FromEndpoint,
+        tx.AddAttachmentEvent(MachineId, about, receipt.BlobId, MessageDirection.Out, sent.FromAgent,
             receipt.Receipt == FileReceiptKind.Downloaded ? AttachmentEvents.Downloaded : AttachmentEvents.DownloadFailed, receipt.Reason);
     }
 

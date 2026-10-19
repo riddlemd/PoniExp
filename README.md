@@ -16,7 +16,7 @@ another directly: laptops behind VPNs, hotel Wi-Fi or NAT just connect out.
 ```
 
 On each machine a **daemon** owns that one connection. Agents talk to their machine's daemon (an MCP
-server, the CLI, or the local API) as **endpoints**: `machine/endpoint`, e.g. `wojtek/hermes-default`.
+server, the CLI, or the local API) as **agents**: `machine/agent`, e.g. `wojtek/hermes-default`.
 
 ## How trust works
 
@@ -114,10 +114,10 @@ lingering systemd user unit on Linux. `--dry-run` shows what it would do; `servi
 
 ## Agents (MCP)
 
-Each agent is an endpoint. Give it the MCP server, as its own endpoint name:
+Each agent is an agent. Give it the MCP server, as its own agent name:
 
 ```json
-{ "mcpServers": { "poniexp": { "command": "poniexp-client", "args": ["mcp", "--endpoint", "claude"] } } }
+{ "mcpServers": { "poniexp": { "command": "poniexp-client", "args": ["mcp", "--agent", "claude"] } } }
 ```
 
 Tools: `send`, `attach`, `reply`, `ack`, `inbox`, `fetch`, `release`, `rooms`, `room`, `room_send`, `room_create`, `conversations`, `conversation`, `message`, `machines`, `status`. The agent
@@ -126,7 +126,7 @@ sender sees each step:
 
 - **received**: the recipient's machine stored it (even if the agent is offline);
 - **acknowledged**: the agent took it on (`ack`, or a reply);
-- **rejected**: no such endpoint on that machine (never registered, or retired), with the reason.
+- **rejected**: no such agent on that machine (never registered, or retired), with the reason.
 
 A reply's `status` (`progress`, `done`, `failed`) is the outcome of the work, separate from delivery.
 A conversation is `finished` once its last message is a `done` or `failed` reply; after a restart,
@@ -140,7 +140,7 @@ sender gets a file receipt, `downloaded` or `download-failed` (with why). Call `
 the copy is deleted once every agent that received it has released it. Acknowledging doesn't
 release, and files need the router to be reachable (they don't wait in the outbox).
 
-**Roles and groups.** An endpoint declares roles when it starts (`mcp --endpoint claude --role
+**Roles and groups.** An agent declares roles when it starts (`mcp --agent claude --role
 reviewer`, `listen --role gpu`); other machines learn them from its daemon's signed announcements.
 Send to `role:reviewer` (any one holder, an online one first) or `role:reviewer/all` (each of
 them). The owner keeps groups on the router (`poniexp admin group set oncall wojtek/agent
@@ -148,7 +148,7 @@ role:gpu/all`); `group:oncall` becomes one separate message per member.
 
 **Rooms.** A room is a standing conversation whose members all see its messages:
 `room create launch --as ops --member wojtek/agent --member role:gpu/all`, then `room send`,
-`room read` (or the MCP `room` tools; new ones also arrive on the endpoint's stream). Its admins
+`room read` (or the MCP `room` tools; new ones also arrive on the agent's stream). Its admins
 change it (`room add|remove|admin|close`); any member can `room leave`. Each message is encrypted
 once, for exactly the current members' machines, so someone removed can't read what comes after,
 and someone added sees only what's said after they join. Rooms have no receipts and no inbox, and
@@ -163,24 +163,24 @@ recognised for the maximum expiry plus clock skew (7 days and 5 minutes by defau
 ## From the command line
 
 ```sh
-poniexp-client status                                  # this machine, its endpoints, message metrics
-poniexp-client machines                                # the others, and their endpoints' states
+poniexp-client status                                  # this machine, its agents, message metrics
+poniexp-client machines                                # the others, and their agents' states
 poniexp-client send --to wojtek/agent "hello"          # "pushed", "queued" (wojtek offline) or "outbox" (router unreachable)
 poniexp-client send --to wojtek --to blinky "hi both"  # one separate message per recipient
 poniexp-client send --to wojtek --from ops --subject sync --expires 2h --meta priority=high "sync please"
 echo '{"task":"sync"}' | poniexp-client send --to wojtek/agent --content-type application/json -
-poniexp-client inbox --endpoint ops                    # messages for "ops" not yet acknowledged
-poniexp-client reply <id> --endpoint ops --status done "finished"
-poniexp-client message <id> --endpoint ops             # its delivery history
-poniexp-client listen --endpoint ops [--ack] [--json]  # be "ops": print messages and receipts as they arrive
-poniexp-client endpoint list | endpoint retire <name>  # the endpoint registry
+poniexp-client inbox --agent ops                    # messages for "ops" not yet acknowledged
+poniexp-client reply <id> --agent ops --status done "finished"
+poniexp-client message <id> --agent ops             # its delivery history
+poniexp-client listen --agent ops [--ack] [--json]  # be "ops": print messages and receipts as they arrive
+poniexp-client agent list | agent retire <name>  # the agent registry
 poniexp-client diagnostics                             # recent connection and delivery problems
 poniexp-client send --to wojtek/agent --attach report.pdf "the report"   # uploaded once, for all --to
-poniexp-client fetch <id> --endpoint agent             # download a message's files; prints their paths
-poniexp-client release <id> --endpoint agent           # done with them
+poniexp-client fetch <id> --agent claude            # download a message's files; prints their paths
+poniexp-client release <id> --agent claude          # done with them
 poniexp-client blobs | cancel <blob-id>                # files this machine uploaded; cancel one
-poniexp-client conversations --endpoint ops            # its conversations, most recent first
-poniexp-client log --peer wojtek --since 2d            # the message log; also --conversation, --operation, --endpoint
+poniexp-client conversations --agent ops            # its conversations, most recent first
+poniexp-client log --peer wojtek --since 2d            # the message log; also --conversation, --operation, --agent
 poniexp-client log --export log.jsonl [--bodies]       # JSONL, metadata only unless --bodies (then in the clear)
 ```
 
@@ -194,7 +194,7 @@ apply without a restart:
 ```json
 {
   "Messaging": { "DefaultExpiry": "7.00:00:00", "MaxExpiry": "7.00:00:00", "ClockSkew": "00:05:00" },
-  "Daemon": { "EndpointTimeout": "00:00:45", "AutomaticExpiry": "01:00:00" },
+  "Daemon": { "AgentTimeout": "00:00:45", "AutomaticExpiry": "01:00:00" },
   "Retention": { "Envelopes": "90.00:00:00", "Metadata": "365.00:00:00", "Diagnostics": "30.00:00:00", "MaxDatabaseBytes": 1073741824 }
 }
 ```
@@ -202,8 +202,8 @@ apply without a restart:
 `--home <dir>` (or `PONIEXP_HOME`) picks another home than `~/.poniexp`; each home has its own keys,
 database and daemon.
 
-From code, talk to the daemon with `PoniExp.Client.LocalApiClient` (and `EndpointConnection` to be an
-endpoint), or use `RelayClient` directly for a process that is the machine's only connection.
+From code, talk to the daemon with `PoniExp.Client.LocalApiClient` (and `AgentConnection` to be an
+agent), or use `RelayClient` directly for a process that is the machine's only connection.
 
 ## Delivery
 
@@ -213,11 +213,11 @@ endpoint), or use `RelayClient` directly for a process that is the machine's onl
 - The recipient stores each message in its client database (`<home>/client.db`) before **confirming**
   it to the router, so a crash mid-delivery means a redelivery, not a loss. A message already stored
   is recognised and dropped (and gets no second receipt).
-- Receipts and endpoint announcements are messages too, signed and encrypted, written in the same
+- Receipts and agent announcements are messages too, signed and encrypted, written in the same
   transaction as what caused them. Nothing automatic is ever sent in reply to something automatic.
 - Each sender numbers its messages per recipient machine; gaps (messages that never arrived) show up
   in `poniexp-client status`.
-- Daemons reconnect forever, re-prove their key on each reconnect, and announce their endpoints to
+- Daemons reconnect forever, re-prove their key on each reconnect, and announce their agents to
   every machine that comes online.
 
 ## Layout
@@ -228,7 +228,7 @@ endpoint), or use `RelayClient` directly for a process that is the machine's onl
 | `src/PoniExp.Secrets` | Where private keys are kept: DPAPI, the macOS keychain (interop ported from Git Credential Manager, see `THIRD-PARTY-NOTICES.md`), owner-only files. |
 | `src/PoniExp.Server` | `poniexp`: the server executable. `poniexp router` runs the relay (SignalR hub, machine list, queue); `poniexp admin` manages it. Container image. |
 | `src/PoniExp.Client` | `RelayClient`: connect, prove the key, join, compose into the outbox, relay, receive. `ClientStore`: the client database. `LocalApiClient`: the daemon's local API. |
-| `src/PoniExp.Daemon` | The daemon: routing to endpoints, receipts, endpoint announcements, the local API (named pipe / Unix socket), service installation. |
+| `src/PoniExp.Daemon` | The daemon: routing to agents, receipts, agent announcements, the local API (named pipe / Unix socket), service installation. |
 | `src/PoniExp.Mcp` | The MCP server (stdio) agents use. |
 | `src/PoniExp.Cli` | `poniexp-client`: the command line each machine uses. |
 | `tests/PoniExp.Tests` | Signing tests, and end-to-end tests against a real router and real daemons. |

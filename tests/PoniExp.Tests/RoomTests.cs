@@ -16,10 +16,10 @@ public class RoomTests
         await using var ise = await DaemonFixture.StartAsync(router, "ise");
         await using var wojtek = await DaemonFixture.StartAsync(router, "wojtek");
         await using var blinky = await DaemonFixture.StartAsync(router, "blinky");
-        await using var online = new EndpointConnection(wojtek.Api, "rev", _ => Task.CompletedTask, roles: ["reviewer", "gpu"]);
+        await using var online = new AgentConnection(wojtek.Api, "rev", _ => Task.CompletedTask, roles: ["reviewer", "gpu"]);
         await online.Registered.WaitAsync(TimeSpan.FromSeconds(10));
         await RegisterAndLeaveAsync(blinky, "rev2", ["reviewer"]); // a holder, but offline
-        await RouterFixture.EventuallyAsync(async () => (await ise.Api.MachinesAsync()).SelectMany(m => m.Endpoints)
+        await RouterFixture.EventuallyAsync(async () => (await ise.Api.MachinesAsync()).SelectMany(m => m.Agents)
             .Count(e => e.Roles?.Contains("reviewer") == true) == 2);
 
         var one = Assert.Single(await ise.Api.SendAsync(new LocalSendRequest("ops", ["role:reviewer"], "review this")));
@@ -27,7 +27,7 @@ public class RoomTests
         var all = await ise.Api.SendAsync(new LocalSendRequest("ops", ["role:reviewer/all"], "everyone review"));
         Assert.Equal(["blinky/rev2", "wojtek/rev"], all.Select(s => s.To).Order());
         var missing = await Assert.ThrowsAsync<LocalApiException>(() => ise.Api.SendAsync(new LocalSendRequest("ops", ["role:nobody"], "?")));
-        Assert.Contains("no endpoint declares the role 'nobody'", missing.Message);
+        Assert.Contains("no agent declares the role 'nobody'", missing.Message);
     }
 
     // ---- groups ----
@@ -41,7 +41,7 @@ public class RoomTests
         await using var blinky = await DaemonFixture.StartAsync(router, "blinky");
         await RegisterAndLeaveAsync(wojtek, "agent");
         await RegisterAndLeaveAsync(blinky, "bot", ["gpu"]);
-        await RouterFixture.EventuallyAsync(async () => (await ise.Api.MachinesAsync()).SelectMany(m => m.Endpoints).Any(e => e.Roles?.Contains("gpu") == true));
+        await RouterFixture.EventuallyAsync(async () => (await ise.Api.MachinesAsync()).SelectMany(m => m.Agents).Any(e => e.Roles?.Contains("gpu") == true));
         router.Admin.SetGroup("team", ["wojtek/agent", "role:gpu/all"]);
         Assert.Throws<PoniExp.Server.RouterException>(() => router.Admin.SetGroup("nested", ["group:team"]));
         Assert.Throws<PoniExp.Server.RouterException>(() => router.Admin.SetGroup("ghost", ["nobody/agent"]));
@@ -69,7 +69,7 @@ public class RoomTests
         await KnowsRoomAsync(wojtek, room.Id, 1);
         await KnowsRoomAsync(blinky, room.Id, 1);
         var events = new List<LocalEvent>();
-        await using (var listening = new EndpointConnection(wojtek.Api, "agent", e => { lock (events) { events.Add(e); } return Task.CompletedTask; }))
+        await using (var listening = new AgentConnection(wojtek.Api, "agent", e => { lock (events) { events.Add(e); } return Task.CompletedTask; }))
         {
             await listening.Registered.WaitAsync(TimeSpan.FromSeconds(10));
             var sent = await ise.Api.SendToRoomAsync("release", new LocalRoomSend("ops", "ship it?"));
@@ -134,8 +134,8 @@ public class RoomTests
         var current = wojtek.Store.GetRoom(room.Id)!.Snapshot;
         var forged = current with { Version = 2, Members = [.. current.Members, $"{wojtek.Keys.MachineId}/sneaky"], Admins = [.. current.Admins, $"{wojtek.Keys.MachineId}/agent"] };
         var iseInfo = await wojtek.Daemon.Relay.ResolveAsync("ise");
-        wojtek.Store.Transact(DateTimeOffset.UtcNow, tx => wojtek.Daemon.Relay.Compose(tx, iseInfo, Address.DaemonEndpoint,
-            new OutgoingMessage(JsonSerializer.Serialize(forged, WireProtocol.Json)) { FromEndpoint = "agent", Type = MessageType.Room, ContentType = "application/json" }));
+        wojtek.Store.Transact(DateTimeOffset.UtcNow, tx => wojtek.Daemon.Relay.Compose(tx, iseInfo, Address.DaemonAgent,
+            new OutgoingMessage(JsonSerializer.Serialize(forged, WireProtocol.Json)) { FromAgent = "agent", Type = MessageType.Room, ContentType = "application/json" }));
         await wojtek.Daemon.Relay.FlushOutboxAsync();
         await RouterFixture.Eventually(() => ise.Store.GetDiagnostics().Any(d => d.Detail.Contains("isn't an admin", StringComparison.Ordinal)));
         Assert.Equal(1, ise.Store.GetRoom(room.Id)!.Snapshot.Version);
@@ -190,9 +190,9 @@ public class RoomTests
     private static Task KnowsRoomAsync(DaemonFixture daemon, Guid room, long version) =>
         RouterFixture.Eventually(() => daemon.Store.GetRoom(room)?.Snapshot.Version == version);
 
-    private static async Task RegisterAndLeaveAsync(DaemonFixture daemon, string endpoint, IReadOnlyList<string>? roles = null)
+    private static async Task RegisterAndLeaveAsync(DaemonFixture daemon, string agent, IReadOnlyList<string>? roles = null)
     {
-        await using var connection = new EndpointConnection(daemon.Api, endpoint, _ => Task.CompletedTask, roles: roles);
+        await using var connection = new AgentConnection(daemon.Api, agent, _ => Task.CompletedTask, roles: roles);
         await connection.Registered.WaitAsync(TimeSpan.FromSeconds(10));
     }
 }

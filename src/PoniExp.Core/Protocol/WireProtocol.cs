@@ -9,7 +9,7 @@ public static class WireProtocol
     /// Checked when a connection says hello. Both sides must match exactly: the message format is not
     /// negotiated, so an older or newer client gets a clear "upgrade" refusal instead of garbled messages.
     /// </summary>
-    /// 4: Hello returns the router's time and clock-skew tolerance; receipt and endpoint message bodies.
+    /// 4: Hello returns the router's time and clock-skew tolerance; receipt and agent message bodies.
     /// 5: attachments (encrypted blobs) and file receipts.
     /// 6: roles in announcements, rooms (fanned-out room envelopes, room snapshots), groups.
     public const int Version = 6;

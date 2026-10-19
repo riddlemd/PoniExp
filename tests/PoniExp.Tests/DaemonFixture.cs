@@ -44,7 +44,7 @@ public sealed class DaemonFixture : IAsyncDisposable
     public static IDictionary<string, string?> FastSettings() => new Dictionary<string, string?>
     {
         ["Daemon:SweepInterval"] = "00:00:00.100",
-        ["Daemon:EndpointTimeout"] = "00:00:02",
+        ["Daemon:AgentTimeout"] = "00:00:02",
         ["Daemon:StreamKeepAlive"] = "00:00:00.500",
         ["Daemon:ConnectRetry"] = "00:00:00.200",
     };

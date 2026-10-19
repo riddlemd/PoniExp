@@ -11,16 +11,16 @@ public sealed class DaemonOptions
 {
     public const string Section = "Daemon";
 
-    /// <summary>An endpoint that sends no heartbeat for this long is timed out.</summary>
-    public TimeSpan EndpointTimeout { get; set; } = TimeSpan.FromSeconds(45);
+    /// <summary>An agent that sends no heartbeat for this long is timed out.</summary>
+    public TimeSpan AgentTimeout { get; set; } = TimeSpan.FromSeconds(45);
 
-    /// <summary>How long automatic messages (receipts, endpoint announcements) live. They are never retried after.</summary>
+    /// <summary>How long automatic messages (receipts, agent announcements) live. They are never retried after.</summary>
     public TimeSpan AutomaticExpiry { get; set; } = TimeSpan.FromHours(1);
 
-    /// <summary>How often the daemon checks for timed-out endpoints, expired messages and the outbox.</summary>
+    /// <summary>How often the daemon checks for timed-out agents, expired messages and the outbox.</summary>
     public TimeSpan SweepInterval { get; set; } = TimeSpan.FromSeconds(5);
 
-    /// <summary>How often an endpoint's stream gets a keep-alive comment.</summary>
+    /// <summary>How often an agent's stream gets a keep-alive comment.</summary>
     public TimeSpan StreamKeepAlive { get; set; } = TimeSpan.FromSeconds(15);
 
     /// <summary>How long to wait before trying the router again when it can't be reached at start.</summary>
@@ -43,9 +43,9 @@ public sealed class DaemonOptionsValidator : IValidateOptions<DaemonOptions>
             errors.Add("Daemon:SweepInterval must be positive.");
         }
 
-        if (options.EndpointTimeout <= options.SweepInterval)
+        if (options.AgentTimeout <= options.SweepInterval)
         {
-            errors.Add("Daemon:EndpointTimeout must be longer than SweepInterval.");
+            errors.Add("Daemon:AgentTimeout must be longer than SweepInterval.");
         }
 
         if (options.AutomaticExpiry <= TimeSpan.Zero)

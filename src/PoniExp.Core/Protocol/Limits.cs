@@ -23,12 +23,12 @@ public static partial class Limits
     /// </summary>
     public const int MaxContentBytes = MaxBodyBytes * 6 + 64 * 1024;
 
-    public const string EndpointRule = "1-64 lowercase letters, digits, '.', '_' or '-', starting with a letter or digit";
+    public const string AgentRule = "1-64 lowercase letters, digits, '.', '_' or '-', starting with a letter or digit";
 
     /// <summary>Lowercase letters, digits and dashes, starting with a letter: e.g. "ise", "wojtek".</summary>
     public static bool IsValidName(string? name) => name is not null && NamePattern().IsMatch(name);
 
-    public static bool IsValidEndpoint(string? endpoint) => endpoint is not null && EndpointPattern().IsMatch(endpoint);
+    public static bool IsValidAgent(string? agent) => agent is not null && AgentPattern().IsMatch(agent);
 
     public static bool IsValidMetadataKey(string? key) => key is not null && MetadataKeyPattern().IsMatch(key);
 
@@ -40,7 +40,7 @@ public static partial class Limits
     private static partial Regex NamePattern();
 
     [GeneratedRegex("^[a-z0-9][a-z0-9._-]{0,63}$")]
-    private static partial Regex EndpointPattern();
+    private static partial Regex AgentPattern();
 
     [GeneratedRegex("^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")]
     private static partial Regex MetadataKeyPattern();

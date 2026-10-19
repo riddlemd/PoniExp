@@ -29,7 +29,7 @@ public enum MessageType
     Message,
     Receipt,
     FileReceipt,
-    Endpoint,
+    Agent,
     /// <summary>A room's membership snapshot, daemon to daemon (see <see cref="RoomSnapshot"/>).</summary>
     Room,
 }
@@ -63,12 +63,12 @@ public sealed record JoinRequest(
     string Signature);
 
 /// <summary>
-/// The part of a message only the two endpoints need. It travels encrypted (see <see cref="Envelope.Ciphertext"/>):
+/// The part of a message only the two agents need. It travels encrypted (see <see cref="Envelope.Ciphertext"/>):
 /// the router never sees it.
 /// </summary>
 public sealed record MessageContent(
-    string FromEndpoint,
-    string ToEndpoint,
+    string FromAgent,
+    string ToAgent,
     Guid ConversationId,
     Guid? ReplyTo,
     Guid OperationId,
@@ -182,11 +182,11 @@ public sealed record PresenceChange(string MachineId, string Name, bool Online, 
 /// <summary>Which delivery receipt (see <see cref="ReceiptBody"/>).</summary>
 public enum ReceiptKind
 {
-    /// <summary>The recipient's machine has stored the message, whether or not the endpoint is online.</summary>
+    /// <summary>The recipient's machine has stored the message, whether or not the agent is online.</summary>
     Received,
     /// <summary>An agent has taken the message on (an explicit ack, or a reply).</summary>
     Acknowledged,
-    /// <summary>The recipient's machine won't deliver it (e.g. unknown endpoint). Sent instead of Received.</summary>
+    /// <summary>The recipient's machine won't deliver it (e.g. unknown agent). Sent instead of Received.</summary>
     Rejected,
 }
 
@@ -196,8 +196,8 @@ public enum ReceiptKind
 /// </summary>
 public sealed record ReceiptBody(ReceiptKind Receipt, string? Reason = null);
 
-/// <summary>An endpoint's state as its daemon announces it.</summary>
-public enum EndpointState
+/// <summary>An agent's state as its daemon announces it.</summary>
+public enum AgentState
 {
     Online,
     /// <summary>Unregistered cleanly.</summary>
@@ -206,22 +206,22 @@ public enum EndpointState
     TimedOut,
 }
 
-/// <summary>An endpoint as its daemon announces it, with the roles it declared (see docs/plan.md, Roles).</summary>
-public sealed record AnnouncedEndpoint(string Name, EndpointState State, DateTimeOffset ChangedOn, IReadOnlyList<string>? Roles = null);
+/// <summary>An agent as its daemon announces it, with the roles it declared (see docs/plan.md, Roles).</summary>
+public sealed record AnnouncedAgent(string Name, AgentState State, DateTimeOffset ChangedOn, IReadOnlyList<string>? Roles = null);
 
 /// <summary>
-/// The body of a <see cref="MessageType.Endpoint"/> message (JSON): the announcing daemon's complete list of
-/// endpoints (retired ones are left out). <see cref="Counter"/> only ever increases per daemon, so a
+/// The body of a <see cref="MessageType.Agent"/> message (JSON): the announcing daemon's complete list of
+/// agents (retired ones are left out). <see cref="Counter"/> only ever increases per daemon, so a
 /// receiver keeps the newest list and ignores a replayed or late one.
 /// </summary>
-public sealed record EndpointAnnouncement(long Counter, IReadOnlyList<AnnouncedEndpoint> Endpoints);
+public sealed record AgentAnnouncement(long Counter, IReadOnlyList<AnnouncedAgent> Agents);
 
-/// <summary>An owner-defined group: a named list of addresses (<c>machine/endpoint</c> or <c>role:...</c>), by machine name.</summary>
+/// <summary>An owner-defined group: a named list of addresses (<c>machine/agent</c> or <c>role:...</c>), by machine name.</summary>
 public sealed record GroupInfo(string Name, IReadOnlyList<string> Members);
 
 /// <summary>
 /// The body of a <see cref="MessageType.Room"/> message (JSON): a room's complete membership as of
-/// <see cref="Version"/>. Members and admins are <c>machineId/endpoint</c>. A machine applies it only if it is
+/// <see cref="Version"/>. Members and admins are <c>machineId/agent</c>. A machine applies it only if it is
 /// newer than what it has and comes from an admin of the room as it knows it (or is a member leaving).
 /// </summary>
 public sealed record RoomSnapshot(Guid RoomId, string Name, long Version, IReadOnlyList<string> Members, IReadOnlyList<string> Admins, bool Closed = false);
@@ -231,8 +231,8 @@ public static class RoomAddress
 {
     public const string Prefix = "room:";
 
-    /// <summary>The endpoint a room message's content names: the room as a whole.</summary>
-    public const string Endpoint = "room";
+    /// <summary>The agent a room message's content names: the room as a whole.</summary>
+    public const string Agent = "room";
 
     public static string Of(Guid roomId) => Prefix + roomId.ToString("D");
 

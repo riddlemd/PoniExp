@@ -46,7 +46,7 @@ scripts/publish.sh win-x64 linux-x64                  # self-contained single-fi
   `ClientStore.Transact`, then `FlushOutboxAsync`. Whatever a message causes (its event, a receipt, an
   announcement) is composed in the transaction that records the cause, so it is sent exactly once
   even across a crash. Never call the hub's `Send` directly.
-- **Automatic messages** (`receipt`, `file-receipt`, `endpoint`) are the daemon's: never answered by
+- **Automatic messages** (`receipt`, `file-receipt`, `agent`) are the daemon's: never answered by
   anything automatic, short expiry (`Daemon:AutomaticExpiry`), never shown to agents.
 - **`RelayClient.IsConnected` means authenticated on this connection,** not just a live socket: the
   router refuses anything sent between a reconnect and re-authentication.

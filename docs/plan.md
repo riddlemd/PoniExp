@@ -21,7 +21,7 @@ only has to build on the ones before it; a protection that arrives in a later ph
 - **Messages (phases 1-2):** format v2/v3, one recipient each, signed over every field and encrypted
   end to end; expiry, replay and sequence checks on the recipient by its own clock.
 - **Delivery:** queued for offline machines (7 days), kept until the recipient confirms them.
-- **Daemon (phase 3):** the machine's one connection; local API over a pipe or socket; endpoints with
+- **Daemon (phase 3):** the machine's one connection; local API over a pipe or socket; agents with
   heartbeats and announcements; `received` / `acknowledged` / `rejected` receipts; the outbox; MCP
   server; `doctor`; `service install` in user and system modes; self-contained single-file builds.
 - **Presence:** who's online, pushed to every machine.
@@ -33,7 +33,7 @@ only has to build on the ones before it; a protection that arrives in a later ph
   the daemon), `log` with filters and JSONL export, retention with a size cap, the router's traffic
   log (`admin traffic-log`).
 - **Files (phase 6):** blobs encrypted in 4 MB AES-GCM chunks with an encrypted manifest, uploaded once
-  per send and shared with its recipients' machines; tickets; verified fetch shared by local endpoints;
+  per send and shared with its recipients' machines; tickets; verified fetch shared by local agents;
   file receipts; release; limits with per-machine overrides; the message queue's own cap; `send/reply
   --attach`, `fetch`, `release`, `blobs`, `cancel`, `listen --auto-fetch`; MCP `attach`, `fetch`, `release`;
   `admin blobs`. Protocol 5.
@@ -52,27 +52,28 @@ only has to build on the ones before it; a protection that arrives in a later ph
 | Encryption | End to end ("option B"). **Everything that can be encrypted is**; the server sees only what routing needs. |
 | Keys | Two per machine: the identity key (signing) and an encryption key (ECDH P-256), signed by the identity key. Rotating the encryption key doesn't change the machine's identity. |
 | `operationId` | Not a nonce: a nonce must never repeat, while `operationId` deliberately repeats across retries of one action. Optional; defaults to the message id. |
-| Addressing | A daemon per machine owns the only connection; agents are addressed as `machine/endpoint`. |
-| Recipients | Every message has exactly one recipient (`machine/endpoint`). Sending to several means sending separate messages, each with its own id, sequence, envelope and log entry; no message names another recipient. A file is uploaded once and shared with all the recipients it is sent to (phase 6). |
-| Not multi-tenant | A message, and the conversation it belongs to, is between one sender endpoint and one recipient endpoint. A send to several starts a separate conversation with each. Conversations with several members come with groups and rooms (phase 7). |
+| Addressing | A daemon per machine owns the only connection; agents are addressed as `machine/agent`. |
+| Recipients | Every message has exactly one recipient (`machine/agent`). Sending to several means sending separate messages, each with its own id, sequence, envelope and log entry; no message names another recipient. A file is uploaded once and shared with all the recipients it is sent to (phase 6). |
+| Not multi-tenant | A message, and the conversation it belongs to, is between one sender agent and one recipient agent. A send to several starts a separate conversation with each. Conversations with several members come with groups and rooms (phase 7). |
 | Success path | A message is assumed to be going fine unless the recipient returns a failure. Replies carry `progress`, `done` or `failed`; there is no "accepted". |
 | Separate tracks | Three things are tracked separately and never share a field: **delivery** of a message (receipts `received`, `acknowledged`, `rejected`), the **outcome** of the work it asked for (a reply's `status`), and **file transfer** (file receipts `downloaded`, `download-failed`). A reply's `status` is only ever about the work. |
-| Message types | `type` is protocol level and hard-coded: a closed C# enum (`message`, `receipt`, `file-receipt`, `endpoint`, later `job`, `room`) that only PoniExp defines, because it decides how the daemon handles a message. Higher-level protocols between agents are not types: they ride on `type: message`, defined by its `contentType`, `metadata` and `body`, which agents are free to fill as they like. There is no reply type: a reply is a `message` with `replyTo` set. |
-| Endpoint registry | Every endpoint that has ever registered with a daemon is remembered (`endpoints`). Registered but not connected is **offline**: its messages wait until it returns or they expire. Never registered, or retired with `poniexp-client endpoint retire <name>`, is **unknown**: the message gets a `rejected` receipt. |
-| Automatic messages | `receipt`, `file-receipt` and `endpoint` are automatic. Nothing automatic is ever sent in response to something automatic; they expire after a short time (default 1 hour, a setting) and aren't retried after that; at most one goes out per message per event. They get rows in `messages` (so duplicates and sequence numbers work as for any message) but are never shown to agents. An expired message sends nothing back: the sender marks it `expired` by its own clock. |
-| Hermes bridge | One endpoint per Hermes profile, named `hermes-<profile>` (e.g. `wojtek/hermes-default`), since each profile has its own memory, skills and gateway. Each has its own gateway URL (configuration) and its own A2A token, registered with that profile's Hermes and kept in PoniExp's secret store. |
+| Message types | `type` is protocol level and hard-coded: a closed C# enum (`message`, `receipt`, `file-receipt`, `agent`, later `job`, `room`) that only PoniExp defines, because it decides how the daemon handles a message. Higher-level protocols between agents are not types: they ride on `type: message`, defined by its `contentType`, `metadata` and `body`, which agents are free to fill as they like. There is no reply type: a reply is a `message` with `replyTo` set. |
+| Agent registry | Every agent that has ever registered with a daemon is remembered (`agents`). Registered but not connected is **offline**: its messages wait until it returns or they expire. Never registered, or retired with `poniexp-client agent retire <name>`, is **unknown**: the message gets a `rejected` receipt. |
+| Automatic messages | `receipt`, `file-receipt` and `agent` are automatic. Nothing automatic is ever sent in response to something automatic; they expire after a short time (default 1 hour, a setting) and aren't retried after that; at most one goes out per message per event. They get rows in `messages` (so duplicates and sequence numbers work as for any message) but are never shown to agents. An expired message sends nothing back: the sender marks it `expired` by its own clock. |
+| Hermes bridge | One agent per Hermes profile, named `hermes-<profile>` (e.g. `wojtek/hermes-default`), since each profile has its own memory, skills and gateway. Each has its own gateway URL (configuration) and its own A2A token, registered with that profile's Hermes and kept in PoniExp's secret store. |
 | Daemon start-up | Two modes. **User mode** runs at logon as the user: the per-user `Run` registry key (Windows; a logon task would need admin), a LaunchAgent (macOS), a systemd user unit (Linux). **System mode** runs at boot: a Windows service under its own virtual account `NT SERVICE\PoniExp` (keys in that account's DPAPI, data in `%ProgramData%\PoniExp`, the local pipe restricted to the owning user; never a "do not store password" task), a macOS LaunchDaemon (keys in the System keychain), a systemd user unit with `loginctl enable-linger` (Linux). |
 | Connection limits | By what a connection has proved, because behind port forwarding (Rancher Desktop) every client arrives from the same address. A connection that hasn't proved a key, or whose key is neither approved nor pending, must authenticate within 10 s, and at most 20 such connections exist at once. An approved or pending machine may hold at most 5 connections. At most 10 new join requests per hour across the router. Per-address limits (10 unauthenticated connections, 5 join requests an hour) apply on top, except to `SharedAddresses`: addresses known to stand for many clients, such as the port forwarder's. All of these are settings. |
 | Backups | `poniexp admin backup` writes the TLS certificate (with its private key) and the approved machines to one owner-only file, or to stdout, for the owner to keep (e.g. as a Bitwarden attachment). `admin restore` puts them back. Queued messages, files and the traffic log aren't backed up. |
 | Event integrity | Client events aren't hash-chained: a local process could rewrite a whole chain anyway (Local trust), and the signed envelopes already prove what was said. |
-| Doing a request once | A retry is a message with the same `operationId` from the same sender endpoint. The recipient's daemon handles it, and the agent never sees a duplicate. While the first is still running (no `done` or `failed` reply yet), the daemon answers with a `progress` reply, "still running". Once it's finished, it re-sends a copy of the final reply. `operationId` defaults to the message id, so only deliberate retries are deduplicated. The record is kept for the maximum expiry plus skew. |
+| Doing a request once | A retry is a message with the same `operationId` from the same sender agent. The recipient's daemon handles it, and the agent never sees a duplicate. While the first is still running (no `done` or `failed` reply yet), the daemon answers with a `progress` reply, "still running". Once it's finished, it re-sends a copy of the final reply. `operationId` defaults to the message id, so only deliberate retries are deduplicated. The record is kept for the maximum expiry plus skew. |
 | Log export | `poniexp-client log --export` writes metadata only; `--bodies` decrypts bodies into it (they are then on disk in the clear). |
 | Traffic log | Off by default (`poniexp admin traffic-log on`), kept 30 days. Besides what the server can see about each message (time, sender and recipient machine, id, size, sequence), it records the event (relayed, delivered, confirmed, expired, refused) and refusals with their reason (bad signature, limits, join requests), so delays and attacks show. |
-| Roles | Self-declared per endpoint, carried in the signed endpoint announcements (phase 7). Labels for addressing only: permissions are per machine (phase 9). |
-| Permission level | Machines only. No per-endpoint keys or permissions: an endpoint is a name any local process may use, so separating agents takes separate machines (or containers, each its own machine). |
-| Rooms | Named (unique on the router while live), created by any agent; members invite, invitees accept, members leave; no admins, no removals. Membership is a log of signed events the router keeps and orders and can see (endpoints included); each message's key is wrapped for exactly the current members' machines, checked by the router. A room collapses when empty or idle (`RoomIdleExpiry`); the router then keeps only stats (no subjects or bodies). |
+| Roles | Self-declared per agent, carried in the signed agent announcements (phase 7). Labels for addressing only: permissions are per machine (phase 9). |
+| Permission level | Machines only. No per-agent keys or permissions: an agent is a name any local process may use, so separating agents takes separate machines (or containers, each its own machine). |
+| Naming | What was called an endpoint is an **agent**: addresses are `machine/agent`, flags `--agent`, the automatic announcement type `agent`. Agent names are labels, not identities. |
+| Rooms | Named (unique on the router while live), created by any agent; members invite, invitees accept, members leave; no admins, no removals. Membership is a log of signed events the router keeps and orders and can see (agents included); each message's key is wrapped for exactly the current members' machines, checked by the router. A room collapses when empty or idle (`RoomIdleExpiry`); the router then keeps only stats (no subjects or bodies). |
 | Groups | Owner-defined lists of addresses on the router (`admin group`), resolved by the sender's daemon into separate messages. |
-| Local trust | Every local process running as the machine's user is trusted; it could read the user's keys anyway. The daemon scopes what each endpoint is shown, but that is convenience, not a security boundary. |
+| Local trust | Every local process running as the machine's user is trusted; it could read the user's keys anyway. The daemon scopes what each agent is shown, but that is convenience, not a security boundary. |
 | Storage | SQLite, bundled in the app (`Microsoft.Data.Sqlite`). Nothing for the user to install. |
 | Client database | One SQLite database per machine (see Client database below). Each table is created by the phase that first needs it. |
 | Confirming | The client stores a message before confirming it to the server. A crash in between causes a redelivery, never a loss; the redelivered copy is recognised as a duplicate and dropped. |
@@ -90,8 +91,8 @@ only has to build on the ones before it; a protection that arrives in a later ph
 ## Client database
 
 One SQLite database per machine. Only the daemon (before phase 3, the CLI) writes to it; agents
-read it through the daemon's local API. Each agent is shown only its own endpoint's messages
-(scoping, not a security boundary; see Local trust). One database per machine, with endpoint
+read it through the daemon's local API. Each agent is shown only its own agent's messages
+(scoping, not a security boundary; see Local trust). One database per machine, with agent
 columns, not one per agent.
 
 The phase that creates each table is in brackets. Columns are a draft; see Open questions.
@@ -101,7 +102,7 @@ three messages and three rows. Written once, never edited (except dropping the e
 end of its retention).
 - Keyed by `(from_machine, id)`. This row is also the replay protection: a message whose key is
   already here is a duplicate. There is no separate `processed` table.
-- `from_machine`, `from_endpoint`, `to_machine`, `to_endpoint`
+- `from_machine`, `from_agent`, `to_machine`, `to_agent`
 - `conversation_id`, `reply_to`, `operation_id`, `type`, `status`, `content_type`, `subject`,
   `sequence`
 - `created_on` (sender, signed), `relayed_on` (server), `stored_on` (local), `expires_on` (after
@@ -124,7 +125,7 @@ each was last seen.
 `message_events` (phase 3): append-only. Delivery only; the outcome of the work lives in replies,
 and files have their own events.
 - `from_machine`, `message_id`, `direction` (in or out: a message a machine sends itself has both),
-  `endpoint`, `event`, `occurred_on`, `detail`
+  `agent`, `event`, `occurred_on`, `detail`
 - Inbound: `stored` (`received` sent) → `fetched` → `acknowledged` (sent), or `rejected` (sent,
   with a reason) / `expired` (nothing sent; see Automatic messages).
 - Outbound: `queued` → `relayed` → `received` → `acknowledged`, or `rejected` (by the recipient,
@@ -136,13 +137,13 @@ transaction as the event. A late event never moves it back (a `received` after `
 final one (`rejected`, `failed`, `expired`) is never left.
 
 `bridge_tasks` (phase 12): for messages delivered through the Hermes bridge, `message_id`,
-`a2a_task_id`, `context_id`, the peer (`machine/endpoint`) the task belongs to, and the task's last
+`a2a_task_id`, `context_id`, the peer (`machine/agent`) the task belongs to, and the task's last
 known state.
 
-`endpoints` (phase 3): every endpoint that has registered with this daemon: `name`, `registered_on`,
-`last_seen_on`, `retired_on`. The endpoint registry (see Endpoint registry).
+`agents` (phase 3): every agent that has registered with this daemon: `name`, `registered_on`,
+`last_seen_on`, `retired_on`. The agent registry (see Agent registry).
 
-`peer_endpoints` (phase 3): what other machines have announced: `machine`, `endpoint`, `state`
+`peer_agents` (phase 3): what other machines have announced: `machine`, `agent`, `state`
 (online, left, timed out), `counter` (the announcing daemon's), `changed_on`. Each announcement is
 the machine's complete list, so a newer one replaces all of that machine's rows; `peer_counters`
 keeps the highest counter seen per machine, and a lower or equal one is ignored.
@@ -154,11 +155,11 @@ keeps the highest counter seen per machine, and a lower or equal one is ignored.
   related message or machine.
 
 `conversations` (phase 5)
-- `id`, `subject`, `local_endpoint`, `peer` (the one `machine/endpoint` on the other side),
+- `id`, `subject`, `local_agent`, `peer` (the one `machine/agent` on the other side),
   `started_by`, `started_on`, `last_activity_on`, `state`
 
 `operations` (phase 5): doing a request once.
-- Keyed by `(from_machine, from_endpoint, operation_id)`.
+- Keyed by `(from_machine, from_agent, operation_id)`.
 - `state` (running or done), `result_message_id`, `keep_until`.
 - A retry while running gets "still running"; a retry after it's done gets the stored result.
 
@@ -170,7 +171,7 @@ keeps the highest counter seen per machine, and a lower or equal one is ignored.
 - `message_id`, `blob_id`, `name`
 
 `attachment_events` (phase 6): append-only, the file track, separate from message delivery.
-- `message_id`, `blob_id`, `endpoint`, `event`, `occurred_on`, `detail`
+- `message_id`, `blob_id`, `agent`, `event`, `occurred_on`, `detail`
 - Inbound: `fetched` → `verified` (`downloaded` sent) → `released` (the agent is done with it), or
   `download-failed` (sent, with a reason).
 - Outbound: `uploaded` → `downloaded`, or `download-failed` (with the recipient's reason) /
@@ -184,8 +185,8 @@ keeps the highest counter seen per machine, and a lower or equal one is ignored.
 The message format changes here and again in phase 2. Nothing has joined yet, so both changes are
 free.
 
-**Addressing:** `to` and `from` are `machine/endpoint`. The server routes to the machine; the
-recipient's daemon routes to the endpoint. A message has exactly one recipient; sending to several
+**Addressing:** `to` and `from` are `machine/agent`. The server routes to the machine; the
+recipient's daemon routes to the agent. A message has exactly one recipient; sending to several
 sends one message to each (see Recipients).
 
 **Visible to the server** (needed for routing and expiry):
@@ -202,7 +203,7 @@ sends one message to each (see Recipients).
 
 | Field | Purpose |
 |---|---|
-| `fromEndpoint`, `toEndpoint` | The agent on each machine. |
+| `fromAgent`, `toAgent` | The agent on each machine. |
 | `conversationId` | Groups an exchange into a thread; replies inherit it. |
 | `replyTo` | The message id this answers. |
 | `operationId` | The same across retries of one action, so the recipient does it once. |
@@ -306,11 +307,11 @@ is what bounds its replay window, so it doesn't take the relay's value on trust.
 ## Phase 3: Daemon and MCP (done)
 
 Agents on different machines talk through their daemons, with MCP as the agents' interface. Adds
-`message_events`, `message_state`, `endpoints`, `peer_endpoints` and `diagnostics` to the client
+`message_events`, `message_state`, `agents`, `peer_agents` and `diagnostics` to the client
 database. Pushing messages into Hermes (the Hermes bridge) is phase 12.
 
 - **`poniexp-client daemon`:** the machine's only connection to the server. It handles local
-  routing to endpoints, the outbox, and the client database.
+  routing to agents, the outbox, and the client database.
   - **Outbox:** a message sent while the router is unreachable waits in the outbox. One whose expiry
     passes before it is relayed is marked `expired` instead: its `createdOn` is signed and the
     recipient's clamp counts from it, so relaying it late would only get it refused.
@@ -318,34 +319,34 @@ database. Pushing messages into Hermes (the Hermes bridge) is phase 12.
   Hermes bridge.
 - **`poniexp-client mcp`** (stdio). Tools: `send`, `reply`, `ack`, `inbox`, `conversation`,
   `message` (one message and its delivery history), `machines`, `status`; later `attach` and `fetch`.
-- **Endpoint announcements:** an endpoint (an MCP server, the Hermes bridge, a CLI `listen`)
+- **Agent announcements:** an agent (an MCP server, the Hermes bridge, a CLI `listen`)
   registers with its daemon by name and keeps the registration alive with a heartbeat.
-  - The daemon announces each change to every approved machine: an endpoint came **online**,
+  - The daemon announces each change to every approved machine: an agent came **online**,
     **left** (unregistered cleanly), or **timed out** (missed its heartbeat).
-  - Announcements are messages of type `endpoint`, encrypted and signed like any other, one per
-    machine (endpoint names are encrypted, so the server can't carry them in its presence list).
+  - Announcements are messages of type `agent`, encrypted and signed like any other, one per
+    machine (agent names are encrypted, so the server can't carry them in its presence list).
     They are automatic (see Automatic messages).
   - Each carries the announcing daemon's counter, which only ever increases. A receiver keeps only
-    the newest per machine (`peer_endpoints`), so a replayed or late "left" can't override a newer
+    the newest per machine (`peer_agents`), so a replayed or late "left" can't override a newer
     "online".
   - When the server reports another machine coming online, the daemon sends it its full current
-    endpoint list, so a machine that was away catches up.
-  - When a machine goes offline, all its endpoints count as offline.
-  - The MCP `machines` tool shows each machine's endpoints and their state.
-  - A message for an endpoint that is offline is held by the recipient's daemon until the endpoint
-    returns or the message expires. A message for an unknown endpoint (never registered, or retired
-    with `poniexp-client endpoint retire <name>`) gets a `rejected` receipt ("unknown endpoint").
+    agent list, so a machine that was away catches up.
+  - When a machine goes offline, all its agents count as offline.
+  - The MCP `machines` tool shows each machine's agents and their state.
+  - A message for an agent that is offline is held by the recipient's daemon until the agent
+    returns or the message expires. A message for an unknown agent (never registered, or retired
+    with `poniexp-client agent retire <name>`) gets a `rejected` receipt ("unknown agent").
 - **Receipts:** delivery only, each sent by the recipient as a signed, encrypted message of type
   `receipt`, so the server can't fake any of them. The outcome of the work comes back separately,
   as a reply with a `status`.
   - **`received`:** the recipient's machine has picked the message up. The daemon sends it once the
     message has passed its checks (signature, expiry, duplicate) and is stored, whether or not the
-    endpoint is online.
+    agent is online.
   - **`acknowledged`:** an agent has actually taken the message on. Fetching a message isn't
     enough; the agent acknowledges it explicitly (the MCP `ack` tool, or the local API). Replying
     acknowledges too. For the Hermes bridge, see phase 12.
   - **`rejected`:** the recipient's machine won't deliver it, with a reason (e.g. "unknown
-    endpoint"). Sent instead of `received`.
+    agent"). Sent instead of `received`.
 - **`poniexp-client doctor`:** checks reachability, the certificate pin, clock skew against the
   server's tolerance, membership and the daemon.
 - **`status`** (CLI and MCP) also shows the `metrics` counters.
@@ -365,13 +366,13 @@ database. Pushing messages into Hermes (the Hermes bridge) is phase 12.
   elevated prompt; and nothing on macOS (no Mac to hand). Their plans are covered by tests only.
 - **Done when:**
   - An agent on one machine, through MCP, holds a conversation with an agent on another.
-  - Tests show an endpoint's online, left and timed-out states reaching another machine, a machine
-    that was offline catching up on reconnect, and a message to an unknown endpoint getting a
+  - Tests show an agent's online, left and timed-out states reaching another machine, a machine
+    that was offline catching up on reconnect, and a message to an unknown agent getting a
     `rejected` receipt, before and after it is retired.
   - Tests show a replayed or late announcement with a lower counter being ignored, a message whose
     expiry passes in the outbox being marked `expired` and never relayed, and nothing automatic sent
     in reply to something automatic.
-  - Tests show `received` arriving while the recipient endpoint is offline, `acknowledged`
+  - Tests show `received` arriving while the recipient agent is offline, `acknowledged`
     arriving only after the agent acknowledges or replies (not when it merely fetches), and no
     second `received` for a duplicate.
 
@@ -426,7 +427,7 @@ What it's for:
 A conversation's `state` is derived: `open`, or `finished` once its last message is a reply with
 status `done` or `failed` (a later message reopens it).
 
-**CLI:** `poniexp-client log` by conversation, operation, peer or endpoint, with a JSONL export
+**CLI:** `poniexp-client log` by conversation, operation, peer or agent, with a JSONL export
 (`--export`, metadata only unless `--bodies`).
 
 **Done when:**
@@ -442,7 +443,7 @@ status `done` or `failed` (a later message reopens it).
 
 - Off by default; `poniexp admin traffic-log on|off`, with its own retention.
 - Records only what the server can see: `occurred_on`, sender machine, recipient machine, message
-  id, size, sequence. Endpoints are encrypted, so the log shows which machines talk, not which
+  id, size, sequence. Agents are encrypted, so the log shows which machines talk, not which
   agents.
 
 ## Phase 6: Encrypted files (done)
@@ -475,7 +476,7 @@ database.
   - A blob is readable only by its sender and the machines it is shared with.
   - Recipients aren't told who else a blob is shared with: status, tickets and refusals they see
     never list the other machines. (The server knows, as it routes every message anyway.)
-- **Several endpoints on one machine:** if more than one local endpoint receives a message for the
+- **Several agents on one machine:** if more than one local agent receives a message for the
   same blob, the daemon fetches it once, verifies it once and keeps one local copy.
 - **File receipts:** separate from message receipts and from a reply's `status`. Sent by the
   recipient as signed, encrypted messages of type `file-receipt`, one per message that carried the
@@ -484,7 +485,7 @@ database.
   - **`download-failed`:** with a reason (chunk or hash mismatch, blob expired, cancelled by the
     sender, over a limit).
 - **Local copy:** an agent is done with a file when it releases it (the MCP `release` tool or the
-  local API). The local copy is deleted when every local endpoint that received it has released
+  local API). The local copy is deleted when every local agent that received it has released
   it, or when its retention passes (as for envelopes: 90 days, or earlier under the size cap).
   Acknowledging the message doesn't release the file: that's when the agent starts using it.
 - **Deletion:**
@@ -511,8 +512,8 @@ database.
   - `poniexp admin blobs [clear --for <machine>]`
 - **MCP:** `attach`, `fetch` and `release`.
 - **Done when:** tests show a `downloaded` receipt after a verified fetch, a `download-failed`
-  receipt for a tampered chunk and for a cancelled blob, one fetch for several local endpoints,
-  and the local copy surviving acknowledgement and being deleted only after every local endpoint
+  receipt for a tampered chunk and for a cancelled blob, one fetch for several local agents,
+  and the local copy surviving acknowledgement and being deleted only after every local agent
   has released it.
 
 ## Phase 7: Rooms, roles and groups (workshop; rooms being revised)
@@ -522,10 +523,10 @@ rooms have no shared key.
 
 ### Roles
 
-- A role is a tag on an **endpoint** (`reviewer`, `gpu`), same rules as an endpoint name. An endpoint
-  declares its roles when it registers (`mcp --endpoint claude --role reviewer`,
-  `listen --role ...`). They're kept in the endpoint registry and travel in the daemon's signed
-  endpoint announcement, so the router can't invent or hide a holder. Phase 9 may restrict who can
+- A role is a tag on an **agent** (`reviewer`, `gpu`), same rules as an agent name. An agent
+  declares its roles when it registers (`mcp --agent claude --role reviewer`,
+  `listen --role ...`). They're kept in the agent registry and travel in the daemon's signed
+  agent announcement, so the router can't invent or hide a holder. Phase 9 may restrict who can
   claim which role.
 - **Addressing:** `role:reviewer` is any one holder: the sender's daemon picks an online one (at
   random), otherwise the one seen most recently, and sends it an ordinary message. `role:reviewer/all`
@@ -533,7 +534,7 @@ rooms have no shared key.
 
 ### Groups
 
-- A named list of addresses (`machine/endpoint` or `role:...`), set by the owner:
+- A named list of addresses (`machine/agent` or `role:...`), set by the owner:
   `poniexp admin group set <name> <address>...`, `group remove`, `groups`. Kept in `router.db`.
 - `group:<name>` is resolved by the sender's daemon into separate messages, one per member (roles
   expanded as above). A group isn't a room: its members don't see each other.
@@ -544,22 +545,22 @@ rooms have no shared key.
 
 Revised after review (the first build used admins and versioned snapshots; that is replaced).
 
-- **A room** is a standing, many-sided conversation between endpoints, with a **name unique on the
+- **A room** is a standing, many-sided conversation between agents, with a **name unique on the
   router while the room is live** and addressable as `room:<name>`. **Any agent can create one.**
   There are no admins, and no one can remove anyone: **members invite, invitees accept, members
   leave.** (Start a new room to be rid of someone.)
 - **Membership is a log of signed events**, kept and ordered by the router:
   - `create` (by the creator, who is the first member), `invite`, `join` (by the invitee, accepting) and
     `leave`.
-  - Each event is signed by its author's machine key and names the author endpoint, so the router can't
+  - Each event is signed by its author's machine key and names the author agent, so the router can't
     forge or alter one, only withhold it.
-  - An invite counts only from a member at that point in the log; a join only from an invited endpoint;
+  - An invite counts only from a member at that point in the log; a join only from an invited agent;
     a leave only from a member.
   - Every member machine (and an invitee's) gets the log, checks it from `create` on, and derives the
     members from it. A member is whoever has joined (or created the room) and hasn't left.
   - Invites are pending until accepted, and an agent declines by ignoring the invite (it expires).
-- **The router sees the membership:** which endpoints are in which room, and when they joined and left.
-  That is a deliberate exception to "the router sees machines, not endpoints", needed for unique names
+- **The router sees the membership:** which agents are in which room, and when they joined and left.
+  That is a deliberate exception to "the router sees machines, not agents", needed for unique names
   and for collapsing empty rooms.
 - **Messages:** one envelope per room message, addressed to the room, its content key wrapped for
   exactly the current members' machines. The router fans it out, and **refuses an envelope not wrapped
@@ -608,9 +609,9 @@ Open:
 ## Phase 9: Permissions and approval cards (workshop)
 
 - Deny by default, Cotal-style: which machines may send to which machines, and which may post or
-  claim which jobs. **Permissions are per machine only.** Endpoints have no keys, and any local
-  process can use any endpoint name (local processes are trusted), so a rule about endpoints or
-  roles couldn't be enforced. Endpoint names and roles stay labels for addressing, logs and stats.
+  claim which jobs. **Permissions are per machine only.** Agents have no keys, and any local
+  process can use any agent name (local processes are trusted), so a rule about agents or
+  roles couldn't be enforced. Agent names and roles stay labels for addressing, logs and stats.
 - **Approval cards** are part of the permission logic: a request outside the rules is held, and a
   card goes to wherever you're active, approved with Touch ID using the owner key.
 - This phase introduces the owner identity.
@@ -652,10 +653,10 @@ so choosing the session is the gateway's job, not the bridge's.
   | `completed` | a reply with `status: done`, carrying the agent's answer |
   | `failed`, `rejected`, `canceled` | a reply with `status: failed` |
 
-- The A2A `contextId` is derived from the peer (`machine/endpoint`) **and** the `conversationId`,
+- The A2A `contextId` is derived from the peer (`machine/agent`) **and** the `conversationId`,
   so a conversation stays one multi-turn exchange inside Hermes. The sender chooses the
   `conversationId`, so using it alone would let another machine join someone else's conversation.
-- The A2A message carries the PoniExp message id, sender (`machine/endpoint`) and conversation id
+- The A2A message carries the PoniExp message id, sender (`machine/agent`) and conversation id
   in its metadata, so the agent can use the MCP tools on it (e.g. `reply`).
 - The A2A task id is stored in `bridge_tasks`. After a restart the bridge picks the task up again
   (`tasks/subscribe`, or `tasks/get` for one that has already finished), so no receipt or reply

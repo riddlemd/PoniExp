@@ -13,7 +13,7 @@ public class MessagingTests
     private static readonly TimeSpan Slack = TimeSpan.FromMinutes(1);
 
     [Fact]
-    public async Task RepliesStayInTheConversationAndGoBackToTheSendingEndpoint()
+    public async Task RepliesStayInTheConversationAndGoBackToTheSendingAgent()
     {
         await using var router = await RouterFixture.StartAsync();
         var (ise, iseKey) = await router.MemberAsync("ise");
@@ -23,13 +23,13 @@ public class MessagingTests
 
         var sent = await ise.SendAsync("wojtek/agent", new OutgoingMessage("sync please")
         {
-            FromEndpoint = "cli",
+            FromAgent = "cli",
             Subject = "sync",
             ContentType = "application/json",
             Metadata = new Dictionary<string, string> { ["priority"] = "high" },
         });
         var original = await request;
-        Assert.Equal(("cli", "agent", "sync", "high"), (original.Content.FromEndpoint, original.Content.ToEndpoint, original.Content.Subject,
+        Assert.Equal(("cli", "agent", "sync", "high"), (original.Content.FromAgent, original.Content.ToAgent, original.Content.Subject,
             original.Content.Metadata["priority"]));
         Assert.Equal(sent.Id, original.Content.OperationId); // the operation id defaults to the message id
 
@@ -38,7 +38,7 @@ public class MessagingTests
 
         Assert.Equal(iseKey.MachineId, answer.Envelope.ToMachine);
         Assert.Equal((sent.Id, original.Content.ConversationId), (answer.Content.ReplyTo!.Value, answer.Content.ConversationId));
-        Assert.Equal(("agent", "cli", ReplyStatus.Done), (answer.Content.FromEndpoint, answer.Content.ToEndpoint, answer.Content.Status!.Value));
+        Assert.Equal(("agent", "cli", ReplyStatus.Done), (answer.Content.FromAgent, answer.Content.ToAgent, answer.Content.Status!.Value));
     }
 
     [Fact]
@@ -48,7 +48,7 @@ public class MessagingTests
         var (ise, _) = await router.MemberAsync("ise");
 
         await Assert.ThrowsAsync<ArgumentException>(() => ise.SendAsync("ise", new OutgoingMessage("x") { Status = ReplyStatus.Done }));
-        await Assert.ThrowsAsync<FormatException>(() => ise.SendAsync("ise/Bad Endpoint", new OutgoingMessage("x")));
+        await Assert.ThrowsAsync<FormatException>(() => ise.SendAsync("ise/Bad Agent", new OutgoingMessage("x")));
     }
 
     [Fact]
@@ -66,23 +66,23 @@ public class MessagingTests
         Assert.Equal(2, sent.Select(s => s.Id).Distinct().Count());
         Assert.All(sent, s => Assert.Equal(1, s.Sequence)); // each recipient machine has its own sequence
         var (w, b) = (await atWojtek, await atBlinky);
-        Assert.Equal((wojtekKey.MachineId, "default"), (w.Envelope.ToMachine, w.Content.ToEndpoint));
-        Assert.Equal((blinkyKey.MachineId, "agent"), (b.Envelope.ToMachine, b.Content.ToEndpoint));
+        Assert.Equal((wojtekKey.MachineId, "default"), (w.Envelope.ToMachine, w.Content.ToAgent));
+        Assert.Equal((blinkyKey.MachineId, "agent"), (b.Envelope.ToMachine, b.Content.ToAgent));
         Assert.NotEqual(w.Content.ConversationId, b.Content.ConversationId); // not multi-tenant
         await Assert.ThrowsAsync<ArgumentException>(() =>
             ise.SendAsync(["wojtek", "blinky"], new OutgoingMessage("x") { ConversationId = Guid.NewGuid() }));
     }
 
     [Fact]
-    public async Task AMachineCanMessageItsOwnEndpoints()
+    public async Task AMachineCanMessageItsOwnAgents()
     {
         await using var router = await RouterFixture.StartAsync();
         var (ise, _) = await router.MemberAsync("ise");
         var received = Wait.For<ReceivedMessage>(h => ise.MessageReceived += m => { h(m); return Task.CompletedTask; });
 
-        await ise.SendAsync("ise/agent", new OutgoingMessage("note to self") { FromEndpoint = "cli" });
+        await ise.SendAsync("ise/agent", new OutgoingMessage("note to self") { FromAgent = "cli" });
 
-        Assert.Equal(("cli", "agent", "note to self"), ((await received).Content.FromEndpoint, (await received).Content.ToEndpoint,
+        Assert.Equal(("cli", "agent", "note to self"), ((await received).Content.FromAgent, (await received).Content.ToAgent,
             (await received).Content.Body));
     }
 

@@ -11,10 +11,10 @@ public static class MessageRules
     /// <summary>Null if the content is well formed, otherwise why not.</summary>
     public static string? CheckContent(MessageContent content)
     {
-        if (!Limits.IsValidEndpoint(content.FromEndpoint) || !Limits.IsValidEndpoint(content.ToEndpoint)
-            || (content.ToEndpoint == RoomAddress.Endpoint && content.Type != MessageType.Message))
+        if (!Limits.IsValidAgent(content.FromAgent) || !Limits.IsValidAgent(content.ToAgent)
+            || (content.ToAgent == RoomAddress.Agent && content.Type != MessageType.Message))
         {
-            return $"an endpoint must be {Limits.EndpointRule}";
+            return $"an agent must be {Limits.AgentRule}";
         }
 
         if (!Enum.IsDefined(content.Type))

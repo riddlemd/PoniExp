@@ -8,7 +8,7 @@ namespace PoniExp.Client;
 /// <summary>
 /// This machine's client database (~/.poniexp/client.db): every message sent and received (the
 /// <c>messages</c> table, which is also the replay record), what happened to each (<c>message_events</c>,
-/// with the latest in <c>message_state</c>), sequence counters per peer machine, metrics, the endpoint
+/// with the latest in <c>message_state</c>), sequence counters per peer machine, metrics, the agent
 /// registry, what other machines have announced, and diagnostics. Messages are kept as their signed,
 /// encrypted envelopes; only routing and conversation metadata is in the clear, never a body.
 /// Several processes may use it at once: writes are short IMMEDIATE transactions and readers wait on a
@@ -24,9 +24,9 @@ public sealed class ClientStore
         CREATE TABLE IF NOT EXISTS messages (
             from_machine    TEXT NOT NULL,
             id              TEXT NOT NULL,
-            from_endpoint   TEXT NOT NULL,
+            from_agent   TEXT NOT NULL,
             to_machine      TEXT NOT NULL,
-            to_endpoint     TEXT NOT NULL,
+            to_agent     TEXT NOT NULL,
             conversation_id TEXT NOT NULL,
             reply_to        TEXT,
             operation_id    TEXT NOT NULL,
@@ -61,7 +61,7 @@ public sealed class ClientStore
             from_machine TEXT NOT NULL,
             message_id   TEXT NOT NULL,
             direction    TEXT NOT NULL,
-            endpoint     TEXT NOT NULL,
+            agent     TEXT NOT NULL,
             event        TEXT NOT NULL,
             occurred_on  TEXT NOT NULL,
             detail       TEXT
@@ -71,14 +71,14 @@ public sealed class ClientStore
             from_machine TEXT NOT NULL,
             message_id   TEXT NOT NULL,
             direction    TEXT NOT NULL,
-            endpoint     TEXT NOT NULL,
+            agent     TEXT NOT NULL,
             event        TEXT NOT NULL,
             occurred_on  TEXT NOT NULL,
             detail       TEXT,
             PRIMARY KEY (from_machine, message_id, direction)
         ) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS message_state_event ON message_state (direction, event);
-        CREATE TABLE IF NOT EXISTS endpoints (
+        CREATE TABLE IF NOT EXISTS agents (
             name          TEXT PRIMARY KEY,
             state         TEXT NOT NULL,
             registered_on TEXT NOT NULL,
@@ -86,13 +86,13 @@ public sealed class ClientStore
             changed_on    TEXT NOT NULL,
             retired_on    TEXT
         ) WITHOUT ROWID;
-        CREATE TABLE IF NOT EXISTS peer_endpoints (
+        CREATE TABLE IF NOT EXISTS peer_agents (
             machine    TEXT NOT NULL,
-            endpoint   TEXT NOT NULL,
+            agent   TEXT NOT NULL,
             state      TEXT NOT NULL,
             counter    INTEGER NOT NULL,
             changed_on TEXT NOT NULL,
-            PRIMARY KEY (machine, endpoint)
+            PRIMARY KEY (machine, agent)
         ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS peer_counters (
             machine TEXT PRIMARY KEY,
@@ -104,26 +104,26 @@ public sealed class ClientStore
         ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS conversations (
             id               TEXT NOT NULL,
-            local_endpoint   TEXT NOT NULL,
+            local_agent   TEXT NOT NULL,
             peer_machine     TEXT NOT NULL,
-            peer_endpoint    TEXT NOT NULL,
+            peer_agent    TEXT NOT NULL,
             subject          TEXT,
             started_by       TEXT NOT NULL,
             started_on       TEXT NOT NULL,
             last_activity_on TEXT NOT NULL,
             state            TEXT NOT NULL,
-            PRIMARY KEY (id, local_endpoint)
+            PRIMARY KEY (id, local_agent)
         ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS operations (
             from_machine      TEXT NOT NULL,
-            from_endpoint     TEXT NOT NULL,
+            from_agent     TEXT NOT NULL,
             operation_id      TEXT NOT NULL,
-            to_endpoint       TEXT NOT NULL,
+            to_agent       TEXT NOT NULL,
             first_message_id  TEXT NOT NULL,
             state             TEXT NOT NULL,
             result_message_id TEXT,
             keep_until        TEXT NOT NULL,
-            PRIMARY KEY (from_machine, from_endpoint, operation_id)
+            PRIMARY KEY (from_machine, from_agent, operation_id)
         ) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS messages_operation ON messages (operation_id);
         CREATE INDEX IF NOT EXISTS messages_stored_on ON messages (stored_on);
@@ -144,7 +144,7 @@ public sealed class ClientStore
             message_id   TEXT NOT NULL,
             blob_id      TEXT NOT NULL,
             direction    TEXT NOT NULL,
-            endpoint     TEXT NOT NULL,
+            agent     TEXT NOT NULL,
             name         TEXT NOT NULL,
             size         INTEGER NOT NULL,
             content_type TEXT NOT NULL,
@@ -158,7 +158,7 @@ public sealed class ClientStore
             message_id   TEXT NOT NULL,
             blob_id      TEXT NOT NULL,
             direction    TEXT NOT NULL,
-            endpoint     TEXT NOT NULL,
+            agent     TEXT NOT NULL,
             event        TEXT NOT NULL,
             occurred_on  TEXT NOT NULL,
             detail       TEXT
@@ -183,7 +183,7 @@ public sealed class ClientStore
         """;
 
     private const string MessageColumns = """
-        m.from_machine, m.id, m.envelope, m.from_endpoint, m.to_machine, m.to_endpoint, m.type, m.created_on, m.relayed_on,
+        m.from_machine, m.id, m.envelope, m.from_agent, m.to_machine, m.to_agent, m.type, m.created_on, m.relayed_on,
         m.stored_on, m.expires_on, s.event, s.occurred_on, s.detail
         """;
 
@@ -213,8 +213,8 @@ public sealed class ClientStore
 
         using var connection = Open();
         Execute(connection, null, Schema);
-        AddColumn(connection, "endpoints", "roles", "TEXT"); // schema 5
-        AddColumn(connection, "peer_endpoints", "roles", "TEXT");
+        AddColumn(connection, "agents", "roles", "TEXT"); // schema 5
+        AddColumn(connection, "peer_agents", "roles", "TEXT");
         Execute(connection, null, $"PRAGMA user_version = {SchemaVersion};");
     }
 
@@ -282,7 +282,7 @@ public sealed class ClientStore
 
     public IReadOnlyList<MessageEvent> GetEvents(string fromMachine, Guid id) =>
         Query("""
-            SELECT direction, endpoint, event, occurred_on, detail FROM message_events
+            SELECT direction, agent, event, occurred_on, detail FROM message_events
             WHERE from_machine = $from AND message_id = $id ORDER BY rowid;
             """, r => new MessageEvent(r.GetString(0) == "in" ? MessageDirection.In : MessageDirection.Out, r.GetString(1), r.GetString(2),
             Parse(r.GetString(3)), r.IsDBNull(4) ? null : r.GetString(4)), ("$from", fromMachine), ("$id", Id(id)));
@@ -297,51 +297,51 @@ public sealed class ClientStore
             """, ReadMessage, ("$me", me));
 
     /// <summary>
-    /// Messages for a local endpoint that no agent has acknowledged yet and that are still live (stored or
+    /// Messages for a local agent that no agent has acknowledged yet and that are still live (stored or
     /// fetched), oldest first. Only <see cref="MessageType.Message"/>: automatic messages are the daemon's.
     /// </summary>
-    public IReadOnlyList<StoredMessage> GetInbox(string me, string endpoint) =>
+    public IReadOnlyList<StoredMessage> GetInbox(string me, string agent) =>
         Query($"""
             SELECT {MessageColumns} FROM messages m
             JOIN message_state s ON s.from_machine = m.from_machine AND s.message_id = m.id AND s.direction = 'in'
-            WHERE m.to_machine = $me AND m.to_endpoint = $endpoint AND m.type = 'message'
+            WHERE m.to_machine = $me AND m.to_agent = $agent AND m.type = 'message'
                 AND s.event IN ('{MessageEvents.Stored}', '{MessageEvents.Fetched}')
             ORDER BY m.stored_on, m.sequence;
-            """, ReadMessage, ("$me", me), ("$endpoint", endpoint));
+            """, ReadMessage, ("$me", me), ("$agent", agent));
 
-    /// <summary>An incoming message for a local endpoint, found by id.</summary>
-    public StoredMessage? FindIncoming(string me, string endpoint, Guid id) =>
+    /// <summary>An incoming message for a local agent, found by id.</summary>
+    public StoredMessage? FindIncoming(string me, string agent, Guid id) =>
         Query($"""
             SELECT {MessageColumns} FROM messages m
             LEFT JOIN message_state s ON s.from_machine = m.from_machine AND s.message_id = m.id AND s.direction = 'in'
-            WHERE m.to_machine = $me AND m.to_endpoint = $endpoint AND m.id = $id AND m.type = 'message';
-            """, ReadMessage, ("$me", me), ("$endpoint", endpoint), ("$id", Id(id))).FirstOrDefault();
+            WHERE m.to_machine = $me AND m.to_agent = $agent AND m.id = $id AND m.type = 'message';
+            """, ReadMessage, ("$me", me), ("$agent", agent), ("$id", Id(id))).FirstOrDefault();
 
-    /// <summary>A message a local endpoint sent, found by id.</summary>
-    public StoredMessage? FindOutgoing(string me, string endpoint, Guid id) =>
+    /// <summary>A message a local agent sent, found by id.</summary>
+    public StoredMessage? FindOutgoing(string me, string agent, Guid id) =>
         Query($"""
             SELECT {MessageColumns} FROM messages m
             LEFT JOIN message_state s ON s.from_machine = m.from_machine AND s.message_id = m.id AND s.direction = 'out'
-            WHERE m.from_machine = $me AND m.from_endpoint = $endpoint AND m.id = $id AND m.type = 'message';
-            """, ReadMessage, ("$me", me), ("$endpoint", endpoint), ("$id", Id(id))).FirstOrDefault();
+            WHERE m.from_machine = $me AND m.from_agent = $agent AND m.id = $id AND m.type = 'message';
+            """, ReadMessage, ("$me", me), ("$agent", agent), ("$id", Id(id))).FirstOrDefault();
 
-    /// <summary>A conversation as one local endpoint sees it: the messages it sent and received in it, oldest first.</summary>
-    public IReadOnlyList<StoredMessage> GetConversation(string me, string endpoint, Guid conversationId) =>
+    /// <summary>A conversation as one local agent sees it: the messages it sent and received in it, oldest first.</summary>
+    public IReadOnlyList<StoredMessage> GetConversation(string me, string agent, Guid conversationId) =>
         Query($"""
             SELECT {MessageColumns} FROM messages m
             LEFT JOIN message_state s ON s.from_machine = m.from_machine AND s.message_id = m.id
-                AND s.direction = CASE WHEN m.to_machine = $me AND m.to_endpoint = $endpoint THEN 'in' ELSE 'out' END
+                AND s.direction = CASE WHEN m.to_machine = $me AND m.to_agent = $agent THEN 'in' ELSE 'out' END
             WHERE m.conversation_id = $conversation AND m.type = 'message'
-                AND ((m.to_machine = $me AND m.to_endpoint = $endpoint) OR (m.from_machine = $me AND m.from_endpoint = $endpoint))
+                AND ((m.to_machine = $me AND m.to_agent = $agent) OR (m.from_machine = $me AND m.from_agent = $agent))
             ORDER BY m.created_on, m.stored_on;
-            """, ReadMessage, ("$me", me), ("$endpoint", endpoint), ("$conversation", Id(conversationId)));
+            """, ReadMessage, ("$me", me), ("$agent", agent), ("$conversation", Id(conversationId)));
 
-    public IReadOnlyList<LocalEndpointRecord> GetEndpoints() =>
-        Query("SELECT name, state, registered_on, last_seen_on, changed_on, retired_on, roles FROM endpoints ORDER BY name;", ReadEndpoint);
+    public IReadOnlyList<LocalAgentRecord> GetAgents() =>
+        Query("SELECT name, state, registered_on, last_seen_on, changed_on, retired_on, roles FROM agents ORDER BY name;", ReadAgent);
 
-    public IReadOnlyList<PeerEndpoint> GetPeerEndpoints() =>
-        Query("SELECT machine, endpoint, state, counter, changed_on, roles FROM peer_endpoints ORDER BY machine, endpoint;",
-            r => new PeerEndpoint(r.GetString(0), r.GetString(1), ParseState(r.GetString(2)), r.GetInt64(3), Parse(r.GetString(4)), ReadRoles(r, 5)));
+    public IReadOnlyList<PeerAgent> GetPeerAgents() =>
+        Query("SELECT machine, agent, state, counter, changed_on, roles FROM peer_agents ORDER BY machine, agent;",
+            r => new PeerAgent(r.GetString(0), r.GetString(1), ParseState(r.GetString(2)), r.GetInt64(3), Parse(r.GetString(4)), ReadRoles(r, 5)));
 
     public IReadOnlyList<Diagnostic> GetDiagnostics(int limit = 50) =>
         Query("""
@@ -363,7 +363,7 @@ public sealed class ClientStore
 
     public IReadOnlyList<AttachmentEvent> GetAttachmentEvents(string fromMachine, Guid messageId) =>
         Query("""
-            SELECT blob_id, direction, endpoint, event, occurred_on, detail FROM attachment_events
+            SELECT blob_id, direction, agent, event, occurred_on, detail FROM attachment_events
             WHERE from_machine = $from AND message_id = $id ORDER BY rowid;
             """, r => new AttachmentEvent(Guid.Parse(r.GetString(0)), r.GetString(1) == "in" ? MessageDirection.In : MessageDirection.Out, r.GetString(2),
             r.GetString(3), Parse(r.GetString(4)), r.IsDBNull(5) ? null : r.GetString(5)), ("$from", fromMachine), ("$id", Id(messageId)));
@@ -387,7 +387,7 @@ public sealed class ClientStore
             r.IsDBNull(9) ? null : Parse(r.GetString(9)));
 
     internal const string AttachmentColumns = """
-        a.from_machine, a.message_id, a.blob_id, a.direction, a.endpoint, a.name, a.size, a.content_type, a.receipt_sent, a.released_on,
+        a.from_machine, a.message_id, a.blob_id, a.direction, a.agent, a.name, a.size, a.content_type, a.receipt_sent, a.released_on,
         (SELECT e.event FROM attachment_events e WHERE e.from_machine = a.from_machine AND e.message_id = a.message_id AND e.blob_id = a.blob_id
             ORDER BY e.rowid DESC LIMIT 1),
         (SELECT e.detail FROM attachment_events e WHERE e.from_machine = a.from_machine AND e.message_id = a.message_id AND e.blob_id = a.blob_id
@@ -425,14 +425,14 @@ public sealed class ClientStore
     internal static RoomRecord ReadRoom(SqliteDataReader r) =>
         new(JsonSerializer.Deserialize<RoomSnapshot>(r.GetString(0), WireProtocol.Json)!, r.GetString(1), Parse(r.GetString(2)), Parse(r.GetString(3)));
 
-    /// <summary>The conversations local endpoints have had, most recent first.</summary>
-    public IReadOnlyList<ConversationRecord> GetConversations(string? endpoint = null, int limit = 100) =>
+    /// <summary>The conversations local agents have had, most recent first.</summary>
+    public IReadOnlyList<ConversationRecord> GetConversations(string? agent = null, int limit = 100) =>
         Query("""
-            SELECT id, local_endpoint, peer_machine, peer_endpoint, subject, started_by, started_on, last_activity_on, state FROM conversations
-            WHERE $endpoint IS NULL OR local_endpoint = $endpoint ORDER BY last_activity_on DESC LIMIT $limit;
+            SELECT id, local_agent, peer_machine, peer_agent, subject, started_by, started_on, last_activity_on, state FROM conversations
+            WHERE $agent IS NULL OR local_agent = $agent ORDER BY last_activity_on DESC LIMIT $limit;
             """, r => new ConversationRecord(Guid.Parse(r.GetString(0)), r.GetString(1), r.GetString(2), r.GetString(3),
             r.IsDBNull(4) ? null : r.GetString(4), r.GetString(5), Parse(r.GetString(6)), Parse(r.GetString(7)), r.GetString(8)),
-            ("$endpoint", endpoint), ("$limit", limit));
+            ("$agent", agent), ("$limit", limit));
 
     public IReadOnlyList<OperationRecord> GetOperations() =>
         Query($"SELECT {OperationColumns} FROM operations ORDER BY keep_until;", ReadOperation);
@@ -452,13 +452,13 @@ public sealed class ClientStore
                 AND ($conversation IS NULL OR m.conversation_id = $conversation)
                 AND ($operation IS NULL OR m.operation_id = $operation)
                 AND ($peer IS NULL OR m.from_machine = $peer OR m.to_machine = $peer)
-                AND ($endpoint IS NULL OR (m.to_machine = $me AND m.to_endpoint = $endpoint) OR (m.from_machine = $me AND m.from_endpoint = $endpoint))
+                AND ($agent IS NULL OR (m.to_machine = $me AND m.to_agent = $agent) OR (m.from_machine = $me AND m.from_agent = $agent))
                 AND ($since IS NULL OR m.stored_on >= $since)
             ORDER BY m.stored_on DESC, m.sequence DESC LIMIT $limit;
             """, r => new LogEntry(ReadMessage(r), Guid.Parse(r.GetString(14)), r.IsDBNull(15) ? null : Guid.Parse(r.GetString(15)),
             Guid.Parse(r.GetString(16)), r.IsDBNull(17) ? null : r.GetString(17), r.IsDBNull(18) ? null : r.GetString(18), r.GetString(19),
             r.GetInt64(20)), ("$me", me), ("$automatic", q.Automatic ? 1 : 0), ("$conversation", q.Conversation is { } c ? Id(c) : null),
-            ("$operation", q.Operation is { } o ? Id(o) : null), ("$peer", q.PeerMachine), ("$endpoint", q.Endpoint),
+            ("$operation", q.Operation is { } o ? Id(o) : null), ("$peer", q.PeerMachine), ("$agent", q.Agent),
             ("$since", q.Since is { } since ? Stamp(since) : null), ("$limit", q.Limit));
         rows.Reverse();
         return rows;
@@ -538,7 +538,7 @@ public sealed class ClientStore
             AND ls.event IN ('queued', 'stored', 'fetched'))
         """;
 
-    internal const string OperationColumns = "from_machine, from_endpoint, operation_id, to_endpoint, first_message_id, state, result_message_id, keep_until";
+    internal const string OperationColumns = "from_machine, from_agent, operation_id, to_agent, first_message_id, state, result_message_id, keep_until";
 
     internal static OperationRecord ReadOperation(SqliteDataReader r) =>
         new(r.GetString(0), r.GetString(1), Guid.Parse(r.GetString(2)), r.GetString(3), Guid.Parse(r.GetString(4)), r.GetString(5),
@@ -551,7 +551,7 @@ public sealed class ClientStore
             Parse(r.GetString(7)), r.IsDBNull(8) ? null : Parse(r.GetString(8)), Parse(r.GetString(9)), Parse(r.GetString(10)),
             r.IsDBNull(11) ? null : r.GetString(11), r.IsDBNull(12) ? null : Parse(r.GetString(12)), r.IsDBNull(13) ? null : r.GetString(13));
 
-    internal static LocalEndpointRecord ReadEndpoint(SqliteDataReader r) =>
+    internal static LocalAgentRecord ReadAgent(SqliteDataReader r) =>
         new(r.GetString(0), ParseState(r.GetString(1)), Parse(r.GetString(2)), Parse(r.GetString(3)), Parse(r.GetString(4)),
             r.IsDBNull(5) ? null : Parse(r.GetString(5)), ReadRoles(r, 6));
 
@@ -617,8 +617,8 @@ public sealed class ClientStore
     internal static DateTimeOffset Parse(string stamp) =>
         DateTimeOffset.Parse(stamp, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
 
-    internal static EndpointState ParseState(string text) =>
-        Enum.GetValues<EndpointState>().First(s => WireProtocol.NameOf(s) == text);
+    internal static AgentState ParseState(string text) =>
+        Enum.GetValues<AgentState>().First(s => WireProtocol.NameOf(s) == text);
 }
 
 /// <summary>One transaction on the client database (see <see cref="ClientStore.Transact{T}"/>).</summary>
@@ -647,9 +647,9 @@ public sealed class StoreTransaction
         Execute("UPDATE sequences SET next_outgoing = next_outgoing + 1 WHERE peer_machine = $peer;", ("$peer", toMachine));
         var envelope = seal(sequence);
         Insert(envelope, content, relayedOn: null, expiresOn: envelope.ExpiresOn);
-        Converse(content, content.FromEndpoint, envelope.ToMachine, content.ToEndpoint, startedBy: "local");
-        AddAttachments(envelope, content, MessageDirection.Out, content.FromEndpoint, AttachmentEvents.Uploaded);
-        AddEvent(envelope.FromMachine, envelope.Id, MessageDirection.Out, content.FromEndpoint, MessageEvents.Queued);
+        Converse(content, content.FromAgent, envelope.ToMachine, content.ToAgent, startedBy: "local");
+        AddAttachments(envelope, content, MessageDirection.Out, content.FromAgent, AttachmentEvents.Uploaded);
+        AddEvent(envelope.FromMachine, envelope.Id, MessageDirection.Out, content.FromAgent, MessageEvents.Queued);
         return envelope;
     }
 
@@ -690,12 +690,12 @@ public sealed class StoreTransaction
             ("$seq", envelope.Sequence), ("$peer", peer));
         if (envelope.FromMachine != me && envelope.ToMachine == me)
         {
-            Converse(content, content.ToEndpoint, envelope.FromMachine, content.FromEndpoint, startedBy: "peer");
+            Converse(content, content.ToAgent, envelope.FromMachine, content.FromAgent, startedBy: "peer");
         }
 
         if (envelope.ToMachine == me)
         {
-            AddAttachments(envelope, content, MessageDirection.In, content.ToEndpoint, AttachmentEvents.Waiting);
+            AddAttachments(envelope, content, MessageDirection.In, content.ToAgent, AttachmentEvents.Waiting);
         }
 
         return true;
@@ -705,23 +705,23 @@ public sealed class StoreTransaction
     /// Appends an event, and makes it the message's state in that direction if it moves the message forward
     /// (a late <c>received</c> doesn't undo <c>acknowledged</c>; a final state is never left).
     /// </summary>
-    public void AddEvent(string fromMachine, Guid id, MessageDirection direction, string endpoint, string @event, string? detail = null)
+    public void AddEvent(string fromMachine, Guid id, MessageDirection direction, string agent, string @event, string? detail = null)
     {
         var dir = ClientStore.Name(direction);
         var stamp = ClientStore.Stamp(Now);
         Execute("""
-            INSERT INTO message_events (from_machine, message_id, direction, endpoint, event, occurred_on, detail)
-            VALUES ($from, $id, $dir, $endpoint, $event, $on, $detail);
-            """, ("$from", fromMachine), ("$id", ClientStore.Id(id)), ("$dir", dir), ("$endpoint", endpoint), ("$event", @event),
+            INSERT INTO message_events (from_machine, message_id, direction, agent, event, occurred_on, detail)
+            VALUES ($from, $id, $dir, $agent, $event, $on, $detail);
+            """, ("$from", fromMachine), ("$id", ClientStore.Id(id)), ("$dir", dir), ("$agent", agent), ("$event", @event),
             ("$on", stamp), ("$detail", detail));
         var current = GetState(fromMachine, id, direction);
         if (current is null || MessageEvents.Rank(@event) > MessageEvents.Rank(current))
         {
             Execute("""
-                INSERT INTO message_state (from_machine, message_id, direction, endpoint, event, occurred_on, detail)
-                VALUES ($from, $id, $dir, $endpoint, $event, $on, $detail)
+                INSERT INTO message_state (from_machine, message_id, direction, agent, event, occurred_on, detail)
+                VALUES ($from, $id, $dir, $agent, $event, $on, $detail)
                 ON CONFLICT (from_machine, message_id, direction) DO UPDATE SET event = $event, occurred_on = $on, detail = $detail;
-                """, ("$from", fromMachine), ("$id", ClientStore.Id(id)), ("$dir", dir), ("$endpoint", endpoint), ("$event", @event),
+                """, ("$from", fromMachine), ("$id", ClientStore.Id(id)), ("$dir", dir), ("$agent", agent), ("$event", @event),
                 ("$on", stamp), ("$detail", detail));
         }
     }
@@ -730,33 +730,33 @@ public sealed class StoreTransaction
         (string?)Scalar("SELECT event FROM message_state WHERE from_machine = $from AND message_id = $id AND direction = $dir;",
             ("$from", fromMachine), ("$id", ClientStore.Id(id)), ("$dir", ClientStore.Name(direction)));
 
-    /// <summary>An outgoing message's recipient and sending endpoint (null if this machine never sent it).</summary>
-    public (string ToMachine, string FromEndpoint)? FindOutgoing(string me, Guid id) =>
-        ClientStore.Query(_connection, _transaction, "SELECT to_machine, from_endpoint FROM messages WHERE from_machine = $me AND id = $id;",
+    /// <summary>An outgoing message's recipient and sending agent (null if this machine never sent it).</summary>
+    public (string ToMachine, string FromAgent)? FindOutgoing(string me, Guid id) =>
+        ClientStore.Query(_connection, _transaction, "SELECT to_machine, from_agent FROM messages WHERE from_machine = $me AND id = $id;",
             r => ((string, string)?)(r.GetString(0), r.GetString(1)), ("$me", me), ("$id", ClientStore.Id(id))).FirstOrDefault();
 
     /// <summary>Marks live incoming messages past their expiry (plus skew) <c>expired</c>. Nothing is sent back.</summary>
     public int ExpireIncoming(TimeSpan skew)
     {
         var due = ClientStore.Query(_connection, _transaction, $"""
-            SELECT s.from_machine, s.message_id, s.endpoint, m.expires_on FROM message_state s
+            SELECT s.from_machine, s.message_id, s.agent, m.expires_on FROM message_state s
             JOIN messages m ON m.from_machine = s.from_machine AND m.id = s.message_id
             WHERE s.direction = 'in' AND s.event IN ('{MessageEvents.Stored}', '{MessageEvents.Fetched}');
-            """, r => (From: r.GetString(0), Id: Guid.Parse(r.GetString(1)), Endpoint: r.GetString(2), ExpiresOn: ClientStore.Parse(r.GetString(3))));
+            """, r => (From: r.GetString(0), Id: Guid.Parse(r.GetString(1)), Agent: r.GetString(2), ExpiresOn: ClientStore.Parse(r.GetString(3))));
         var expired = due.Where(d => Now > d.ExpiresOn + skew).ToList();
         foreach (var d in expired)
         {
-            AddEvent(d.From, d.Id, MessageDirection.In, d.Endpoint, MessageEvents.Expired);
+            AddEvent(d.From, d.Id, MessageDirection.In, d.Agent, MessageEvents.Expired);
         }
 
         return expired.Count;
     }
 
     /// <summary>
-    /// Records a message in its conversation, as one local endpoint sees it: the first message creates it, a
+    /// Records a message in its conversation, as one local agent sees it: the first message creates it, a
     /// <c>done</c> or <c>failed</c> reply finishes it, and anything after reopens it. Automatic messages don't count.
     /// </summary>
-    private void Converse(MessageContent c, string localEndpoint, string peerMachine, string peerEndpoint, string startedBy)
+    private void Converse(MessageContent c, string localAgent, string peerMachine, string peerAgent, string startedBy)
     {
         if (c.Type != MessageType.Message || RoomAddress.TryParse(peerMachine, out _)) // a room is its own conversation
         {
@@ -765,34 +765,34 @@ public sealed class StoreTransaction
 
         var state = c.ReplyTo is not null && c.Status is ReplyStatus.Done or ReplyStatus.Failed ? "finished" : "open";
         Execute("""
-            INSERT INTO conversations (id, local_endpoint, peer_machine, peer_endpoint, subject, started_by, started_on, last_activity_on, state)
-            VALUES ($id, $local, $peerMachine, $peerEndpoint, $subject, $startedBy, $now, $now, $state)
-            ON CONFLICT (id, local_endpoint) DO UPDATE SET subject = coalesce(subject, $subject), last_activity_on = $now, state = $state;
-            """, ("$id", ClientStore.Id(c.ConversationId)), ("$local", localEndpoint), ("$peerMachine", peerMachine),
-            ("$peerEndpoint", peerEndpoint), ("$subject", c.Subject), ("$startedBy", startedBy), ("$now", ClientStore.Stamp(Now)), ("$state", state));
+            INSERT INTO conversations (id, local_agent, peer_machine, peer_agent, subject, started_by, started_on, last_activity_on, state)
+            VALUES ($id, $local, $peerMachine, $peerAgent, $subject, $startedBy, $now, $now, $state)
+            ON CONFLICT (id, local_agent) DO UPDATE SET subject = coalesce(subject, $subject), last_activity_on = $now, state = $state;
+            """, ("$id", ClientStore.Id(c.ConversationId)), ("$local", localAgent), ("$peerMachine", peerMachine),
+            ("$peerAgent", peerAgent), ("$subject", c.Subject), ("$startedBy", startedBy), ("$now", ClientStore.Stamp(Now)), ("$state", state));
     }
 
-    private void AddAttachments(Envelope envelope, MessageContent content, MessageDirection direction, string endpoint, string firstEvent)
+    private void AddAttachments(Envelope envelope, MessageContent content, MessageDirection direction, string agent, string firstEvent)
     {
         foreach (var a in content.Attachments ?? [])
         {
             Execute("""
-                INSERT INTO attachments (from_machine, message_id, blob_id, direction, endpoint, name, size, content_type)
-                VALUES ($from, $id, $blob, $dir, $endpoint, $name, $size, $type) ON CONFLICT DO NOTHING;
+                INSERT INTO attachments (from_machine, message_id, blob_id, direction, agent, name, size, content_type)
+                VALUES ($from, $id, $blob, $dir, $agent, $name, $size, $type) ON CONFLICT DO NOTHING;
                 """, ("$from", envelope.FromMachine), ("$id", ClientStore.Id(envelope.Id)), ("$blob", ClientStore.Id(a.BlobId)),
-                ("$dir", ClientStore.Name(direction)), ("$endpoint", endpoint), ("$name", a.Name), ("$size", a.Size), ("$type", a.ContentType));
-            AddAttachmentEvent(envelope.FromMachine, envelope.Id, a.BlobId, direction, endpoint, firstEvent);
+                ("$dir", ClientStore.Name(direction)), ("$agent", agent), ("$name", a.Name), ("$size", a.Size), ("$type", a.ContentType));
+            AddAttachmentEvent(envelope.FromMachine, envelope.Id, a.BlobId, direction, agent, firstEvent);
         }
     }
 
     /// <summary>Appends to the file track (separate from the message's delivery events).</summary>
-    public void AddAttachmentEvent(string fromMachine, Guid messageId, Guid blobId, MessageDirection direction, string endpoint, string @event,
+    public void AddAttachmentEvent(string fromMachine, Guid messageId, Guid blobId, MessageDirection direction, string agent, string @event,
         string? detail = null) =>
         Execute("""
-            INSERT INTO attachment_events (from_machine, message_id, blob_id, direction, endpoint, event, occurred_on, detail)
-            VALUES ($from, $id, $blob, $dir, $endpoint, $event, $on, $detail);
+            INSERT INTO attachment_events (from_machine, message_id, blob_id, direction, agent, event, occurred_on, detail)
+            VALUES ($from, $id, $blob, $dir, $agent, $event, $on, $detail);
             """, ("$from", fromMachine), ("$id", ClientStore.Id(messageId)), ("$blob", ClientStore.Id(blobId)), ("$dir", ClientStore.Name(direction)),
-            ("$endpoint", endpoint), ("$event", @event), ("$on", ClientStore.Stamp(Now)), ("$detail", detail));
+            ("$agent", agent), ("$event", @event), ("$on", ClientStore.Stamp(Now)), ("$detail", detail));
 
     public IReadOnlyList<AttachmentRecord> GetAttachmentsOf(Guid blobId, MessageDirection direction) =>
         ClientStore.Query(_connection, _transaction, $"""
@@ -810,7 +810,7 @@ public sealed class StoreTransaction
         Execute("UPDATE attachments SET receipt_sent = 1 WHERE from_machine = $from AND message_id = $id AND blob_id = $blob;",
             ("$from", fromMachine), ("$id", ClientStore.Id(messageId)), ("$blob", ClientStore.Id(blobId)));
 
-    /// <summary>An endpoint is done with a file it received. True if this release was new.</summary>
+    /// <summary>An agent is done with a file it received. True if this release was new.</summary>
     public bool ReleaseAttachment(string fromMachine, Guid messageId, Guid blobId) =>
         Execute("UPDATE attachments SET released_on = $now WHERE from_machine = $from AND message_id = $id AND blob_id = $blob AND released_on IS NULL;",
             ("$from", fromMachine), ("$id", ClientStore.Id(messageId)), ("$blob", ClientStore.Id(blobId)), ("$now", ClientStore.Stamp(Now))) == 1;
@@ -848,30 +848,30 @@ public sealed class StoreTransaction
             """, ("$id", ClientStore.Id(snapshot.RoomId)), ("$snapshot", JsonSerializer.Serialize(snapshot, WireProtocol.Json)), ("$version", snapshot.Version),
             ("$by", changedBy), ("$now", ClientStore.Stamp(Now)));
 
-    /// <summary>The record of an operation a sender endpoint asked of this machine, unless it has expired.</summary>
-    public OperationRecord? GetOperation(string fromMachine, string fromEndpoint, Guid operationId) =>
+    /// <summary>The record of an operation a sender agent asked of this machine, unless it has expired.</summary>
+    public OperationRecord? GetOperation(string fromMachine, string fromAgent, Guid operationId) =>
         ClientStore.Query(_connection, _transaction, $"""
             SELECT {ClientStore.OperationColumns} FROM operations
-            WHERE from_machine = $from AND from_endpoint = $endpoint AND operation_id = $op AND keep_until >= $now;
-            """, ClientStore.ReadOperation, ("$from", fromMachine), ("$endpoint", fromEndpoint), ("$op", ClientStore.Id(operationId)),
+            WHERE from_machine = $from AND from_agent = $agent AND operation_id = $op AND keep_until >= $now;
+            """, ClientStore.ReadOperation, ("$from", fromMachine), ("$agent", fromAgent), ("$op", ClientStore.Id(operationId)),
             ("$now", ClientStore.Stamp(Now))).FirstOrDefault();
 
     /// <summary>Starts an operation (or starts it over, past an expired record): <c>running</c> until a done or failed reply.</summary>
-    public void StartOperation(string fromMachine, string fromEndpoint, Guid operationId, string toEndpoint, Guid firstMessageId, DateTimeOffset keepUntil) =>
+    public void StartOperation(string fromMachine, string fromAgent, Guid operationId, string toAgent, Guid firstMessageId, DateTimeOffset keepUntil) =>
         Execute("""
-            INSERT INTO operations (from_machine, from_endpoint, operation_id, to_endpoint, first_message_id, state, keep_until)
-            VALUES ($from, $endpoint, $op, $to, $first, 'running', $keep)
-            ON CONFLICT (from_machine, from_endpoint, operation_id) DO UPDATE SET to_endpoint = $to, first_message_id = $first,
+            INSERT INTO operations (from_machine, from_agent, operation_id, to_agent, first_message_id, state, keep_until)
+            VALUES ($from, $agent, $op, $to, $first, 'running', $keep)
+            ON CONFLICT (from_machine, from_agent, operation_id) DO UPDATE SET to_agent = $to, first_message_id = $first,
                 state = 'running', result_message_id = NULL, keep_until = $keep;
-            """, ("$from", fromMachine), ("$endpoint", fromEndpoint), ("$op", ClientStore.Id(operationId)), ("$to", toEndpoint),
+            """, ("$from", fromMachine), ("$agent", fromAgent), ("$op", ClientStore.Id(operationId)), ("$to", toAgent),
             ("$first", ClientStore.Id(firstMessageId)), ("$keep", ClientStore.Stamp(keepUntil)));
 
     /// <summary>Records an operation's final reply (retries get a copy of it from now on) and keeps the record a full window longer.</summary>
-    public bool FinishOperation(string fromMachine, string fromEndpoint, Guid operationId, Guid resultMessageId, DateTimeOffset keepUntil) =>
+    public bool FinishOperation(string fromMachine, string fromAgent, Guid operationId, Guid resultMessageId, DateTimeOffset keepUntil) =>
         Execute("""
             UPDATE operations SET state = 'done', result_message_id = $result, keep_until = max(keep_until, $keep)
-            WHERE from_machine = $from AND from_endpoint = $endpoint AND operation_id = $op AND state = 'running';
-            """, ("$from", fromMachine), ("$endpoint", fromEndpoint), ("$op", ClientStore.Id(operationId)), ("$result", ClientStore.Id(resultMessageId)),
+            WHERE from_machine = $from AND from_agent = $agent AND operation_id = $op AND state = 'running';
+            """, ("$from", fromMachine), ("$agent", fromAgent), ("$op", ClientStore.Id(operationId)), ("$result", ClientStore.Id(resultMessageId)),
             ("$keep", ClientStore.Stamp(keepUntil))) == 1;
 
     /// <summary>A stored message's envelope (null if retention dropped it, or there's no such message).</summary>
@@ -885,39 +885,39 @@ public sealed class StoreTransaction
             ON CONFLICT (peer_machine, name) DO UPDATE SET count = count + $amount, last_on = $now;
             """, ("$peer", peer), ("$name", metric), ("$amount", amount), ("$now", ClientStore.Stamp(Now)));
 
-    public LocalEndpointRecord? GetEndpoint(string name) =>
+    public LocalAgentRecord? GetAgent(string name) =>
         ClientStore.Query(_connection, _transaction,
-            "SELECT name, state, registered_on, last_seen_on, changed_on, retired_on, roles FROM endpoints WHERE name = $name;",
-            ClientStore.ReadEndpoint, ("$name", name)).FirstOrDefault();
+            "SELECT name, state, registered_on, last_seen_on, changed_on, retired_on, roles FROM agents WHERE name = $name;",
+            ClientStore.ReadAgent, ("$name", name)).FirstOrDefault();
 
-    public IReadOnlyList<LocalEndpointRecord> GetEndpoints() =>
+    public IReadOnlyList<LocalAgentRecord> GetAgents() =>
         ClientStore.Query(_connection, _transaction,
-            "SELECT name, state, registered_on, last_seen_on, changed_on, retired_on, roles FROM endpoints ORDER BY name;", ClientStore.ReadEndpoint);
+            "SELECT name, state, registered_on, last_seen_on, changed_on, retired_on, roles FROM agents ORDER BY name;", ClientStore.ReadAgent);
 
     /// <summary>
-    /// Records an endpoint's state; registering (going online) brings a retired endpoint back. <paramref name="roles"/>,
+    /// Records an agent's state; registering (going online) brings a retired agent back. <paramref name="roles"/>,
     /// if given, replaces the roles it declares (null leaves them).
     /// </summary>
-    public void SetEndpointState(string name, EndpointState state, IReadOnlyList<string>? roles = null)
+    public void SetAgentState(string name, AgentState state, IReadOnlyList<string>? roles = null)
     {
         var stamp = ClientStore.Stamp(Now);
         Execute("""
-            INSERT INTO endpoints (name, state, registered_on, last_seen_on, changed_on, roles) VALUES ($name, $state, $now, $now, $now, $roles)
+            INSERT INTO agents (name, state, registered_on, last_seen_on, changed_on, roles) VALUES ($name, $state, $now, $now, $now, $roles)
             ON CONFLICT (name) DO UPDATE SET state = $state, last_seen_on = $now, changed_on = $now, roles = coalesce($roles, roles),
                 retired_on = CASE WHEN $state = 'online' THEN NULL ELSE retired_on END;
             """, ("$name", name), ("$state", WireProtocol.NameOf(state)), ("$now", stamp), ("$roles", ClientStore.RolesText(roles)));
     }
 
-    /// <summary>Retires an endpoint: from now on its messages get a <c>rejected</c> receipt. False if it isn't registered.</summary>
-    public bool RetireEndpoint(string name) =>
-        Execute("UPDATE endpoints SET retired_on = $now WHERE name = $name AND retired_on IS NULL;",
+    /// <summary>Retires an agent: from now on its messages get a <c>rejected</c> receipt. False if it isn't registered.</summary>
+    public bool RetireAgent(string name) =>
+        Execute("UPDATE agents SET retired_on = $now WHERE name = $name AND retired_on IS NULL;",
             ("$name", name), ("$now", ClientStore.Stamp(Now))) == 1;
 
     /// <summary>
-    /// Applies another machine's endpoint list if its counter is newer than any seen from that machine; a
+    /// Applies another machine's agent list if its counter is newer than any seen from that machine; a
     /// replayed or late list is ignored. True if applied.
     /// </summary>
-    public bool ApplyAnnouncement(string machine, EndpointAnnouncement announcement)
+    public bool ApplyAnnouncement(string machine, AgentAnnouncement announcement)
     {
         var known = (long?)Scalar("SELECT counter FROM peer_counters WHERE machine = $machine;", ("$machine", machine));
         if (known is { } k && announcement.Counter <= k)
@@ -929,16 +929,16 @@ public sealed class StoreTransaction
             INSERT INTO peer_counters (machine, counter) VALUES ($machine, $counter)
             ON CONFLICT (machine) DO UPDATE SET counter = $counter;
             """, ("$machine", machine), ("$counter", announcement.Counter));
-        Execute("DELETE FROM peer_endpoints WHERE machine = $machine;", ("$machine", machine));
-        foreach (var e in announcement.Endpoints)
+        Execute("DELETE FROM peer_agents WHERE machine = $machine;", ("$machine", machine));
+        foreach (var e in announcement.Agents)
         {
             Execute("""
-                INSERT INTO peer_endpoints (machine, endpoint, state, counter, changed_on, roles)
-                VALUES ($machine, $endpoint, $state, $counter, $changed, $roles)
-                ON CONFLICT (machine, endpoint) DO NOTHING;
-                """, ("$machine", machine), ("$endpoint", e.Name), ("$state", WireProtocol.NameOf(e.State)), ("$counter", announcement.Counter),
+                INSERT INTO peer_agents (machine, agent, state, counter, changed_on, roles)
+                VALUES ($machine, $agent, $state, $counter, $changed, $roles)
+                ON CONFLICT (machine, agent) DO NOTHING;
+                """, ("$machine", machine), ("$agent", e.Name), ("$state", WireProtocol.NameOf(e.State)), ("$counter", announcement.Counter),
                 ("$changed", ClientStore.Stamp(e.ChangedOn)),
-                ("$roles", ClientStore.RolesText(e.Roles?.Where(Limits.IsValidEndpoint).Take(Limits.MaxRoles).ToList())));
+                ("$roles", ClientStore.RolesText(e.Roles?.Where(Limits.IsValidAgent).Take(Limits.MaxRoles).ToList())));
         }
 
         return true;
@@ -960,14 +960,14 @@ public sealed class StoreTransaction
 
     private int Insert(Envelope envelope, MessageContent c, DateTimeOffset? relayedOn, DateTimeOffset expiresOn, bool ignoreExisting = false) =>
         Execute($"""
-            INSERT INTO messages (from_machine, id, from_endpoint, to_machine, to_endpoint, conversation_id, reply_to, operation_id,
+            INSERT INTO messages (from_machine, id, from_agent, to_machine, to_agent, conversation_id, reply_to, operation_id,
                 type, status, content_type, subject, sequence, created_on, relayed_on, stored_on, expires_on, envelope)
-            VALUES ($from, $id, $fromEndpoint, $to, $toEndpoint, $conversation, $replyTo, $operation,
+            VALUES ($from, $id, $fromAgent, $to, $toAgent, $conversation, $replyTo, $operation,
                 $type, $status, $contentType, $subject, $sequence, $created, $relayed, $stored, $expires, $envelope)
             {(ignoreExisting ? "ON CONFLICT (from_machine, id) DO NOTHING" : string.Empty)};
             """,
-            ("$from", envelope.FromMachine), ("$id", ClientStore.Id(envelope.Id)), ("$fromEndpoint", c.FromEndpoint),
-            ("$to", envelope.ToMachine), ("$toEndpoint", c.ToEndpoint), ("$conversation", ClientStore.Id(c.ConversationId)),
+            ("$from", envelope.FromMachine), ("$id", ClientStore.Id(envelope.Id)), ("$fromAgent", c.FromAgent),
+            ("$to", envelope.ToMachine), ("$toAgent", c.ToAgent), ("$conversation", ClientStore.Id(c.ConversationId)),
             ("$replyTo", c.ReplyTo is { } re ? ClientStore.Id(re) : null), ("$operation", ClientStore.Id(c.OperationId)),
             ("$type", WireProtocol.NameOf(c.Type)), ("$status", c.Status is { } s ? WireProtocol.NameOf(s) : null), ("$contentType", c.ContentType),
             ("$subject", c.Subject), ("$sequence", envelope.Sequence), ("$created", ClientStore.Stamp(c.CreatedOn)),
@@ -1042,9 +1042,9 @@ public sealed record StoredMessage(
     string FromMachine,
     Guid Id,
     Envelope? Envelope,
-    string FromEndpoint,
+    string FromAgent,
     string ToMachine,
-    string ToEndpoint,
+    string ToAgent,
     string Type,
     DateTimeOffset CreatedOn,
     DateTimeOffset? RelayedOn,
@@ -1054,24 +1054,24 @@ public sealed record StoredMessage(
     DateTimeOffset? StateOn,
     string? StateDetail);
 
-public sealed record MessageEvent(MessageDirection Direction, string Endpoint, string Event, DateTimeOffset OccurredOn, string? Detail);
+public sealed record MessageEvent(MessageDirection Direction, string Agent, string Event, DateTimeOffset OccurredOn, string? Detail);
 
-/// <summary>An endpoint registered with this machine's daemon (the endpoint registry).</summary>
-public sealed record LocalEndpointRecord(string Name, EndpointState State, DateTimeOffset RegisteredOn, DateTimeOffset LastSeenOn,
+/// <summary>An agent registered with this machine's daemon (the agent registry).</summary>
+public sealed record LocalAgentRecord(string Name, AgentState State, DateTimeOffset RegisteredOn, DateTimeOffset LastSeenOn,
     DateTimeOffset ChangedOn, DateTimeOffset? RetiredOn, IReadOnlyList<string>? Roles = null);
 
-/// <summary>An endpoint another machine has announced.</summary>
-public sealed record PeerEndpoint(string Machine, string Endpoint, EndpointState State, long Counter, DateTimeOffset ChangedOn,
+/// <summary>An agent another machine has announced.</summary>
+public sealed record PeerAgent(string Machine, string Agent, AgentState State, long Counter, DateTimeOffset ChangedOn,
     IReadOnlyList<string>? Roles = null);
 
 /// <summary>
 /// One message's attachment. <see cref="LastEvent"/> is the file track's latest event (see <see cref="AttachmentEvents"/>);
 /// <see cref="LocalState"/> and <see cref="LocalPath"/> describe this machine's copy of the blob, shared by every message carrying it.
 /// </summary>
-public sealed record AttachmentRecord(string FromMachine, Guid MessageId, Guid BlobId, MessageDirection Direction, string Endpoint, string Name, long Size,
+public sealed record AttachmentRecord(string FromMachine, Guid MessageId, Guid BlobId, MessageDirection Direction, string Agent, string Name, long Size,
     string ContentType, bool ReceiptSent, DateTimeOffset? ReleasedOn, string? LastEvent, string? LastDetail, string? LocalState, string? LocalPath);
 
-public sealed record AttachmentEvent(Guid BlobId, MessageDirection Direction, string Endpoint, string Event, DateTimeOffset OccurredOn, string? Detail);
+public sealed record AttachmentEvent(Guid BlobId, MessageDirection Direction, string Agent, string Event, DateTimeOffset OccurredOn, string? Detail);
 
 /// <summary>This machine's copy of a blob it received: <see cref="State"/> is downloaded, failed or deleted.</summary>
 public sealed record LocalBlob(Guid BlobId, string FromMachine, string Name, long Size, string State, string? LocalPath, string? Detail,
@@ -1093,19 +1093,19 @@ public static class AttachmentEvents
     public const string Cancelled = "cancelled";
 }
 
-/// <summary>A conversation as one local endpoint sees it. <see cref="State"/> is open or finished.</summary>
+/// <summary>A conversation as one local agent sees it. <see cref="State"/> is open or finished.</summary>
 /// <summary>A room as this machine knows it: its latest accepted snapshot, who changed it last, and when this machine first heard of it.</summary>
 public sealed record RoomRecord(RoomSnapshot Snapshot, string ChangedBy, DateTimeOffset ChangedOn, DateTimeOffset JoinedOn);
 
-public sealed record ConversationRecord(Guid Id, string LocalEndpoint, string PeerMachine, string PeerEndpoint, string? Subject, string StartedBy,
+public sealed record ConversationRecord(Guid Id, string LocalAgent, string PeerMachine, string PeerAgent, string? Subject, string StartedBy,
     DateTimeOffset StartedOn, DateTimeOffset LastActivityOn, string State);
 
-/// <summary>An operation a sender endpoint asked of this machine. <see cref="State"/> is running or done.</summary>
-public sealed record OperationRecord(string FromMachine, string FromEndpoint, Guid OperationId, string ToEndpoint, Guid FirstMessageId, string State,
+/// <summary>An operation a sender agent asked of this machine. <see cref="State"/> is running or done.</summary>
+public sealed record OperationRecord(string FromMachine, string FromAgent, Guid OperationId, string ToAgent, Guid FirstMessageId, string State,
     Guid? ResultMessageId, DateTimeOffset KeepUntil);
 
 /// <summary>Filters for <see cref="ClientStore.GetLog"/>; null means any.</summary>
-public sealed record LogQuery(Guid? Conversation = null, Guid? Operation = null, string? PeerMachine = null, string? Endpoint = null,
+public sealed record LogQuery(Guid? Conversation = null, Guid? Operation = null, string? PeerMachine = null, string? Agent = null,
     DateTimeOffset? Since = null, bool Automatic = false, int Limit = 1000);
 
 /// <summary>A log row: the message with the metadata this machine keeps in the clear (the body is only in the envelope).</summary>

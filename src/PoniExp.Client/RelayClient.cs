@@ -204,7 +204,7 @@ public sealed class RelayClient : IAsyncDisposable
 
     public string JoinCode => KeyFingerprint.JoinCodeOf(_keys.PublicKey);
 
-    /// <summary>Signs and sends a message to <c>machine</c> or <c>machine/endpoint</c> (machine by id or name).</summary>
+    /// <summary>Signs and sends a message to <c>machine</c> or <c>machine/agent</c> (machine by id or name).</summary>
     public async Task<SentMessage> SendAsync(string to, OutgoingMessage message, CancellationToken cancellationToken = default) =>
         (await SendAsync([to], message, cancellationToken))[0];
 
@@ -225,23 +225,23 @@ public sealed class RelayClient : IAsyncDisposable
             throw new ArgumentException("A message has one recipient: conversation, reply-to and operation ids are for a single one.", nameof(message));
         }
 
-        var targets = new List<(MachineInfo Machine, string Endpoint)>();
+        var targets = new List<(MachineInfo Machine, string Agent)>();
         foreach (var address in to.Select(Address.Parse).ToList()) // all parsed, resolved and key-checked before anything is sent
         {
             var machine = await ResolveAsync(address.Machine, cancellationToken);
             VerifiedEncryptionKey(machine);
-            targets.Add((machine, address.Endpoint));
+            targets.Add((machine, address.Agent));
         }
 
-        var envelopes = _store.Transact(_time.GetUtcNow(), tx => targets.Select(t => Compose(tx, t.Machine, t.Endpoint, message)).ToList());
+        var envelopes = _store.Transact(_time.GetUtcNow(), tx => targets.Select(t => Compose(tx, t.Machine, t.Agent, message)).ToList());
         return await RelayComposedAsync(envelopes, cancellationToken);
     }
 
-    /// <summary>Replies to <paramref name="original"/>: to its sender's endpoint, in its conversation, from the endpoint it was sent to.</summary>
+    /// <summary>Replies to <paramref name="original"/>: to its sender's agent, in its conversation, from the agent it was sent to.</summary>
     public async Task<SentMessage> ReplyAsync(ReceivedMessage original, OutgoingMessage reply, CancellationToken cancellationToken = default)
     {
         var target = await ResolveAsync(original.Envelope.FromMachine, cancellationToken);
-        var envelope = _store.Transact(_time.GetUtcNow(), tx => Compose(tx, target, original.Content.FromEndpoint, ReplyTo(original.Envelope.Id,
+        var envelope = _store.Transact(_time.GetUtcNow(), tx => Compose(tx, target, original.Content.FromAgent, ReplyTo(original.Envelope.Id,
             original.Content, reply)));
         return (await RelayComposedAsync([envelope], cancellationToken))[0];
     }
@@ -505,10 +505,10 @@ public sealed class RelayClient : IAsyncDisposable
         return new HttpClient(handler) { BaseAddress = RouterUrl, Timeout = TimeSpan.FromMinutes(5) };
     }
 
-    /// <summary>The reply's fields filled in from the message it answers: its conversation, from the endpoint it was sent to.</summary>
+    /// <summary>The reply's fields filled in from the message it answers: its conversation, from the agent it was sent to.</summary>
     public static OutgoingMessage ReplyTo(Guid originalId, MessageContent original, OutgoingMessage reply) => reply with
     {
-        FromEndpoint = reply.FromEndpoint ?? original.ToEndpoint,
+        FromAgent = reply.FromAgent ?? original.ToAgent,
         ConversationId = original.ConversationId,
         ReplyTo = originalId,
     };
@@ -518,7 +518,7 @@ public sealed class RelayClient : IAsyncDisposable
     /// <c>queued</c> in the outbox. Nothing leaves until <see cref="FlushOutboxAsync"/> (which
     /// <see cref="SendAsync(string, OutgoingMessage, CancellationToken)"/> calls).
     /// </summary>
-    public Envelope Compose(StoreTransaction tx, MachineInfo target, string toEndpoint, OutgoingMessage message)
+    public Envelope Compose(StoreTransaction tx, MachineInfo target, string toAgent, OutgoingMessage message)
     {
         var recipientKey = VerifiedEncryptionKey(target);
         var settings = _messaging.CurrentValue;
@@ -536,8 +536,8 @@ public sealed class RelayClient : IAsyncDisposable
         var now = tx.Now;
         var id = Guid.NewGuid();
         var content = new MessageContent(
-            message.FromEndpoint ?? Address.DefaultEndpoint,
-            toEndpoint,
+            message.FromAgent ?? Address.DefaultAgent,
+            toAgent,
             message.ConversationId ?? Guid.NewGuid(),
             message.ReplyTo,
             message.OperationId ?? id,
@@ -575,7 +575,7 @@ public sealed class RelayClient : IAsyncDisposable
         var lifetime = message.ExpiresIn is { } e && e > TimeSpan.Zero && e < settings.MaxExpiry ? e : settings.DefaultExpiry;
         var now = tx.Now;
         var id = Guid.NewGuid();
-        var content = new MessageContent(message.FromEndpoint ?? Address.DefaultEndpoint, RoomAddress.Endpoint, roomId, message.ReplyTo, message.OperationId ?? id,
+        var content = new MessageContent(message.FromAgent ?? Address.DefaultAgent, RoomAddress.Agent, roomId, message.ReplyTo, message.OperationId ?? id,
             message.Status, string.IsNullOrEmpty(message.Subject) ? null : message.Subject, MessageType.Message, message.ContentType,
             message.Metadata ?? new Dictionary<string, string>(), message.Body, now);
         if (MessageRules.CheckContent(content) is { } problem)
@@ -601,7 +601,7 @@ public sealed class RelayClient : IAsyncDisposable
             {
                 if (_time.GetUtcNow() > message.ExpiresOn)
                 {
-                    _store.Transact(_time.GetUtcNow(), tx => tx.AddEvent(message.FromMachine, message.Id, MessageDirection.Out, message.FromEndpoint,
+                    _store.Transact(_time.GetUtcNow(), tx => tx.AddEvent(message.FromMachine, message.Id, MessageDirection.Out, message.FromAgent,
                         MessageEvents.Expired, "expired before it could be relayed"));
                     continue;
                 }
@@ -628,7 +628,7 @@ public sealed class RelayClient : IAsyncDisposable
                     continue;
                 }
 
-                _store.Transact(_time.GetUtcNow(), tx => tx.AddEvent(message.FromMachine, message.Id, MessageDirection.Out, message.FromEndpoint,
+                _store.Transact(_time.GetUtcNow(), tx => tx.AddEvent(message.FromMachine, message.Id, MessageDirection.Out, message.FromAgent,
                     @event, detail));
             }
         }
@@ -680,7 +680,7 @@ public sealed class RelayClient : IAsyncDisposable
             DeliveryState? state = last.Event == MessageEvents.Relayed
                 ? Enum.GetValues<DeliveryState>().First(s => WireProtocol.NameOf(s) == last.Detail)
                 : null;
-            sent.Add(new SentMessage(envelope.Id, envelope.ToMachine, content.ToEndpoint, content.ConversationId, envelope.Sequence, envelope.ExpiresOn, state));
+            sent.Add(new SentMessage(envelope.Id, envelope.ToMachine, content.ToAgent, content.ConversationId, envelope.Sequence, envelope.ExpiresOn, state));
         }
 
         return sent;
@@ -892,7 +892,7 @@ public sealed class RelayClient : IAsyncDisposable
                 }
                 else
                 {
-                    tx.AddEvent(envelope.FromMachine, envelope.Id, MessageDirection.In, content.ToEndpoint, MessageEvents.Stored);
+                    tx.AddEvent(envelope.FromMachine, envelope.Id, MessageDirection.In, content.ToAgent, MessageEvents.Stored);
                 }
 
                 return true;
@@ -959,8 +959,8 @@ public sealed class RelayClient : IAsyncDisposable
 /// </summary>
 public sealed record ReceivedMessage(Envelope Envelope, MessageContent Content, string FromName, DateTimeOffset RelayedOn)
 {
-    /// <summary>The sender as <c>name/endpoint</c>.</summary>
-    public Address From => new(FromName, Content.FromEndpoint);
+    /// <summary>The sender as <c>name/agent</c>.</summary>
+    public Address From => new(FromName, Content.FromAgent);
 }
 
 /// <summary>
@@ -969,7 +969,7 @@ public sealed record ReceivedMessage(Envelope Envelope, MessageContent Content, 
 /// </summary>
 public sealed record OutgoingMessage(string Body)
 {
-    public string? FromEndpoint { get; init; }
+    public string? FromAgent { get; init; }
 
     public Guid? ConversationId { get; init; }
 
@@ -1003,7 +1003,7 @@ public interface IIncomingHandler
 }
 
 /// <summary>A message sent. <see cref="State"/> is the router's; null when it is still in the outbox (no connection).</summary>
-public sealed record SentMessage(Guid Id, string ToMachine, string ToEndpoint, Guid ConversationId, long Sequence, DateTimeOffset ExpiresOn, DeliveryState? State);
+public sealed record SentMessage(Guid Id, string ToMachine, string ToAgent, Guid ConversationId, long Sequence, DateTimeOffset ExpiresOn, DeliveryState? State);
 
 /// <summary>A file transfer that failed. <see cref="Definitive"/>: retrying won't help (tampered, cancelled, expired, over a limit).</summary>
 public sealed class BlobTransferException(string reason, bool definitive) : Exception(reason)
