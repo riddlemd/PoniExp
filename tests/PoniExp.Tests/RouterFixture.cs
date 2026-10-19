@@ -33,14 +33,14 @@ public sealed class RouterFixture : IAsyncDisposable
 
     /// <param name="settings">Router settings ("PoniExp:MaxExpiry", ...), changeable later with <see cref="SetSetting"/>.</param>
     public static async Task<RouterFixture> StartAsync(bool useHttps = false, string? dataDirectory = null,
-        IDictionary<string, string?>? settings = null)
+        IDictionary<string, string?>? settings = null, int port = 0)
     {
         dataDirectory ??= Path.Combine(Path.GetTempPath(), "poniexp-tests", Guid.NewGuid().ToString("N"));
         var app = RouterHost.Build(["--Logging:LogLevel:Default=None"], o =>
         {
             o.DataDirectory = dataDirectory;
             o.BindAddress = "127.0.0.1";
-            o.Port = 0;
+            o.Port = port;
             o.AdminPort = null;
             o.UseHttps = useHttps;
         }, configuration => configuration.AddInMemoryCollection(settings ?? new Dictionary<string, string?>()));

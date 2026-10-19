@@ -5,6 +5,9 @@ public readonly record struct Address(string Machine, string Endpoint)
 {
     public const string DefaultEndpoint = "default";
 
+    /// <summary>The daemon's own endpoint, for automatic messages between daemons (announcements). Agents can't register it.</summary>
+    public const string DaemonEndpoint = "daemon";
+
     /// <summary>Parses <c>machine</c> or <c>machine/endpoint</c>; a bare machine means its default endpoint.</summary>
     public static Address Parse(string text)
     {

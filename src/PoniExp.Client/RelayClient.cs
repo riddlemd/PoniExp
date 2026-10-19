@@ -32,6 +32,8 @@ public sealed class RelayClient : IAsyncDisposable
     private readonly Task _worker;
     private readonly IReadOnlyList<TimeSpan> _reconnectDelays;
     private readonly CancellationTokenSource _disposing = new();
+    private readonly SemaphoreSlim _flushing = new(1, 1);
+    private volatile bool _authenticated;
     private Dictionary<string, MachineInfo> _machines = [];
 
     /// <exception cref="OptionsValidationException">The messaging settings are invalid.</exception>
@@ -41,6 +43,7 @@ public sealed class RelayClient : IAsyncDisposable
         _ = messaging.CurrentValue; // validates: bad settings stop the client here, not on the first message
         _keys = keys;
         _store = store;
+        RouterUrl = options.RouterUrl;
         _messaging = messaging;
         _confirm = options.ConfirmMessages;
         _time = time ?? TimeProvider.System;
@@ -102,6 +105,7 @@ public sealed class RelayClient : IAsyncDisposable
         };
         _connection.Reconnecting += error =>
         {
+            _authenticated = false;
             ConnectionChanged?.Invoke(false, error);
             return Task.CompletedTask;
         };
@@ -109,6 +113,7 @@ public sealed class RelayClient : IAsyncDisposable
         // ends it, so restart here unless this machine was rejected or removed.
         _connection.Closed += error =>
         {
+            _authenticated = false;
             ConnectionChanged?.Invoke(false, error);
             if (!_disposing.IsCancellationRequested && Status is MembershipStatus.Approved or MembershipStatus.Pending)
             {
@@ -140,6 +145,30 @@ public sealed class RelayClient : IAsyncDisposable
     public event Action<Envelope, string>? MessageRejected;
 
     public ClientStore Store => _store;
+
+    /// <summary>
+    /// Called inside the transaction that stores each new incoming message (of any type), so whatever it
+    /// records or sends (events, receipts) commits with the message or not at all. Without one, a message is
+    /// just recorded as <c>stored</c>.
+    /// </summary>
+    public IIncomingHandler? IncomingHandler { get; set; }
+
+    /// <summary>The router's clock minus this machine's, as of the last Hello (null before the first).</summary>
+    public TimeSpan? ClockOffset { get; private set; }
+
+    /// <summary>How far the router lets clocks differ (from the last Hello).</summary>
+    public TimeSpan? RouterClockSkew { get; private set; }
+
+    /// <summary>
+    /// Connected and authenticated as an approved machine on this connection. False from the moment a link
+    /// drops until the reconnected link has proved its key again: the router refuses anything sent before that.
+    /// </summary>
+    public bool IsConnected => _authenticated && _connection.State == HubConnectionState.Connected;
+
+    /// <summary>Connected to the router (whether or not this machine is approved yet).</summary>
+    public bool IsReachable => _connection.State == HubConnectionState.Connected;
+
+    public Uri RouterUrl { get; }
 
     public string MachineId => _keys.MachineId;
 
@@ -197,23 +226,169 @@ public sealed class RelayClient : IAsyncDisposable
             targets.Add((machine, address.Endpoint));
         }
 
-        var sent = new List<SentMessage>();
-        foreach (var (machine, endpoint) in targets)
+        var envelopes = _store.Transact(_time.GetUtcNow(), tx => targets.Select(t => Compose(tx, t.Machine, t.Endpoint, message)).ToList());
+        return await RelayComposedAsync(envelopes, cancellationToken);
+    }
+
+    /// <summary>Replies to <paramref name="original"/>: to its sender's endpoint, in its conversation, from the endpoint it was sent to.</summary>
+    public async Task<SentMessage> ReplyAsync(ReceivedMessage original, OutgoingMessage reply, CancellationToken cancellationToken = default)
+    {
+        var target = await ResolveAsync(original.Envelope.FromMachine, cancellationToken);
+        var envelope = _store.Transact(_time.GetUtcNow(), tx => Compose(tx, target, original.Content.FromEndpoint, ReplyTo(original.Envelope.Id,
+            original.Content, reply)));
+        return (await RelayComposedAsync([envelope], cancellationToken))[0];
+    }
+
+    /// <summary>The reply's fields filled in from the message it answers: its conversation, from the endpoint it was sent to.</summary>
+    public static OutgoingMessage ReplyTo(Guid originalId, MessageContent original, OutgoingMessage reply) => reply with
+    {
+        FromEndpoint = reply.FromEndpoint ?? original.ToEndpoint,
+        ConversationId = original.ConversationId,
+        ReplyTo = originalId,
+    };
+
+    /// <summary>
+    /// Builds, seals and stores a message for <paramref name="target"/> inside <paramref name="tx"/>, as
+    /// <c>queued</c> in the outbox. Nothing leaves until <see cref="FlushOutboxAsync"/> (which
+    /// <see cref="SendAsync(string, OutgoingMessage, CancellationToken)"/> calls).
+    /// </summary>
+    public Envelope Compose(StoreTransaction tx, MachineInfo target, string toEndpoint, OutgoingMessage message)
+    {
+        var recipientKey = VerifiedEncryptionKey(target);
+        var settings = _messaging.CurrentValue;
+        var lifetime = message.ExpiresIn ?? settings.DefaultExpiry;
+        if (lifetime <= TimeSpan.Zero)
         {
-            sent.Add(await SendOneAsync(machine, endpoint, message, cancellationToken));
+            throw new ArgumentException("A message must live for some time.", nameof(message));
+        }
+
+        if (lifetime > settings.MaxExpiry)
+        {
+            lifetime = settings.MaxExpiry;
+        }
+
+        var now = tx.Now;
+        var id = Guid.NewGuid();
+        var content = new MessageContent(
+            message.FromEndpoint ?? Address.DefaultEndpoint,
+            toEndpoint,
+            message.ConversationId ?? Guid.NewGuid(),
+            message.ReplyTo,
+            message.OperationId ?? id,
+            message.Status,
+            string.IsNullOrEmpty(message.Subject) ? null : message.Subject,
+            message.Type,
+            message.ContentType,
+            message.Metadata ?? new Dictionary<string, string>(),
+            message.Body,
+            now);
+        if (MessageRules.CheckContent(content) is { } problem)
+        {
+            throw new ArgumentException(problem, nameof(message));
+        }
+
+        return tx.ReserveOutgoing(target.Id, content,
+            sequence => Signatures.SealEnvelope(_keys, id, target.Id, recipientKey, sequence, now + lifetime, content));
+    }
+
+    /// <summary>
+    /// Relays everything in the outbox, oldest first. A message whose expiry has passed is marked
+    /// <c>expired</c> and never relayed: the recipient would only refuse it. One the router refuses is
+    /// <c>failed</c>. Without a connection, messages stay queued for the next flush (after a reconnect).
+    /// </summary>
+    public async Task FlushOutboxAsync(CancellationToken cancellationToken = default)
+    {
+        await _flushing.WaitAsync(cancellationToken);
+        try
+        {
+            foreach (var message in _store.GetOutbox(_keys.MachineId))
+            {
+                if (_time.GetUtcNow() > message.ExpiresOn)
+                {
+                    _store.Transact(_time.GetUtcNow(), tx => tx.AddEvent(message.FromMachine, message.Id, MessageDirection.Out, message.FromEndpoint,
+                        MessageEvents.Expired, "expired before it could be relayed"));
+                    continue;
+                }
+
+                if (!IsConnected || message.Envelope is null)
+                {
+                    continue; // stays queued; expired ones further on are still marked
+                }
+
+                string @event;
+                string detail;
+                try
+                {
+                    var result = await _connection.InvokeAsync<SendResult>(HubMethods.Send, message.Envelope, cancellationToken);
+                    (@event, detail) = (MessageEvents.Relayed, WireProtocol.NameOf(result.State));
+                }
+                catch (HubException e)
+                {
+                    (@event, detail) = (MessageEvents.Failed, e.Message);
+                }
+                catch (Exception e) when (e is not OperationCanceledException)
+                {
+                    BackgroundError?.Invoke(e); // the link went; it stays queued
+                    continue;
+                }
+
+                _store.Transact(_time.GetUtcNow(), tx => tx.AddEvent(message.FromMachine, message.Id, MessageDirection.Out, message.FromEndpoint,
+                    @event, detail));
+            }
+        }
+        finally
+        {
+            _flushing.Release();
+        }
+    }
+
+    /// <summary>Opens (decrypts) an envelope this machine sent or received.</summary>
+    public MessageContent Open(Envelope envelope) => MessageCrypto.Open(envelope, _keys.MachineId, _keys.Encryption);
+
+    /// <summary>An approved machine, by id, from the last list the router gave (null if unknown).</summary>
+    public MachineInfo? Machine(string id) => _machines.GetValueOrDefault(id);
+
+    /// <summary>An approved machine by id or name, asking the router again if it isn't known yet.</summary>
+    public async Task<MachineInfo> ResolveAsync(string to, CancellationToken cancellationToken = default)
+    {
+        var match = Find(to);
+        if (match is null)
+        {
+            await RefreshMachinesAsync(cancellationToken);
+            match = Find(to);
+        }
+
+        return match ?? throw new InvalidOperationException($"No approved machine is called '{to}'.");
+
+        MachineInfo? Find(string key) =>
+            _machines.GetValueOrDefault(key) ?? _machines.Values.SingleOrDefault(m => m.Name == key);
+    }
+
+    /// <summary>
+    /// Flushes the outbox and reports on <paramref name="envelopes"/> (composed with <see cref="Compose"/>):
+    /// relayed (with the router's state), or still in the outbox. Throws if the router refused one.
+    /// </summary>
+    public async Task<IReadOnlyList<SentMessage>> RelayComposedAsync(IReadOnlyList<Envelope> envelopes, CancellationToken cancellationToken = default)
+    {
+        await FlushOutboxAsync(cancellationToken);
+        var sent = new List<SentMessage>();
+        foreach (var envelope in envelopes)
+        {
+            var last = _store.GetEvents(envelope.FromMachine, envelope.Id).Last(e => e.Direction == MessageDirection.Out);
+            if (last.Event == MessageEvents.Failed)
+            {
+                throw new HubException(last.Detail);
+            }
+
+            var content = Open(envelope);
+            DeliveryState? state = last.Event == MessageEvents.Relayed
+                ? Enum.GetValues<DeliveryState>().First(s => WireProtocol.NameOf(s) == last.Detail)
+                : null;
+            sent.Add(new SentMessage(envelope.Id, envelope.ToMachine, content.ToEndpoint, content.ConversationId, envelope.Sequence, envelope.ExpiresOn, state));
         }
 
         return sent;
     }
-
-    /// <summary>Replies to <paramref name="original"/>: to its sender's endpoint, in its conversation, from the endpoint it was sent to.</summary>
-    public async Task<SentMessage> ReplyAsync(ReceivedMessage original, OutgoingMessage reply, CancellationToken cancellationToken = default) =>
-        await SendOneAsync(await ResolveAsync(original.Envelope.FromMachine, cancellationToken), original.Content.FromEndpoint, reply with
-        {
-            FromEndpoint = reply.FromEndpoint ?? original.Content.ToEndpoint,
-            ConversationId = original.Content.ConversationId,
-            ReplyTo = original.Envelope.Id,
-        }, cancellationToken);
 
     /// <summary>A stored message, decrypted: sent by this machine or received by it.</summary>
     public async Task<MessageContent?> ReadAsync(string fromMachine, Guid id) =>
@@ -292,59 +467,6 @@ public sealed class RelayClient : IAsyncDisposable
         return machine.EncryptionKey;
     }
 
-    private async Task<SentMessage> SendOneAsync(MachineInfo target, string toEndpoint, OutgoingMessage message, CancellationToken cancellationToken)
-    {
-        var toMachine = target.Id;
-        var recipientKey = VerifiedEncryptionKey(target);
-        var settings = _messaging.CurrentValue;
-        var lifetime = message.ExpiresIn ?? settings.DefaultExpiry;
-        if (lifetime <= TimeSpan.Zero)
-        {
-            throw new ArgumentException("A message must live for some time.", nameof(message));
-        }
-
-        if (lifetime > settings.MaxExpiry)
-        {
-            lifetime = settings.MaxExpiry;
-        }
-
-        var now = _time.GetUtcNow();
-        var id = Guid.NewGuid();
-        var content = new MessageContent(
-            message.FromEndpoint ?? Address.DefaultEndpoint,
-            toEndpoint,
-            message.ConversationId ?? Guid.NewGuid(),
-            message.ReplyTo,
-            message.OperationId ?? id,
-            message.Status,
-            string.IsNullOrEmpty(message.Subject) ? null : message.Subject,
-            MessageType.Message,
-            message.ContentType,
-            message.Metadata ?? new Dictionary<string, string>(),
-            message.Body,
-            now);
-        if (MessageRules.CheckContent(content) is { } problem)
-        {
-            throw new ArgumentException(problem, nameof(message));
-        }
-
-        // Stored, with its sequence number, before it leaves.
-        var envelope = await _store.ReserveOutgoingAsync(toMachine, content,
-            sequence => Signatures.SealEnvelope(_keys, id, toMachine, recipientKey, sequence, now + lifetime, content), now);
-        SendResult result;
-        try
-        {
-            result = await _connection.InvokeAsync<SendResult>(HubMethods.Send, envelope, cancellationToken);
-        }
-        catch (HubException)
-        {
-            await _store.ForgetOutgoingAsync(_keys.MachineId, id);
-            throw;
-        }
-
-        return new SentMessage(envelope.Id, toMachine, toEndpoint, envelope.Sequence, envelope.ExpiresOn, result.State);
-    }
-
     private void Post(Func<Task> work) => _work.Writer.TryWrite(work);
 
     private async Task RunWorkerAsync()
@@ -362,24 +484,12 @@ public sealed class RelayClient : IAsyncDisposable
         }
     }
 
-    private async Task<MachineInfo> ResolveAsync(string to, CancellationToken cancellationToken)
-    {
-        var match = Find(to);
-        if (match is null)
-        {
-            await RefreshMachinesAsync(cancellationToken);
-            match = Find(to);
-        }
-
-        return match ?? throw new InvalidOperationException($"No approved machine is called '{to}'.");
-
-        MachineInfo? Find(string key) =>
-            _machines.GetValueOrDefault(key) ?? _machines.Values.SingleOrDefault(m => m.Name == key);
-    }
-
     private async Task<MembershipStatus> AuthenticateAsync(CancellationToken cancellationToken)
     {
-        await _connection.InvokeAsync<HelloResult>(HubMethods.Hello, WireProtocol.Version, cancellationToken);
+        _authenticated = false;
+        var hello = await _connection.InvokeAsync<HelloResult>(HubMethods.Hello, WireProtocol.Version, cancellationToken);
+        ClockOffset = hello.ServerTime - _time.GetUtcNow();
+        RouterClockSkew = hello.ClockSkew;
         var challenge = await _connection.InvokeAsync<string>(HubMethods.GetChallenge, cancellationToken);
         var signature = _keys.Sign(Signatures.AuthPayload(challenge, _keys.PublicKey));
         var result = await _connection.InvokeAsync<AuthResult>(HubMethods.Authenticate, _keys.PublicKey, signature, cancellationToken);
@@ -387,8 +497,10 @@ public sealed class RelayClient : IAsyncDisposable
         Name = result.Name;
         if (result.Status == MembershipStatus.Approved)
         {
+            _authenticated = true;
             await RefreshMachinesAsync(cancellationToken);
             ConnectionChanged?.Invoke(true, null);
+            Post(() => FlushOutboxAsync()); // whatever waited for the connection
         }
 
         return result.Status;
@@ -409,6 +521,7 @@ public sealed class RelayClient : IAsyncDisposable
     private async Task OnMembershipChangedAsync(MembershipStatus status)
     {
         Status = status;
+        _authenticated &= status == MembershipStatus.Approved;
         MembershipChanged?.Invoke(status);
         if (status == MembershipStatus.Approved)
         {
@@ -460,6 +573,7 @@ public sealed class RelayClient : IAsyncDisposable
             : default((string Metric, string Reason)?);
 
         var stored = false;
+        var received = new ReceivedMessage(envelope, content, sender.Name, delivery.RelayedOn);
         if (refusal is { } r)
         {
             await _store.CountAsync(envelope.FromMachine, r.Metric, now);
@@ -467,15 +581,37 @@ public sealed class RelayClient : IAsyncDisposable
         }
         else
         {
-            stored = await _store.StoreIncomingAsync(envelope, content, delivery.RelayedOn, expiresOn, _keys.MachineId, now);
+            stored = _store.Transact(now, tx =>
+            {
+                if (!tx.InsertIncoming(envelope, content, delivery.RelayedOn, expiresOn, _keys.MachineId))
+                {
+                    return false;
+                }
+
+                if (IncomingHandler is { } incoming)
+                {
+                    incoming.OnStored(tx, received);
+                }
+                else
+                {
+                    tx.AddEvent(envelope.FromMachine, envelope.Id, MessageDirection.In, content.ToEndpoint, MessageEvents.Stored);
+                }
+
+                return true;
+            });
         }
 
         // Stored (or refused for good): the router can drop it. A duplicate is confirmed again and dropped quietly.
         await ConfirmAsync(envelope.Id);
 
+        if (stored && IncomingHandler is not null)
+        {
+            await FlushOutboxAsync(); // receipts it composed
+        }
+
         if (stored && MessageReceived is { } handler)
         {
-            await handler(new ReceivedMessage(envelope, content, sender.Name, delivery.RelayedOn));
+            await handler(received);
         }
     }
 
@@ -542,6 +678,17 @@ public sealed record OutgoingMessage(string Body)
     public IReadOnlyDictionary<string, string>? Metadata { get; init; }
 
     public TimeSpan? ExpiresIn { get; init; }
+
+    /// <summary>Protocol level; only the daemon sends anything but <see cref="MessageType.Message"/>.</summary>
+    public MessageType Type { get; init; } = MessageType.Message;
 }
 
-public sealed record SentMessage(Guid Id, string ToMachine, string ToEndpoint, long Sequence, DateTimeOffset ExpiresOn, DeliveryState State);
+/// <summary>Hooks the storing of incoming messages (see <see cref="RelayClient.IncomingHandler"/>).</summary>
+public interface IIncomingHandler
+{
+    /// <summary>Called inside the transaction that stored <paramref name="message"/>; record its first event here.</summary>
+    void OnStored(StoreTransaction tx, ReceivedMessage message);
+}
+
+/// <summary>A message sent. <see cref="State"/> is the router's; null when it is still in the outbox (no connection).</summary>
+public sealed record SentMessage(Guid Id, string ToMachine, string ToEndpoint, Guid ConversationId, long Sequence, DateTimeOffset ExpiresOn, DeliveryState? State);

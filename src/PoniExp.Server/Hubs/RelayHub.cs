@@ -38,7 +38,7 @@ public sealed class RelayHub(
         }
 
         Context.Items[HelloItem] = protocolVersion;
-        return new HelloResult(WireProtocol.Version);
+        return new HelloResult(WireProtocol.Version, time.GetUtcNow(), options.Value.ClockSkew);
     }
 
     [HubMethodName(HubMethods.GetChallenge)]

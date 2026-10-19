@@ -11,12 +11,14 @@ docker compose up -d --build                   # the router, in a Linux containe
 docker exec poniexp-server poniexp admin list    # admin, inside the container
 dotnet run --project src/PoniExp.Server -- router   # run the server locally
 dotnet run --project src/PoniExp.Cli -- <command>     # poniexp-client
+scripts/publish.sh win-x64 linux-x64                  # self-contained single-file clients in artifacts/
 ```
 
 ## Executables
 
 - `poniexp` (`src/PoniExp.Server`): server-side, one subcommand per function: `router`, `admin`. New server functionality is a new subcommand, not a new executable.
-- `poniexp-client` (`src/PoniExp.Cli`): what each machine runs.
+- `poniexp-client` (`src/PoniExp.Cli`): what each machine runs. `poniexp-client daemon` is the
+  machine's connection; the other commands, and `poniexp-client mcp`, talk to it over the local API.
 - The container is `poniexp-server`; its entrypoint is `poniexp router`.
 
 ## Rules
@@ -39,7 +41,18 @@ dotnet run --project src/PoniExp.Cli -- <command>     # poniexp-client
 - **`MessageType` is a closed enum** for protocol-level handling only. Agents' own protocols use
   `type: message` with `contentType`, `metadata` and `body`; there is no reply type (`replyTo` says it).
 - **"Confirm" is the client telling the router it stored a message** (`HubMethods.Confirm`).
-  "Acknowledge" is reserved for an agent taking a message on (phase 3). Don't mix them.
+  "Acknowledge" is an agent taking a message on (the `acknowledged` receipt). Don't mix them.
+- **Everything sent goes through the outbox:** `RelayClient.Compose(tx, ...)` inside a
+  `ClientStore.Transact`, then `FlushOutboxAsync`. Whatever a message causes (its event, a receipt, an
+  announcement) is composed in the transaction that records the cause, so it is sent exactly once
+  even across a crash. Never call the hub's `Send` directly.
+- **Automatic messages** (`receipt`, `file-receipt`, `endpoint`) are the daemon's: never answered by
+  anything automatic, short expiry (`Daemon:AutomaticExpiry`), never shown to agents.
+- **`RelayClient.IsConnected` means authenticated on this connection,** not just a live socket: the
+  router refuses anything sent between a reconnect and re-authentication.
+- **The local API is HTTP over a named pipe / Unix socket** (`LocalAddress.ForHome`). On Windows a
+  pipe client must not wait for a pipe that doesn't exist (check `\\.\pipe\<name>` first, connect
+  with a timeout), or a stopped daemon hangs its callers.
 - **Encryption goes through `MessageCrypto` / `Signatures.SealEnvelope`.** The router-visible header
   is the AES-GCM associated data and the message id, sender and reader are in the HKDF info; keep it
   that way for any new sealed thing. Never encrypt to a key that hasn't passed

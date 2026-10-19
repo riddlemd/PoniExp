@@ -11,9 +11,12 @@ another directly: laptops behind VPNs, hotel Wi-Fi or NAT just connect out.
         router (Linux container on wojtek)
           · knows each machine by its public key
           · approved / pending / rejected list
-          · routes signed messages, queues them for machines that are offline
+          · routes signed, encrypted messages, queues them for machines that are offline
           · tells everyone who comes and goes
 ```
+
+On each machine a **daemon** owns that one connection. Agents talk to their machine's daemon (an MCP
+server, the CLI, or the local API) as **endpoints**: `machine/endpoint`, e.g. `wojtek/hermes-default`.
 
 ## How trust works
 
@@ -51,15 +54,18 @@ docker exec poniexp-server poniexp admin certificate
 It listens on port 5443. Machines away from home need that port reachable, through a router port
 forward or the VPN.
 
-## Join a machine
+## Set up a machine
 
-Build the client with `dotnet publish src/PoniExp.Cli -c Release -o <dir>` (puts `poniexp-client` in `<dir>`).
+Build the client: `scripts/publish.sh <rid>` makes a self-contained single file (no .NET needed) in
+`artifacts/<rid>/`, for `win-x64`, `osx-arm64`, `linux-x64`, etc.
 
 ```sh
-poniexp-client init https://<router-host>:5443 --pin <sha256>
+poniexp-client init https://<router-host>:5443 --pin <sha256>   # creates this machine's keys
+poniexp-client service install          # start the daemon at logon (as you); or run 'poniexp-client daemon'
 poniexp-client join ise --notes "MacBook Pro"
 #   asked to join as 'ise'. On the router, check this join code and approve:
 #       3f2a-91c0-...
+poniexp-client doctor                   # router, certificate pin, clock, membership, daemon
 ```
 
 On the router:
@@ -73,48 +79,79 @@ docker exec poniexp-server poniexp admin remove <id|name>     # forget it; it ma
 
 Approval reaches the waiting `join` at once.
 
-## Use it
+**Starting the daemon automatically.** `service install` starts it at logon, as you: the `Run`
+registry key on Windows (no admin needed, no console window), a LaunchAgent on macOS, a systemd user
+unit on Linux. `service install --system` starts it at boot instead, so the machine receives while
+nobody is logged in: a Windows service under its own account `NT SERVICE\PoniExp` (admin; it has its
+own keys, so join it with `poniexp-client join` afterwards), a LaunchDaemon on macOS (sudo), a
+lingering systemd user unit on Linux. `--dry-run` shows what it would do; `service uninstall
+[--system]` undoes it; `service status` shows what's installed and running.
 
-Agents are addressed as `machine/endpoint` (a bare `machine` means its `default` endpoint).
+## Agents (MCP)
 
-```sh
-poniexp-client status                                  # membership, who's online, message metrics
-poniexp-client send --to wojtek/agent "hello"          # "pushed", or "queued" if wojtek is offline
-poniexp-client send --to wojtek --to blinky "hi both"  # one separate message per recipient
-poniexp-client send --to wojtek --subject sync --expires 2h --meta priority=high "sync please"
-echo '{"task":"sync"}' | poniexp-client send --to wojtek/agent --content-type application/json -
-poniexp-client send --to ise/cli --reply-to <id> --conversation <id> --status done "finished"
-poniexp-client listen                                  # stay connected, print messages (--json for scripts)
-```
-
-Settings go in `~/.poniexp/settings.json` (or `PONIEXP_Messaging__*` environment variables):
+Each agent is an endpoint. Give it the MCP server, as its own endpoint name:
 
 ```json
-{ "Messaging": { "DefaultExpiry": "7.00:00:00", "MaxExpiry": "7.00:00:00", "ClockSkew": "00:05:00" } }
+{ "mcpServers": { "poniexp": { "command": "poniexp-client", "args": ["mcp", "--endpoint", "claude"] } } }
 ```
 
-From code, use `PoniExp.Client.RelayClient`:
+Tools: `send`, `reply`, `ack`, `inbox`, `conversation`, `message`, `machines`, `status`. The agent
+is online while the MCP server runs. Its messages wait in the daemon until it fetches them, and the
+sender sees each step:
 
-```csharp
-using var keys = KeyRing.LoadOrCreate(ClientConfig.HomeDirectory);   // PoniExp.Secrets
-var settings = new ConfigurationBuilder().AddJsonFile(ClientConfig.SettingsPath, optional: true, reloadOnChange: true).Build();
-await using var client = new RelayClient(keys, ClientConfig.Load()!.ToOptions(),
-    new ClientStore(ClientConfig.DatabasePath), MessagingSettings.Monitor(settings));
-client.MessageReceived += async m => Console.WriteLine($"{m.From}: {m.Content.Body}");
-await client.ConnectAsync();
-await client.SendAsync("wojtek/agent", new OutgoingMessage("hi") { Subject = "greeting" });
+- **received**: the recipient's machine stored it (even if the agent is offline);
+- **acknowledged**: the agent took it on (`ack`, or a reply);
+- **rejected**: no such endpoint on that machine (never registered, or retired), with the reason.
+
+A reply's `status` (`progress`, `done`, `failed`) is the outcome of the work, separate from delivery.
+
+## From the command line
+
+```sh
+poniexp-client status                                  # this machine, its endpoints, message metrics
+poniexp-client machines                                # the others, and their endpoints' states
+poniexp-client send --to wojtek/agent "hello"          # "pushed", "queued" (wojtek offline) or "outbox" (router unreachable)
+poniexp-client send --to wojtek --to blinky "hi both"  # one separate message per recipient
+poniexp-client send --to wojtek --from ops --subject sync --expires 2h --meta priority=high "sync please"
+echo '{"task":"sync"}' | poniexp-client send --to wojtek/agent --content-type application/json -
+poniexp-client inbox --endpoint ops                    # messages for "ops" not yet acknowledged
+poniexp-client reply <id> --endpoint ops --status done "finished"
+poniexp-client message <id> --endpoint ops             # its delivery history
+poniexp-client listen --endpoint ops [--ack] [--json]  # be "ops": print messages and receipts as they arrive
+poniexp-client endpoint list | endpoint retire <name>  # the endpoint registry
+poniexp-client diagnostics                             # recent connection and delivery problems
 ```
+
+Settings go in `<home>/settings.json` (or `PONIEXP_<Section>__<Key>` environment variables), and
+apply without a restart:
+
+```json
+{
+  "Messaging": { "DefaultExpiry": "7.00:00:00", "MaxExpiry": "7.00:00:00", "ClockSkew": "00:05:00" },
+  "Daemon": { "EndpointTimeout": "00:00:45", "AutomaticExpiry": "01:00:00" }
+}
+```
+
+`--home <dir>` (or `PONIEXP_HOME`) picks another home than `~/.poniexp`; each home has its own keys,
+database and daemon.
+
+From code, talk to the daemon with `PoniExp.Client.LocalApiClient` (and `EndpointConnection` to be an
+endpoint), or use `RelayClient` directly for a process that is the machine's only connection.
 
 ## Delivery
 
-- A message to an online machine is pushed at once. One to an offline machine waits on the router and
-  is delivered when it connects, until it expires (7 days at most by default).
-- The recipient stores each message in its client database (`~/.poniexp/client.db`) before
-  **confirming** it to the router, so a crash mid-delivery means a redelivery, not a loss. A message
-  already stored is recognised and dropped.
+- Everything a machine sends goes through its **outbox** first. A message to an online machine is
+  pushed at once; one to an offline machine waits on the router until it connects. If the router
+  can't be reached, it waits in the outbox; one whose expiry passes there is marked `expired`, not sent.
+- The recipient stores each message in its client database (`<home>/client.db`) before **confirming**
+  it to the router, so a crash mid-delivery means a redelivery, not a loss. A message already stored
+  is recognised and dropped (and gets no second receipt).
+- Receipts and endpoint announcements are messages too, signed and encrypted, written in the same
+  transaction as what caused them. Nothing automatic is ever sent in reply to something automatic.
 - Each sender numbers its messages per recipient machine; gaps (messages that never arrived) show up
   in `poniexp-client status`.
-- Clients reconnect forever, and re-prove their key on each reconnect.
+- Daemons reconnect forever, re-prove their key on each reconnect, and announce their endpoints to
+  every machine that comes online.
 
 ## Layout
 
@@ -123,9 +160,11 @@ await client.SendAsync("wojtek/agent", new OutgoingMessage("hi") { Subject = "gr
 | `src/PoniExp.Core` | Keys, signing, encryption, protocol records. No dependencies. |
 | `src/PoniExp.Secrets` | Where private keys are kept: DPAPI, the macOS keychain (interop ported from Git Credential Manager, see `THIRD-PARTY-NOTICES.md`), owner-only files. |
 | `src/PoniExp.Server` | `poniexp`: the server executable. `poniexp router` runs the relay (SignalR hub, machine list, queue); `poniexp admin` manages it. Container image. |
-| `src/PoniExp.Client` | `RelayClient`: connect, prove the key, join, send, receive. `ClientStore`: the client database. |
+| `src/PoniExp.Client` | `RelayClient`: connect, prove the key, join, compose into the outbox, relay, receive. `ClientStore`: the client database. `LocalApiClient`: the daemon's local API. |
+| `src/PoniExp.Daemon` | The daemon: routing to endpoints, receipts, endpoint announcements, the local API (named pipe / Unix socket), service installation. |
+| `src/PoniExp.Mcp` | The MCP server (stdio) agents use. |
 | `src/PoniExp.Cli` | `poniexp-client`: the command line each machine uses. |
-| `tests/PoniExp.Tests` | Signing tests, and end-to-end tests against a real router. |
+| `tests/PoniExp.Tests` | Signing tests, and end-to-end tests against a real router and real daemons. |
 
 ```sh
 dotnet test PoniExp.slnx

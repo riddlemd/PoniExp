@@ -103,7 +103,11 @@ public sealed record KeyWrap(string Machine, string EphemeralKey, string Wrapped
 /// <summary>An envelope as the router hands it over, with when the router received it (the router's word, unsigned).</summary>
 public sealed record Delivery(Envelope Envelope, DateTimeOffset RelayedOn);
 
-public sealed record HelloResult(int ProtocolVersion);
+/// <summary>
+/// The router's answer to Hello: its protocol version, its clock and how far it lets clocks differ, so a
+/// client can tell when its own clock is off (<c>poniexp-client doctor</c>).
+/// </summary>
+public sealed record HelloResult(int ProtocolVersion, DateTimeOffset ServerTime, TimeSpan ClockSkew);
 
 public sealed record AuthResult(MembershipStatus Status, string MachineId, string? Name);
 
@@ -124,3 +128,39 @@ public sealed record MachineInfo(
     DateTimeOffset? LastSeenOn);
 
 public sealed record PresenceChange(string MachineId, string Name, bool Online, DateTimeOffset OccurredOn);
+
+/// <summary>Which delivery receipt (see <see cref="ReceiptBody"/>).</summary>
+public enum ReceiptKind
+{
+    /// <summary>The recipient's machine has stored the message, whether or not the endpoint is online.</summary>
+    Received,
+    /// <summary>An agent has taken the message on (an explicit ack, or a reply).</summary>
+    Acknowledged,
+    /// <summary>The recipient's machine won't deliver it (e.g. unknown endpoint). Sent instead of Received.</summary>
+    Rejected,
+}
+
+/// <summary>
+/// The body of a <see cref="MessageType.Receipt"/> message (JSON). The receipt's ReplyTo is the message it
+/// is about. Signed and encrypted like any message, so the router can't fake one.
+/// </summary>
+public sealed record ReceiptBody(ReceiptKind Receipt, string? Reason = null);
+
+/// <summary>An endpoint's state as its daemon announces it.</summary>
+public enum EndpointState
+{
+    Online,
+    /// <summary>Unregistered cleanly.</summary>
+    Left,
+    /// <summary>Stopped without unregistering, or missed its heartbeat.</summary>
+    TimedOut,
+}
+
+public sealed record AnnouncedEndpoint(string Name, EndpointState State, DateTimeOffset ChangedOn);
+
+/// <summary>
+/// The body of a <see cref="MessageType.Endpoint"/> message (JSON): the announcing daemon's complete list of
+/// endpoints (retired ones are left out). <see cref="Counter"/> only ever increases per daemon, so a
+/// receiver keeps the newest list and ignores a replayed or late one.
+/// </summary>
+public sealed record EndpointAnnouncement(long Counter, IReadOnlyList<AnnouncedEndpoint> Endpoints);

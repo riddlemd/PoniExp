@@ -12,13 +12,18 @@ only has to build on the ones before it; a protection that arrives in a later ph
 
 ## Built
 
-- **Identity:** an ECDSA P-256 key per machine; the machine id is a hash of its public key.
+- **Identity:** an identity key (ECDSA P-256) and an encryption key (ECDH P-256, signed by it) per
+  machine, kept in the OS's secret store; the machine id is a hash of the identity public key.
 - **Joining:** a signed join request (public key, name, description), compared by join code and
   approved with `docker exec poniexp-server poniexp admin approve`.
 - **Connecting:** a signed challenge on every connect; only approved keys can send, receive or list
   machines.
-- **Messages:** signed by the sender, checked by the server and again by the recipient.
+- **Messages (phases 1-2):** format v2/v3, one recipient each, signed over every field and encrypted
+  end to end; expiry, replay and sequence checks on the recipient by its own clock.
 - **Delivery:** queued for offline machines (7 days), kept until the recipient confirms them.
+- **Daemon (phase 3):** the machine's one connection; local API over a pipe or socket; endpoints with
+  heartbeats and announcements; `received` / `acknowledged` / `rejected` receipts; the outbox; MCP
+  server; `doctor`; `service install` in user and system modes; self-contained single-file builds.
 - **Presence:** who's online, pushed to every machine.
 - **TLS:** a self-signed certificate made once by the server and pinned by clients.
 - **Executables:**
@@ -42,7 +47,7 @@ only has to build on the ones before it; a protection that arrives in a later ph
 | Endpoint registry | Every endpoint that has ever registered with a daemon is remembered (`endpoints`). Registered but not connected is **offline**: its messages wait until it returns or they expire. Never registered, or retired with `poniexp-client endpoint retire <name>`, is **unknown**: the message gets a `rejected` receipt. |
 | Automatic messages | `receipt`, `file-receipt` and `endpoint` are automatic. Nothing automatic is ever sent in response to something automatic; they expire after a short time (default 1 hour, a setting) and aren't retried after that; at most one goes out per message per event. They get rows in `messages` (so duplicates and sequence numbers work as for any message) but are never shown to agents. An expired message sends nothing back: the sender marks it `expired` by its own clock. |
 | Hermes bridge | One endpoint per Hermes profile, named `hermes-<profile>` (e.g. `wojtek/hermes-default`), since each profile has its own memory, skills and gateway. Each has its own gateway URL (configuration) and its own A2A token, registered with that profile's Hermes and kept in PoniExp's secret store. |
-| Daemon start-up | Two modes. **User mode** runs at logon as the user: a logon scheduled task (Windows), a LaunchAgent (macOS), a systemd user unit (Linux). **System mode** runs at boot: a Windows service under its own virtual account `NT SERVICE\PoniExp` (keys in that account's DPAPI, data in `%ProgramData%\PoniExp`, the local pipe restricted to the owning user; never a "do not store password" task), a macOS LaunchDaemon (keys in the System keychain), a systemd user unit with `loginctl enable-linger` (Linux). |
+| Daemon start-up | Two modes. **User mode** runs at logon as the user: the per-user `Run` registry key (Windows; a logon task would need admin), a LaunchAgent (macOS), a systemd user unit (Linux). **System mode** runs at boot: a Windows service under its own virtual account `NT SERVICE\PoniExp` (keys in that account's DPAPI, data in `%ProgramData%\PoniExp`, the local pipe restricted to the owning user; never a "do not store password" task), a macOS LaunchDaemon (keys in the System keychain), a systemd user unit with `loginctl enable-linger` (Linux). |
 | Local trust | Every local process running as the machine's user is trusted; it could read the user's keys anyway. The daemon scopes what each endpoint is shown, but that is convenience, not a security boundary. |
 | Storage | SQLite, bundled in the app (`Microsoft.Data.Sqlite`). Nothing for the user to install. |
 | Client database | One SQLite database per machine (see Client database below). Each table is created by the phase that first needs it. |
@@ -94,15 +99,17 @@ each was last seen.
 
 `message_events` (phase 3): append-only. Delivery only; the outcome of the work lives in replies,
 and files have their own events.
-- `message_id`, `endpoint`, `event`, `occurred_on`, `detail`
+- `from_machine`, `message_id`, `direction` (in or out: a message a machine sends itself has both),
+  `endpoint`, `event`, `occurred_on`, `detail`
 - Inbound: `stored` (`received` sent) → `fetched` → `acknowledged` (sent), or `rejected` (sent,
   with a reason) / `expired` (nothing sent; see Automatic messages).
 - Outbound: `queued` → `relayed` → `received` → `acknowledged`, or `rejected` (by the recipient,
   with its reason) / `failed` (the server refused it) / `expired`. `relayed` is the server's word;
   `received`, `acknowledged` and `rejected` are the recipient's signed receipts.
 
-`message_state` (phase 3): the latest event per message and endpoint, updated in the same
-transaction as the event.
+`message_state` (phase 3): the furthest event per message and direction, updated in the same
+transaction as the event. A late event never moves it back (a `received` after `acknowledged`), and a
+final one (`rejected`, `failed`, `expired`) is never left.
 
 `bridge_tasks` (phase 12): for messages delivered through the Hermes bridge, `message_id`,
 `a2a_task_id`, `context_id`, the peer (`machine/endpoint`) the task belongs to, and the task's last
@@ -112,8 +119,11 @@ known state.
 `last_seen_on`, `retired_on`. The endpoint registry (see Endpoint registry).
 
 `peer_endpoints` (phase 3): what other machines have announced: `machine`, `endpoint`, `state`
-(online, left, timed out), `counter` (the announcing daemon's), `changed_on`. Only a higher counter
-replaces a row.
+(online, left, timed out), `counter` (the announcing daemon's), `changed_on`. Each announcement is
+the machine's complete list, so a newer one replaces all of that machine's rows; `peer_counters`
+keeps the highest counter seen per machine, and a lower or equal one is ignored.
+
+`daemon_state` (phase 3): this daemon's own counters (the announcement counter), which only increase.
 
 `diagnostics` (phase 3)
 - `occurred_on`, `level`, `category` (connection, signature, version, delivery), `detail`, and the
@@ -269,7 +279,7 @@ is what bounds its replay window, so it doesn't take the relay's value on trust.
   - two messages to the same recipient use different wrapping keys
   - the sender can decrypt its own stored outbound envelope
 
-## Phase 3: Daemon and MCP
+## Phase 3: Daemon and MCP (done)
 
 Agents on different machines talk through their daemons, with MCP as the agents' interface. Adds
 `message_events`, `message_state`, `endpoints`, `peer_endpoints` and `diagnostics` to the client
@@ -283,7 +293,7 @@ database. Pushing messages into Hermes (the Hermes bridge) is phase 12.
 - **Local API** on a Unix socket or named pipe, used by the CLI, the MCP servers and (phase 12) the
   Hermes bridge.
 - **`poniexp-client mcp`** (stdio). Tools: `send`, `reply`, `ack`, `inbox`, `conversation`,
-  `machines`, `status`; later `attach` and `fetch`.
+  `message` (one message and its delivery history), `machines`, `status`; later `attach` and `fetch`.
 - **Endpoint announcements:** an endpoint (an MCP server, the Hermes bridge, a CLI `listen`)
   registers with its daemon by name and keeps the registration alive with a heartbeat.
   - The daemon announces each change to every approved machine: an endpoint came **online**,
@@ -318,11 +328,17 @@ database. Pushing messages into Hermes (the Hermes bridge) is phase 12.
 - **Self-contained builds** for Windows, macOS and Linux, with no .NET install needed. The bundled
   SQLite library must unpack correctly from the single-file build; test it on each OS.
 - **Running as a service:** `poniexp-client service install [--system]` sets the daemon up to start
-  automatically, in user mode (at logon) or system mode (at boot); see Daemon start-up.
+  automatically, in user mode (at logon) or system mode (at boot); see Daemon start-up. On Windows,
+  user mode is the per-user `Run` registry key with `conhost --headless` (no console window), not a
+  logon scheduled task: creating a logon task needs admin. It isn't restarted if it stops.
+- **Joining goes through the daemon** when one runs (`poniexp-client join`): in system mode only the
+  daemon holds the keys.
   `service uninstall` and `service status` go with it. In system mode the daemon owns the keys
   (they are created under its account), and the CLI only ever talks to it over the local API.
 - **`diagnostics`:** connection, signature, version and delivery problems are recorded, and shown by
   `doctor`.
+- **Not verified live:** system mode (`service install --system`) on any OS: on Windows it needs an
+  elevated prompt; and nothing on macOS (no Mac to hand). Their plans are covered by tests only.
 - **Done when:**
   - An agent on one machine, through MCP, holds a conversation with an agent on another.
   - Tests show an endpoint's online, left and timed-out states reaching another machine, a machine

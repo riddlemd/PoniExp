@@ -13,6 +13,8 @@
     <ProjectReference Include="../../src/PoniExp.Server/PoniExp.Server.csproj" />
     <ProjectReference Include="../../src/PoniExp.Client/PoniExp.Client.csproj" />
     <ProjectReference Include="../../src/PoniExp.Secrets/PoniExp.Secrets.csproj" />
+    <ProjectReference Include="../../src/PoniExp.Daemon/PoniExp.Daemon.csproj" />
+    <ProjectReference Include="../../src/PoniExp.Mcp/PoniExp.Mcp.csproj" />
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />

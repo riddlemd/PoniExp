@@ -2,7 +2,7 @@
 
 What each party can and can't do, as built. Updated each phase (see `docs/plan.md`).
 
-**Current state: phase 2** (end-to-end encryption).
+**Current state: phase 3** (daemon, local API, receipts, endpoint announcements, MCP).
 
 ## Parties
 
@@ -12,6 +12,8 @@ What each party can and can't do, as built. Updated each phase (see `docs/plan.m
   keys, timing or completeness.
 - **The owner**, who approves machines with `docker exec` on the router's host.
 - **Local processes** running as a machine's user are trusted: they could read its keys anyway.
+- **The daemon** on each machine: the only process that talks to the router. Agents reach it through
+  its local API.
 
 ## What the router sees
 
@@ -42,10 +44,31 @@ Endpoints, conversation, subject, type, metadata, body and `createdOn` are encry
 - Lie about when it received a message (`relayedOn` is its unsigned word).
 - Refuse service, e.g. by withholding a machine's keys.
 
+## Receipts and announcements
+
+- Delivery receipts (`received`, `acknowledged`, `rejected`) and endpoint announcements are messages:
+  signed by the machine that sends them and encrypted, so the router can't fake, read or alter one.
+  It can drop or delay them like any message.
+- A receipt counts only from the machine the message was sent to: one claiming to be about a message
+  sent elsewhere is ignored (and recorded in diagnostics).
+- Each announcement carries the announcing daemon's counter, which only increases. A receiver keeps
+  the newest list per machine, so a replayed or late announcement can't bring back an old state.
+- Endpoint names travel encrypted inside announcements: the router doesn't learn which agents a
+  machine has.
+
 ## Network
 
 - TLS with a self-signed certificate pinned by SHA-256 on every client: no public CA, and a man in the
   middle is refused.
+
+## The local API
+
+- HTTP over a named pipe (Windows) or a Unix socket, never a TCP port. The pipe is the current
+  user's only; the socket is mode 0600 in the (0700) home directory. In system mode on Windows the
+  service's pipe admits only the service and the user who installed it.
+- Inside a machine, endpoints don't authenticate to the daemon: every local process of the user is
+  trusted (see Parties). The daemon shows each endpoint only its own messages, for convenience, not
+  as a security boundary.
 
 ## Machines
 
@@ -54,6 +77,8 @@ Endpoints, conversation, subject, type, metadata, body and `createdOn` are encry
 - Any approved machine can message any endpoint on any other (permissions are phase 9).
 - Private keys are kept in the OS's secret store: DPAPI (current user) on Windows, the login keychain
   on macOS, owner-only (0600) files on Linux, where disk encryption protects them at rest.
+- In system mode (a boot-time service) the daemon has its own keys, under its own account (Windows:
+  `NT SERVICE\PoniExp`, DPAPI; macOS: root). It is a separate machine identity, joined separately.
 - The client database (`~/.poniexp/client.db`) keeps messages as their encrypted envelopes. Routing and
   conversation metadata (endpoints, subject, type, ids, times) is in the clear there for searching;
   bodies are not.

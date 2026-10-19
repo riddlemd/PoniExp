@@ -15,8 +15,11 @@ public sealed class RelayClientOptions
     public IReadOnlyList<TimeSpan> ReconnectDelays { get; init; } =
         [TimeSpan.Zero, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(30)];
 
-    /// <summary>For tests: false plays a client that crashes after storing a message but before confirming it.</summary>
-    internal bool ConfirmMessages { get; init; } = true;
+    /// <summary>
+    /// False keeps the router's copy of everything delivered: tests use it to play a client that crashes before
+    /// confirming, and <c>doctor</c> and <c>join</c> for a probe connection whose deliveries the daemon must still get.
+    /// </summary>
+    public bool ConfirmMessages { get; init; } = true;
 
     /// <summary>For tests: route the connection through a given handler (e.g. a TestServer).</summary>
     public Func<HttpMessageHandler, HttpMessageHandler>? HttpMessageHandlerFactory { get; init; }
