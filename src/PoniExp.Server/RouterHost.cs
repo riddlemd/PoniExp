@@ -12,10 +12,17 @@ namespace PoniExp.Server;
 
 public static class RouterHost
 {
-    public static WebApplication Build(string[] args, Action<RouterOptions>? configure = null)
+    /// <param name="configure">Applied after configuration binding, on every reload (tests use it to pin ports and paths).</param>
+    /// <param name="configuration">Extra configuration sources (tests add a reloadable in-memory one).</param>
+    public static WebApplication Build(string[] args, Action<RouterOptions>? configure = null,
+        Action<IConfigurationBuilder>? configuration = null)
     {
         var builder = WebApplication.CreateBuilder(args);
-        var options = builder.Configuration.GetSection(RouterOptions.Section).Get<RouterOptions>() ?? new RouterOptions();
+        configuration?.Invoke(builder.Configuration);
+        var section = builder.Configuration.GetSection(RouterOptions.Section);
+
+        // The listener, TLS and data directory are fixed at startup; everything else is read live.
+        var options = section.Get<RouterOptions>() ?? new RouterOptions();
         configure?.Invoke(options);
 
         var time = TimeProvider.System;
@@ -37,7 +44,11 @@ public static class RouterHost
             }
         });
 
-        builder.Services.AddSingleton(Options.Create(options));
+        builder.Services.AddOptions<RouterOptions>()
+            .Bind(section)
+            .PostConfigure(o => configure?.Invoke(o))
+            .ValidateOnStart();
+        builder.Services.AddSingleton<IValidateOptions<RouterOptions>, RouterOptionsValidator>();
         builder.Services.AddSingleton(time);
         builder.Services.AddSingleton(certificateInfo);
         builder.Services.AddSingleton<MachineRegistry>();
@@ -45,10 +56,11 @@ public static class RouterHost
         builder.Services.AddSingleton<PresenceTracker>();
         builder.Services.AddSingleton<AdminService>();
         builder.Services.AddSignalR(signalR =>
-        {
-            signalR.MaximumReceiveMessageSize = Limits.MaxBodyBytes + 64 * 1024;
-            signalR.EnableDetailedErrors = false; // HubException messages still reach the caller
-        });
+            {
+                signalR.MaximumReceiveMessageSize = Limits.MaxContentBytes * 2 + 64 * 1024;
+                signalR.EnableDetailedErrors = false; // HubException messages still reach the caller
+            })
+            .AddJsonProtocol(json => WireProtocol.Configure(json.PayloadSerializerOptions));
 
         var app = builder.Build();
         app.MapHub<RelayHub>(HubMethods.Path);

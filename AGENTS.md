@@ -21,6 +21,8 @@ dotnet run --project src/PoniExp.Cli -- <command>     # poniexp-client
 
 ## Rules
 
+- **The design is in `docs/plan.md`** (decisions, phases, open questions) and the threat model in
+  `docs/security.md`. Read the decisions before changing the protocol.
 - **Every signature goes through `SigningPayload.Build(purpose, fields...)`.** It length-prefixes
   fields and puts the purpose first, so one signature can't be replayed as another kind. New signed
   messages get a new purpose string and a method in `Protocol/Signatures.cs`.
@@ -30,10 +32,26 @@ dotnet run --project src/PoniExp.Cli -- <command>     # poniexp-client
   `[HubMethodName]` on the hub); never a literal.
 - **Client `On` handlers only enqueue work** (`Post`). Awaiting a hub call inside a handler blocks
   the receive loop that would complete it.
+- **The message format is versioned.** Any change to `Envelope`, `MessageContent` or a hub method's
+  shape bumps `WireProtocol.Version`; mismatched clients are refused at `Hello`.
+- **The signature covers every field.** A new envelope or content field goes into
+  `Signatures.EnvelopePayload` / `ContentPayload` and gets a line in the "covers every field" test.
+- **`MessageType` is a closed enum** for protocol-level handling only. Agents' own protocols use
+  `type: message` with `contentType`, `metadata` and `body`; there is no reply type (`replyTo` says it).
+- **"Confirm" is the client telling the router it stored a message** (`HubMethods.Confirm`).
+  "Acknowledge" is reserved for an agent taking a message on (phase 3). Don't mix them.
+- **Every check that protects against the router also runs on the recipient** (signature, expiry
+  by its own clock, duplicates): the router is trusted to route, not to be honest.
+- **Tunable values are settings,** with defaults, in an options class validated at startup.
+  Singletons read `IOptionsMonitor<T>.CurrentValue` where they use it; the hub (scoped) uses
+  `IOptionsSnapshot<T>`. Listener, TLS and data-directory settings are startup-only.
 - **The router trusts nothing the client says about itself** except what a signature proves: the
   sender id comes from the authenticated connection, and is checked against the envelope.
 - **Admin is loopback-only** (`docker exec`). Don't expose it on the relay port.
+- The client database (`ClientStore`, SQLite) is shared by every process on the machine: writes are
+  short IMMEDIATE transactions. Store a message before confirming it to the router.
 - Registry and queue writes are serialised with a `SemaphoreSlim`, saved to disk first, then
   published as a new immutable snapshot. Reads don't lock.
 - Every `Task`-returning method ends in `Async`.
+- Timestamps are named `*On` / `*_on`, never `*At` / `*_at`.
 - No secrets in the repo: keys live in `~/.poniexp/` and the router's `/data` volume.

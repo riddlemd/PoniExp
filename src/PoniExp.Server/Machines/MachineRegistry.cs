@@ -13,15 +13,16 @@ public sealed class MachineRegistry
 {
     private readonly SemaphoreSlim _lock = new(1, 1);
     private readonly string _path;
-    private readonly int _maxPending;
+    private readonly IOptionsMonitor<RouterOptions> _options;
     private readonly TimeProvider _time;
     private ImmutableDictionary<string, MachineRecord> _machines;
 
-    public MachineRegistry(IOptions<RouterOptions> options, TimeProvider time)
+    public MachineRegistry(IOptionsMonitor<RouterOptions> options, TimeProvider time)
     {
-        Directory.CreateDirectory(options.Value.DataDirectory);
-        _path = Path.Combine(options.Value.DataDirectory, "machines.json");
-        _maxPending = options.Value.MaxPendingMachines;
+        var dataDirectory = options.CurrentValue.DataDirectory; // startup only
+        Directory.CreateDirectory(dataDirectory);
+        _path = Path.Combine(dataDirectory, "machines.json");
+        _options = options;
         _time = time;
         _machines = (JsonFile.Read<List<MachineRecord>>(_path) ?? []).ToImmutableDictionary(m => m.Id);
     }
@@ -45,7 +46,7 @@ public sealed class MachineRegistry
                 return (machines, existing);
             }
 
-            if (existing is null && machines.Values.Count(m => m.Status == MembershipStatus.Pending) >= _maxPending)
+            if (existing is null && machines.Values.Count(m => m.Status == MembershipStatus.Pending) >= _options.CurrentValue.MaxPendingMachines)
             {
                 throw new RouterException("Too many machines are waiting for approval; try again later.", RouterErrorKind.Conflict);
             }
@@ -67,9 +68,9 @@ public sealed class MachineRegistry
             return (machines.Remove(record.Id), record);
         });
 
-    public Task TouchAsync(string id, DateTimeOffset at) =>
+    public Task TouchAsync(string id, DateTimeOffset seenOn) =>
         UpdateAsync(machines => machines.TryGetValue(id, out var record)
-            ? (machines.SetItem(id, record with { LastSeen = at }), record)
+            ? (machines.SetItem(id, record with { LastSeenOn = seenOn }), record)
             : (machines, null!));
 
     /// <summary>
@@ -114,7 +115,7 @@ public sealed class MachineRegistry
                 }
             }
 
-            var decided = record with { Status = status, DecidedAt = _time.GetUtcNow() };
+            var decided = record with { Status = status, DecidedOn = _time.GetUtcNow() };
             return (machines.SetItem(record.Id, decided), decided);
         });
 

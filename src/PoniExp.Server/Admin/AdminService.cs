@@ -44,7 +44,7 @@ public sealed class AdminService(
     }
 
     private AdminMachineView View(MachineRecord m) =>
-        new(m.Id, m.Name, m.Status, m.JoinCode, m.Description, m.RequestedAt, m.DecidedAt, m.LastSeen, presence.IsOnline(m.Id));
+        new(m.Id, m.Name, m.Status, m.JoinCode, m.Description, m.RequestedOn, m.DecidedOn, m.LastSeenOn, presence.IsOnline(m.Id));
 }
 
 public sealed record AdminMachineView(
@@ -53,7 +53,7 @@ public sealed record AdminMachineView(
     MembershipStatus Status,
     string JoinCode,
     MachineDescription Description,
-    DateTimeOffset RequestedAt,
-    DateTimeOffset? DecidedAt,
-    DateTimeOffset? LastSeen,
+    DateTimeOffset RequestedOn,
+    DateTimeOffset? DecidedOn,
+    DateTimeOffset? LastSeenOn,
     bool Online);

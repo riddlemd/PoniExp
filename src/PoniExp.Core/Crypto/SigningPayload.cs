@@ -11,7 +11,7 @@ public static class SigningPayload
 {
     public const string Version = "poniexp/1";
 
-    public static byte[] Build(string purpose, params string?[] fields)
+    public static byte[] Build(string purpose, params IEnumerable<string?> fields)
     {
         var builder = new StringBuilder(Version).Append('\n');
         Append(builder, purpose);

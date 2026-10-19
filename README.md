@@ -26,9 +26,10 @@ another directly: laptops behind VPNs, hotel Wi-Fi or NAT just connect out.
   approve.
 - **Connecting.** On every connect the router sends a random challenge, and the machine signs it.
   Only a connection that proves an approved key can send, receive, or see the machine list.
-- **Messages are signed end to end.** The sender signs each message (id, from, to, kind, body,
-  time). The router checks the signature before routing, and the recipient checks it again against the
-  sender's key. A compromised router could drop or delay messages, but not forge or alter them.
+- **Messages are signed end to end.** The sender signs every field of each message. The router checks
+  the signature before routing, and the recipient checks it again against the sender's key. The
+  recipient also judges expiry by its own clock and drops duplicates, so a compromised router could
+  drop or delay messages, but not forge, alter, replay or stretch them.
 - **The router's own identity.** The router makes a self-signed TLS certificate on first start and
   keeps it in its data volume. Clients pin its SHA-256, so it needs no public CA or domain name, and a
   man in the middle is refused.
@@ -69,29 +70,45 @@ Approval reaches the waiting `join` at once.
 
 ## Use it
 
+Agents are addressed as `machine/endpoint` (a bare `machine` means its `default` endpoint).
+
 ```sh
-poniexp-client status                   # membership, and who's online
-poniexp-client send wojtek chat "hello" # "delivered" or "queued" if wojtek is offline
-echo '{"task":"sync"}' | poniexp-client send wojtek task -
-poniexp-client listen                   # stay connected, print messages (--json for scripts)
+poniexp-client status                                  # membership, who's online, message metrics
+poniexp-client send --to wojtek/agent "hello"          # "pushed", or "queued" if wojtek is offline
+poniexp-client send --to wojtek --to blinky "hi both"  # one separate message per recipient
+poniexp-client send --to wojtek --subject sync --expires 2h --meta priority=high "sync please"
+echo '{"task":"sync"}' | poniexp-client send --to wojtek/agent --content-type application/json -
+poniexp-client send --to ise/cli --reply-to <id> --conversation <id> --status done "finished"
+poniexp-client listen                                  # stay connected, print messages (--json for scripts)
+```
+
+Settings go in `~/.poniexp/settings.json` (or `PONIEXP_Messaging__*` environment variables):
+
+```json
+{ "Messaging": { "DefaultExpiry": "7.00:00:00", "MaxExpiry": "7.00:00:00", "ClockSkew": "00:05:00" } }
 ```
 
 From code, use `PoniExp.Client.RelayClient`:
 
 ```csharp
 using var identity = MachineIdentity.LoadOrCreate(ClientConfig.KeyPath);
-await using var client = new RelayClient(identity, ClientConfig.Load()!.ToOptions());
-client.MessageReceived += async m => Console.WriteLine($"{m.FromName}: {m.Envelope.Body}");
+var settings = new ConfigurationBuilder().AddJsonFile(ClientConfig.SettingsPath, optional: true, reloadOnChange: true).Build();
+await using var client = new RelayClient(identity, ClientConfig.Load()!.ToOptions(),
+    new ClientStore(ClientConfig.DatabasePath), MessagingSettings.Monitor(settings));
+client.MessageReceived += async m => Console.WriteLine($"{m.From}: {m.Content.Body}");
 await client.ConnectAsync();
-await client.SendAsync("wojtek", "chat", "hi");
+await client.SendAsync("wojtek/agent", new OutgoingMessage("hi") { Subject = "greeting" });
 ```
 
 ## Delivery
 
-- A message to an online machine is pushed at once. One to an offline machine waits on the router
-  (up to 7 days) and is delivered when it connects.
-- Messages stay queued until the recipient **acknowledges** them, so a crash mid-delivery means a
-  redelivery, not a loss. Recipients drop duplicates by message id.
+- A message to an online machine is pushed at once. One to an offline machine waits on the router and
+  is delivered when it connects, until it expires (7 days at most by default).
+- The recipient stores each message in its client database (`~/.poniexp/client.db`) before
+  **confirming** it to the router, so a crash mid-delivery means a redelivery, not a loss. A message
+  already stored is recognised and dropped.
+- Each sender numbers its messages per recipient machine; gaps (messages that never arrived) show up
+  in `poniexp-client status`.
 - Clients reconnect forever, and re-prove their key on each reconnect.
 
 ## Layout
@@ -100,7 +117,7 @@ await client.SendAsync("wojtek", "chat", "hi");
 |---|---|
 | `src/PoniExp.Core` | Keys, signing, protocol records. No dependencies. |
 | `src/PoniExp.Server` | `poniexp`: the server executable. `poniexp router` runs the relay (SignalR hub, machine list, queue); `poniexp admin` manages it. Container image. |
-| `src/PoniExp.Client` | `RelayClient`: connect, prove the key, join, send, receive. |
+| `src/PoniExp.Client` | `RelayClient`: connect, prove the key, join, send, receive. `ClientStore`: the client database. |
 | `src/PoniExp.Cli` | `poniexp-client`: the command line each machine uses. |
 | `tests/PoniExp.Tests` | Signing tests, and end-to-end tests against a real router. |
 

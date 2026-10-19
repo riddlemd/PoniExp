@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.SignalR.Client;
+using PoniExp.Client;
 using PoniExp.Core.Crypto;
 using PoniExp.Core.Protocol;
 using PoniExp.Server;
@@ -44,14 +45,14 @@ public class RelayTests
         var (wojtek, _) = await router.MemberAsync("wojtek");
         var received = Wait.For<ReceivedMessageArgs>(h => wojtek.MessageReceived += m =>
         {
-            h(new ReceivedMessageArgs(m.FromName, m.Envelope.Kind, m.Envelope.Body));
+            h(new ReceivedMessageArgs(m.From.ToString(), m.Content.ToEndpoint, m.Content.Body));
             return Task.CompletedTask;
         });
 
-        var result = await ise.SendAsync("wojtek", "chat", "hello wojtek");
+        var result = await ise.SendAsync("wojtek/agent", new OutgoingMessage("hello wojtek") { FromEndpoint = "cli" });
 
-        Assert.Equal(DeliveryState.Delivered, result.State);
-        Assert.Equal(new ReceivedMessageArgs("ise", "chat", "hello wojtek"), await received);
+        Assert.Equal(DeliveryState.Pushed, result.State);
+        Assert.Equal(new ReceivedMessageArgs("ise/cli", "agent", "hello wojtek"), await received);
     }
 
     [Fact]
@@ -63,12 +64,12 @@ public class RelayTests
         await wojtek.DisposeAsync();
         await RouterFixture.Eventually(() => ise.Machines.Single(m => m.Name == "wojtek").Online == false);
 
-        Assert.Equal(DeliveryState.Queued, (await ise.SendAsync("wojtek", "chat", "while you were out")).State);
+        Assert.Equal(DeliveryState.Queued, (await ise.SendAsync("wojtek", new OutgoingMessage("while you were out"))).State);
 
         var back = router.Client(wojtekKey);
         var received = Wait.For<string>(h => back.MessageReceived += m =>
         {
-            h(m.Envelope.Body);
+            h(m.Content.Body);
             return Task.CompletedTask;
         });
         await back.ConnectAsync();
@@ -76,7 +77,7 @@ public class RelayTests
     }
 
     [Fact]
-    public async Task UnackedMessagesSurviveARouterRestart()
+    public async Task UnconfirmedMessagesSurviveARouterRestart()
     {
         var data = Path.Combine(Path.GetTempPath(), "poniexp-tests", Guid.NewGuid().ToString("N"));
         MachineIdentity wojtekKey;
@@ -87,7 +88,7 @@ public class RelayTests
             wojtekKey = key;
             await wojtek.DisposeAsync();
             await RouterFixture.Eventually(() => !ise.Machines.Single(m => m.Name == "wojtek").Online);
-            await ise.SendAsync("wojtek", "chat", "persisted");
+            await ise.SendAsync("wojtek", new OutgoingMessage("persisted"));
             Directory.CreateDirectory(data + "-keep");
             foreach (var file in Directory.GetFiles(data))
             {
@@ -99,7 +100,7 @@ public class RelayTests
         var back = restarted.Client(wojtekKey);
         var received = Wait.For<string>(h => back.MessageReceived += m =>
         {
-            h(m.Envelope.Body);
+            h(m.Content.Body);
             return Task.CompletedTask;
         });
         Assert.Equal(MembershipStatus.Approved, await back.ConnectAsync());
@@ -140,17 +141,21 @@ public class RelayTests
         var (_, wojtekKey) = await router.MemberAsync("wojtek");
         var connection = await RawMemberConnectionAsync(router, iseKey);
 
-        var forged = Signatures.SignEnvelope(wojtekKey, iseKey.MachineId, "chat", "I am wojtek", DateTimeOffset.UtcNow);
+        var now = DateTimeOffset.UtcNow;
+        var forged = Envelopes.Sign(wojtekKey, iseKey.MachineId, now, now.AddHours(1), "I am wojtek");
         var spoofed = await Assert.ThrowsAsync<HubException>(() => connection.InvokeAsync<SendResult>(HubMethods.Send, forged));
         Assert.Contains("own machine id", spoofed.Message);
 
-        var genuine = Signatures.SignEnvelope(iseKey, wojtekKey.MachineId, "chat", "hi", DateTimeOffset.UtcNow);
+        var genuine = Envelopes.Sign(iseKey, wojtekKey.MachineId, now, now.AddHours(1), "hi");
         var tampered = await Assert.ThrowsAsync<HubException>(() =>
-            connection.InvokeAsync<SendResult>(HubMethods.Send, genuine with { Body = "rm -rf" }));
+            connection.InvokeAsync<SendResult>(HubMethods.Send, genuine with { Content = genuine.Content with { Body = "rm -rf" } }));
         Assert.Contains("signature", tampered.Message);
+        var stretched = await Assert.ThrowsAsync<HubException>(() =>
+            connection.InvokeAsync<SendResult>(HubMethods.Send, genuine with { ExpiresOn = genuine.ExpiresOn.AddDays(1) }));
+        Assert.Contains("signature", stretched.Message);
 
-        var stale = Signatures.SignEnvelope(iseKey, wojtekKey.MachineId, "chat", "old", DateTimeOffset.UtcNow.AddHours(-1));
-        Assert.Contains("clock", (await Assert.ThrowsAsync<HubException>(() => connection.InvokeAsync<SendResult>(HubMethods.Send, stale))).Message);
+        var expired = Envelopes.Sign(iseKey, wojtekKey.MachineId, now.AddHours(-2), now.AddHours(-1), "old");
+        Assert.Contains("expired", (await Assert.ThrowsAsync<HubException>(() => connection.InvokeAsync<SendResult>(HubMethods.Send, expired))).Message);
     }
 
     [Fact]
@@ -203,7 +208,7 @@ public class RelayTests
 
         await router.Admin.RejectAsync("wojtek");
         await lost;
-        await Assert.ThrowsAsync<HubException>(() => ise.SendAsync(wojtekKey.MachineId, "chat", "hello?"));
+        await Assert.ThrowsAnyAsync<Exception>(() => ise.SendAsync(wojtekKey.MachineId, new OutgoingMessage("hello?")));
 
         var again = router.Client(wojtekKey);
         Assert.Equal(MembershipStatus.Rejected, await again.ConnectAsync());
@@ -258,16 +263,22 @@ public class RelayTests
         Assert.Equal(first, again.App.Services.GetRequiredService<PoniExp.Server.Security.RouterCertificateInfo>().Sha256);
     }
 
-    private static async Task<HubConnection> RawConnectionAsync(RouterFixture router)
+    internal static async Task<HubConnection> RawConnectionAsync(RouterFixture router, bool hello = true)
     {
         var connection = new HubConnectionBuilder()
             .WithUrl(new Uri(router.Url, HubMethods.Path))
+            .AddJsonProtocol(json => WireProtocol.Configure(json.PayloadSerializerOptions))
             .Build();
         await connection.StartAsync();
+        if (hello)
+        {
+            await connection.InvokeAsync<HelloResult>(HubMethods.Hello, WireProtocol.Version);
+        }
+
         return connection;
     }
 
-    private static async Task<HubConnection> RawMemberConnectionAsync(RouterFixture router, MachineIdentity identity)
+    internal static async Task<HubConnection> RawMemberConnectionAsync(RouterFixture router, MachineIdentity identity)
     {
         var connection = await RawConnectionAsync(router);
         var challenge = await connection.InvokeAsync<string>(HubMethods.GetChallenge);
@@ -277,5 +288,5 @@ public class RelayTests
         return connection;
     }
 
-    private sealed record ReceivedMessageArgs(string From, string Kind, string Body);
+    private sealed record ReceivedMessageArgs(string From, string ToEndpoint, string Body);
 }

@@ -9,11 +9,13 @@ public static class HubMethods
     public const string Path = "/relay";
 
     // client -> router
+    public const string Hello = nameof(Hello);
     public const string GetChallenge = nameof(GetChallenge);
     public const string Authenticate = nameof(Authenticate);
     public const string RequestJoin = nameof(RequestJoin);
     public const string Send = nameof(Send);
-    public const string Ack = nameof(Ack);
+    /// <summary>"I have stored this message; drop it from the queue." Not the agent's acknowledgement.</summary>
+    public const string Confirm = nameof(Confirm);
     public const string GetMachines = nameof(GetMachines);
 
     // router -> client

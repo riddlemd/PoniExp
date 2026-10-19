@@ -1,6 +1,6 @@
 using System.Security.Cryptography;
-using System.Text;
 using Microsoft.AspNetCore.SignalR;
+using Microsoft.Extensions.Options;
 using PoniExp.Core.Crypto;
 using PoniExp.Core.Protocol;
 using PoniExp.Server.Machines;
@@ -8,24 +8,43 @@ using PoniExp.Server.Machines;
 namespace PoniExp.Server.Hubs;
 
 /// <summary>
-/// The relay. A connection proves which key it holds by signing a one-time challenge; only connections
-/// holding an approved key may send, receive, or list machines. Everything else is join-only.
+/// The relay. A connection first says which protocol version it speaks, then proves which key it holds by
+/// signing a one-time challenge; only connections holding an approved key may send, receive, or list
+/// machines. Everything else is join-only.
 /// </summary>
 public sealed class RelayHub(
     MachineRegistry registry,
     MessageQueue queue,
     PresenceTracker presence,
     TimeProvider time,
+    IOptionsSnapshot<RouterOptions> options,
     ILogger<RelayHub> logger) : Hub
 {
     internal const string MembersGroup = "members";
+    private const string HelloItem = "hello";
     private const string ChallengeItem = "challenge";
     private const string ProvenItem = "proven";
     private const string MemberItem = "member";
 
+    /// <summary>The first call on every connection. A client speaking another protocol version is refused.</summary>
+    [HubMethodName(HubMethods.Hello)]
+    public HelloResult Hello(int protocolVersion)
+    {
+        if (protocolVersion != WireProtocol.Version)
+        {
+            throw new HubException(protocolVersion < WireProtocol.Version
+                ? $"This relay speaks protocol {WireProtocol.Version} and this client speaks {protocolVersion}: upgrade poniexp-client."
+                : $"This relay speaks protocol {WireProtocol.Version} and this client speaks {protocolVersion}: upgrade the relay.");
+        }
+
+        Context.Items[HelloItem] = protocolVersion;
+        return new HelloResult(WireProtocol.Version);
+    }
+
     [HubMethodName(HubMethods.GetChallenge)]
     public string GetChallenge()
     {
+        RequireHello();
         var challenge = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
         Context.Items[ChallengeItem] = challenge;
         return challenge;
@@ -69,9 +88,9 @@ public sealed class RelayHub(
             }
         }
 
-        foreach (var envelope in queue.For(id))
+        foreach (var delivery in queue.For(id))
         {
-            await Clients.Caller.SendAsync(HubMethods.Receive, envelope);
+            await Clients.Caller.SendAsync(HubMethods.Receive, delivery);
         }
 
         return new AuthResult(MembershipStatus.Approved, id, record.Name);
@@ -80,6 +99,7 @@ public sealed class RelayHub(
     [HubMethodName(HubMethods.RequestJoin)]
     public async Task<AuthResult> RequestJoinAsync(JoinRequest request)
     {
+        RequireHello();
         if (!Limits.IsValidName(request.Name))
         {
             throw new HubException("A name is 2-32 lowercase letters, digits or dashes, starting with a letter.");
@@ -97,7 +117,7 @@ public sealed class RelayHub(
             throw new HubException("The join request isn't signed by the key it carries.");
         }
 
-        RequireFresh(request.RequestedAt);
+        RequireFresh(request.RequestedOn);
         MachineRecord record;
         try
         {
@@ -114,42 +134,51 @@ public sealed class RelayHub(
         return new AuthResult(record.Status, record.Id, record.Name);
     }
 
+    /// <summary>
+    /// Checks what the router can see (sender, recipient, size, expiry, signature) and queues the envelope.
+    /// The content's own rules are the recipient's to check: from phase 2 the router can't read it.
+    /// </summary>
     [HubMethodName(HubMethods.Send)]
     public async Task<SendResult> SendAsync(Envelope envelope)
     {
         var me = RequireMember();
-        if (envelope.From != me)
+        if (envelope.FromMachine != me)
         {
-            throw new HubException("An envelope's From must be your own machine id.");
+            throw new HubException("An envelope's FromMachine must be your own machine id.");
         }
 
-        if (!Limits.IsValidKind(envelope.Kind) || envelope.Body is null || Encoding.UTF8.GetByteCount(envelope.Body) > Limits.MaxBodyBytes)
+        if (envelope.Content is null || envelope.Size is < 0 or > Limits.MaxContentBytes)
         {
-            throw new HubException($"Kind must match [a-z][a-z0-9._/-]{{0,63}} and the body be at most {Limits.MaxBodyBytes} bytes.");
+            throw new HubException($"The content must be at most {Limits.MaxContentBytes} bytes.");
         }
 
-        RequireFresh(envelope.CreatedAt);
         if (!Signatures.VerifyEnvelope(envelope, registry.Get(me)!.PublicKey))
         {
             throw new HubException("The envelope signature doesn't verify.");
         }
 
-        if (registry.Get(envelope.To) is not { Status: MembershipStatus.Approved })
+        if (envelope.ExpiresOn <= time.GetUtcNow())
+        {
+            throw new HubException("The envelope has already expired; check this machine's clock.");
+        }
+
+        if (registry.Get(envelope.ToMachine) is not { Status: MembershipStatus.Approved })
         {
             throw new HubException("The recipient isn't an approved machine.");
         }
 
-        var online = presence.IsOnline(envelope.To);
-        if (await queue.EnqueueAsync(envelope) && online)
+        var online = presence.IsOnline(envelope.ToMachine);
+        if (await queue.EnqueueAsync(envelope) is { } delivery && online)
         {
-            await Clients.Group(MachineGroup(envelope.To)).SendAsync(HubMethods.Receive, envelope);
+            await Clients.Group(MachineGroup(envelope.ToMachine)).SendAsync(HubMethods.Receive, delivery);
         }
 
-        return new SendResult(envelope.Id, online ? DeliveryState.Delivered : DeliveryState.Queued);
+        return new SendResult(envelope.Id, online ? DeliveryState.Pushed : DeliveryState.Queued);
     }
 
-    [HubMethodName(HubMethods.Ack)]
-    public Task AckAsync(Guid id) => queue.AckAsync(RequireMember(), id);
+    /// <summary>The recipient has stored the envelope: drop it from the queue.</summary>
+    [HubMethodName(HubMethods.Confirm)]
+    public Task ConfirmAsync(Guid id) => queue.ConfirmAsync(RequireMember(), id);
 
     [HubMethodName(HubMethods.GetMachines)]
     public IReadOnlyList<MachineInfo> GetMachines()
@@ -157,7 +186,7 @@ public sealed class RelayHub(
         RequireMember();
         return registry.List()
             .Where(m => m.Status == MembershipStatus.Approved)
-            .Select(m => new MachineInfo(m.Id, m.Name, m.Description, m.PublicKey, presence.IsOnline(m.Id), m.LastSeen))
+            .Select(m => new MachineInfo(m.Id, m.Name, m.Description, m.PublicKey, presence.IsOnline(m.Id), m.LastSeenOn))
             .ToList();
     }
 
@@ -196,6 +225,14 @@ public sealed class RelayHub(
         await Groups.AddToGroupAsync(Context.ConnectionId, KeyGroup(id));
     }
 
+    private void RequireHello()
+    {
+        if (!Context.Items.ContainsKey(HelloItem))
+        {
+            throw new HubException($"Say hello with the protocol version first (this relay speaks {WireProtocol.Version}).");
+        }
+    }
+
     private string RequireMember()
     {
         if (TryItem(MemberItem, out var id) && registry.Get(id) is { Status: MembershipStatus.Approved })
@@ -208,7 +245,7 @@ public sealed class RelayHub(
 
     private void RequireFresh(DateTimeOffset stamp)
     {
-        if ((time.GetUtcNow() - stamp).Duration() > Limits.ClockSkew)
+        if ((time.GetUtcNow() - stamp).Duration() > options.Value.ClockSkew)
         {
             throw new HubException("The signed timestamp is too far from the router's clock; check this machine's time.");
         }

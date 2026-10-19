@@ -9,9 +9,9 @@ public sealed record MachineRecord(
     MachineDescription Description,
     string PublicKey,
     MembershipStatus Status,
-    DateTimeOffset RequestedAt,
-    DateTimeOffset? DecidedAt = null,
-    DateTimeOffset? LastSeen = null)
+    DateTimeOffset RequestedOn,
+    DateTimeOffset? DecidedOn = null,
+    DateTimeOffset? LastSeenOn = null)
 {
     public string JoinCode => KeyFingerprint.JoinCodeOf(PublicKey);
 }

@@ -133,7 +133,7 @@ transaction as the event.
 
 ---
 
-## Phase 1: Message format v2
+## Phase 1: Message format v2 (done)
 
 The message format changes here and again in phase 2. Nothing has joined yet, so both changes are
 free.
