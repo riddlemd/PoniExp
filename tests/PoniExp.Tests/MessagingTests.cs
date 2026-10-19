@@ -111,7 +111,7 @@ public class MessagingTests
         var connection = await RelayTests.RawMemberConnectionAsync(router, iseKey);
         var now = DateTimeOffset.UtcNow;
 
-        var envelope = Envelopes.Sign(iseKey, wojtekKey.MachineId, now, now.AddDays(30));
+        var envelope = Envelopes.Sign(iseKey, wojtekKey, now, now.AddDays(30));
         await connection.InvokeAsync<SendResult>(HubMethods.Send, envelope);
 
         AssertNear(now.AddHours(1), router.Queue.ExpiryOf(envelope.Id)!.Value);
@@ -126,7 +126,7 @@ public class MessagingTests
         var (wojtek, wojtekKey) = await router.MemberAsync("wojtek", settings);
         await wojtek.DisposeAsync();
         var created = Signatures.Truncate(DateTimeOffset.UtcNow.AddMinutes(-10));
-        var envelope = Envelopes.Sign(iseKey, wojtekKey.MachineId, created, created.AddDays(30), "long-lived");
+        var envelope = Envelopes.Sign(iseKey, wojtekKey, created, created.AddDays(30), "long-lived");
         await router.Queue.EnqueueUncheckedAsync(envelope, DateTimeOffset.UtcNow.AddDays(30));
 
         var back = router.Client(wojtekKey, settings: settings);
@@ -150,7 +150,7 @@ public class MessagingTests
         var connection = await RelayTests.RawMemberConnectionAsync(router, iseKey);
         router.SetSetting("PoniExp:MaxExpiry", "03:00:00");
         var now = DateTimeOffset.UtcNow;
-        var envelope = Envelopes.Sign(iseKey, wojtekKey.MachineId, now, now.AddDays(30));
+        var envelope = Envelopes.Sign(iseKey, wojtekKey, now, now.AddDays(30));
         await connection.InvokeAsync<SendResult>(HubMethods.Send, envelope);
         AssertNear(now.AddHours(3), router.Queue.ExpiryOf(envelope.Id)!.Value);
 
@@ -167,7 +167,7 @@ public class MessagingTests
             RouterFixture.StartAsync(settings: new Dictionary<string, string?> { ["PoniExp:ClockSkew"] = "-00:01:00" }));
 
         await using var router = await RouterFixture.StartAsync();
-        using var identity = MachineIdentity.Create();
+        using var identity = MachineKeys.Create();
         Assert.Throws<OptionsValidationException>(() => router.Client(identity, settings: TestSettings.Create(("Messaging:ClockSkew", "-00:01:00"))));
         Assert.Throws<OptionsValidationException>(() => router.Client(identity,
             settings: TestSettings.Create(("Messaging:DefaultExpiry", "2.00:00:00"), ("Messaging:MaxExpiry", "1.00:00:00"))));
@@ -181,9 +181,9 @@ public class MessagingTests
         var (wojtek, wojtekKey) = await router.MemberAsync("wojtek");
         await wojtek.DisposeAsync();
         var now = DateTimeOffset.UtcNow;
-        await router.Queue.EnqueueUncheckedAsync(Envelopes.Sign(iseKey, wojtekKey.MachineId, now.AddDays(-2), now.AddDays(-1), "stale", 1),
+        await router.Queue.EnqueueUncheckedAsync(Envelopes.Sign(iseKey, wojtekKey, now.AddDays(-2), now.AddDays(-1), "stale", 1),
             now.AddDays(1));
-        await router.Queue.EnqueueUncheckedAsync(Envelopes.Sign(iseKey, wojtekKey.MachineId, now.AddHours(1), now.AddHours(2), "early", 2),
+        await router.Queue.EnqueueUncheckedAsync(Envelopes.Sign(iseKey, wojtekKey, now.AddHours(1), now.AddHours(2), "early", 2),
             now.AddDays(1));
 
         var back = router.Client(wojtekKey);
@@ -297,10 +297,10 @@ public class MessagingTests
         Assert.Equal(WireProtocol.Version, (await old.InvokeAsync<HelloResult>(HubMethods.Hello, WireProtocol.Version)).ProtocolVersion);
     }
 
-    private static async Task<TimeSpan> LifetimeAsync(RelayClient client, MachineIdentity sender, Guid id)
+    private static async Task<TimeSpan> LifetimeAsync(RelayClient client, MachineKeys sender, Guid id)
     {
         var stored = (await client.Store.GetMessageAsync(sender.MachineId, id))!;
-        return stored.Envelope!.ExpiresOn - stored.Envelope.Content.CreatedOn;
+        return stored.Envelope!.ExpiresOn - stored.CreatedOn;
     }
 
     private static void AssertNear(DateTimeOffset expected, DateTimeOffset actual) =>

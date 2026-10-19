@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using PoniExp.Client;
 using PoniExp.Core.Crypto;
 using PoniExp.Core.Protocol;
+using PoniExp.Secrets;
 
 const string Usage = """
     poniexp-client init <router-url> [--pin <sha256>]   where the router is; creates this machine's key
@@ -28,7 +29,7 @@ const string Usage = """
     Settings: ~/.poniexp/settings.json, e.g. { "Messaging": { "DefaultExpiry": "1.00:00:00" } }
     """;
 
-var identity = MachineIdentity.LoadOrCreate(ClientConfig.KeyPath); // also creates the home directory
+var keys = KeyRing.LoadOrCreate(ClientConfig.HomeDirectory); // also creates the home directory and, first time, both keys
 using var cancel = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) =>
 {
@@ -77,9 +78,9 @@ int Init(string url, string? pin)
 
 int Id()
 {
-    Console.WriteLine($"machine id: {identity.MachineId}");
-    Console.WriteLine($"join code:  {KeyFingerprint.JoinCodeOf(identity.PublicKey)}");
-    Console.WriteLine($"key:        {ClientConfig.KeyPath}");
+    Console.WriteLine($"machine id: {keys.MachineId}");
+    Console.WriteLine($"join code:  {KeyFingerprint.JoinCodeOf(keys.PublicKey)}");
+    Console.WriteLine($"keys:       {SecretStores.ForHome(ClientConfig.HomeDirectory).Description}");
     return 0;
 }
 
@@ -227,7 +228,7 @@ async Task<RelayClient> ConnectAsync()
         .AddJsonFile(ClientConfig.SettingsPath, optional: true, reloadOnChange: true)
         .AddEnvironmentVariables("PONIEXP_")
         .Build();
-    var client = new RelayClient(identity, config.ToOptions(), new ClientStore(ClientConfig.DatabasePath), MessagingSettings.Monitor(settings));
+    var client = new RelayClient(keys, config.ToOptions(), new ClientStore(ClientConfig.DatabasePath), MessagingSettings.Monitor(settings));
     await client.ConnectAsync(cancel.Token);
     return client;
 }

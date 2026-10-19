@@ -15,7 +15,7 @@ public class RelayTests
     public async Task AnUnknownMachineCanOnlyAskToJoin()
     {
         await using var router = await RouterFixture.StartAsync();
-        var client = router.Client(MachineIdentity.Create());
+        var client = router.Client(MachineKeys.Create());
 
         Assert.Equal(MembershipStatus.Unknown, await client.ConnectAsync());
         await Assert.ThrowsAsync<HubException>(() => client.RefreshMachinesAsync());
@@ -80,7 +80,7 @@ public class RelayTests
     public async Task UnconfirmedMessagesSurviveARouterRestart()
     {
         var data = Path.Combine(Path.GetTempPath(), "poniexp-tests", Guid.NewGuid().ToString("N"));
-        MachineIdentity wojtekKey;
+        MachineKeys wojtekKey;
         await using (var router = await RouterFixture.StartAsync(dataDirectory: data))
         {
             var (ise, _) = await router.MemberAsync("ise");
@@ -142,19 +142,19 @@ public class RelayTests
         var connection = await RawMemberConnectionAsync(router, iseKey);
 
         var now = DateTimeOffset.UtcNow;
-        var forged = Envelopes.Sign(wojtekKey, iseKey.MachineId, now, now.AddHours(1), "I am wojtek");
+        var forged = Envelopes.Sign(wojtekKey, iseKey, now, now.AddHours(1), "I am wojtek");
         var spoofed = await Assert.ThrowsAsync<HubException>(() => connection.InvokeAsync<SendResult>(HubMethods.Send, forged));
         Assert.Contains("own machine id", spoofed.Message);
 
-        var genuine = Envelopes.Sign(iseKey, wojtekKey.MachineId, now, now.AddHours(1), "hi");
+        var genuine = Envelopes.Sign(iseKey, wojtekKey, now, now.AddHours(1), "hi");
         var tampered = await Assert.ThrowsAsync<HubException>(() =>
-            connection.InvokeAsync<SendResult>(HubMethods.Send, genuine with { Content = genuine.Content with { Body = "rm -rf" } }));
+            connection.InvokeAsync<SendResult>(HubMethods.Send, genuine with { Ciphertext = Flip(genuine.Ciphertext) }));
         Assert.Contains("signature", tampered.Message);
         var stretched = await Assert.ThrowsAsync<HubException>(() =>
             connection.InvokeAsync<SendResult>(HubMethods.Send, genuine with { ExpiresOn = genuine.ExpiresOn.AddDays(1) }));
         Assert.Contains("signature", stretched.Message);
 
-        var expired = Envelopes.Sign(iseKey, wojtekKey.MachineId, now.AddHours(-2), now.AddHours(-1), "old");
+        var expired = Envelopes.Sign(iseKey, wojtekKey, now.AddHours(-2), now.AddHours(-1), "old");
         Assert.Contains("expired", (await Assert.ThrowsAsync<HubException>(() => connection.InvokeAsync<SendResult>(HubMethods.Send, expired))).Message);
     }
 
@@ -163,7 +163,7 @@ public class RelayTests
     {
         await using var router = await RouterFixture.StartAsync();
         var (_, iseKey) = await router.MemberAsync("ise");
-        using var stranger = MachineIdentity.Create();
+        using var stranger = MachineKeys.Create();
         var connection = await RawConnectionAsync(router);
 
         var challenge = await connection.InvokeAsync<string>(HubMethods.GetChallenge);
@@ -181,8 +181,8 @@ public class RelayTests
     public async Task AJoinRequestMustBeSignedByItsOwnKey()
     {
         await using var router = await RouterFixture.StartAsync();
-        using var victim = MachineIdentity.Create();
-        using var attacker = MachineIdentity.Create();
+        using var victim = MachineKeys.Create();
+        using var attacker = MachineKeys.Create();
         var connection = await RawConnectionAsync(router);
 
         var request = Signatures.SignJoin(attacker, "ise", Description, DateTimeOffset.UtcNow) with { PublicKey = victim.PublicKey };
@@ -220,7 +220,7 @@ public class RelayTests
     {
         await using var router = await RouterFixture.StartAsync();
         await router.MemberAsync("ise");
-        var impostor = router.Client(MachineIdentity.Create());
+        var impostor = router.Client(MachineKeys.Create());
         await impostor.ConnectAsync();
         await impostor.RequestJoinAsync("ise", Description);
 
@@ -238,13 +238,13 @@ public class RelayTests
         var pin = router.App.Services.GetRequiredService<PoniExp.Server.Security.RouterCertificateInfo>().Sha256!;
         Assert.StartsWith("https://", router.Url.ToString());
 
-        var good = router.Client(MachineIdentity.Create(), pin);
+        var good = router.Client(MachineKeys.Create(), pin);
         Assert.Equal(MembershipStatus.Unknown, await good.ConnectAsync());
 
-        var bad = router.Client(MachineIdentity.Create(), new string('0', 64));
+        var bad = router.Client(MachineKeys.Create(), new string('0', 64));
         await Assert.ThrowsAnyAsync<Exception>(() => bad.ConnectAsync());
 
-        var unpinned = router.Client(MachineIdentity.Create());
+        var unpinned = router.Client(MachineKeys.Create());
         await Assert.ThrowsAnyAsync<Exception>(() => unpinned.ConnectAsync()); // self-signed: normal validation fails
     }
 
@@ -278,7 +278,7 @@ public class RelayTests
         return connection;
     }
 
-    internal static async Task<HubConnection> RawMemberConnectionAsync(RouterFixture router, MachineIdentity identity)
+    internal static async Task<HubConnection> RawMemberConnectionAsync(RouterFixture router, MachineKeys identity)
     {
         var connection = await RawConnectionAsync(router);
         var challenge = await connection.InvokeAsync<string>(HubMethods.GetChallenge);
@@ -286,6 +286,13 @@ public class RelayTests
             identity.Sign(Signatures.AuthPayload(challenge, identity.PublicKey)));
         Assert.Equal(MembershipStatus.Approved, result.Status);
         return connection;
+    }
+
+    internal static string Flip(string base64)
+    {
+        var bytes = Convert.FromBase64String(base64);
+        bytes[^1] ^= 1;
+        return Convert.ToBase64String(bytes);
     }
 
     private sealed record ReceivedMessageArgs(string From, string ToEndpoint, string Body);

@@ -8,6 +8,8 @@ public sealed record MachineRecord(
     string Name,
     MachineDescription Description,
     string PublicKey,
+    string EncryptionKey,
+    string EncryptionKeySignature,
     MembershipStatus Status,
     DateTimeOffset RequestedOn,
     DateTimeOffset? DecidedOn = null,

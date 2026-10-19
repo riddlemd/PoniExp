@@ -40,6 +40,13 @@ dotnet run --project src/PoniExp.Cli -- <command>     # poniexp-client
   `type: message` with `contentType`, `metadata` and `body`; there is no reply type (`replyTo` says it).
 - **"Confirm" is the client telling the router it stored a message** (`HubMethods.Confirm`).
   "Acknowledge" is reserved for an agent taking a message on (phase 3). Don't mix them.
+- **Encryption goes through `MessageCrypto` / `Signatures.SealEnvelope`.** The router-visible header
+  is the AES-GCM associated data and the message id, sender and reader are in the HKDF info; keep it
+  that way for any new sealed thing. Never encrypt to a key that hasn't passed
+  `PublicKeys.VerifyEncryptionKey` against the machine's identity key.
+- **Private keys only go through `PoniExp.Secrets` (`KeyRing`)**, never a plain file.
+  `src/PoniExp.Secrets/Interop/` is ported third-party code kept close to upstream (see its `UPSTREAM`
+  file): don't reformat it.
 - **Every check that protects against the router also runs on the recipient** (signature, expiry
   by its own clock, duplicates): the router is trusted to route, not to be honest.
 - **Tunable values are settings,** with defaults, in an options class validated at startup.

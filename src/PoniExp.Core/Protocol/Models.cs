@@ -47,12 +47,22 @@ public sealed record MachineDescription(string OperatingSystem, string Architect
             Environment.MachineName, notes);
 }
 
-/// <summary>Asks to join, signed by the key it asks to admit (proof that the sender holds that key).</summary>
-public sealed record JoinRequest(string Name, MachineDescription Description, string PublicKey, DateTimeOffset RequestedOn, string Signature);
+/// <summary>
+/// Asks to join, signed by the key it asks to admit (proof that the sender holds that key). Carries the
+/// machine's encryption key, with the identity key's signature over it (required).
+/// </summary>
+public sealed record JoinRequest(
+    string Name,
+    MachineDescription Description,
+    string PublicKey,
+    string EncryptionKey,
+    string EncryptionKeySignature,
+    DateTimeOffset RequestedOn,
+    string Signature);
 
 /// <summary>
-/// The part of a message only the two endpoints need. Signed (with the header) by the sender; from phase 2
-/// it is also encrypted, so the router never sees it.
+/// The part of a message only the two endpoints need. It travels encrypted (see <see cref="Envelope.Ciphertext"/>):
+/// the router never sees it.
 /// </summary>
 public sealed record MessageContent(
     string FromEndpoint,
@@ -69,8 +79,9 @@ public sealed record MessageContent(
     DateTimeOffset CreatedOn);
 
 /// <summary>
-/// A message between machines: the header the router needs for routing and expiry, plus the content.
-/// <see cref="FromMachine"/> and <see cref="ToMachine"/> are machine ids. Exactly one recipient.
+/// A message between machines: the header the router needs for routing and expiry, and the content,
+/// encrypted. <see cref="FromMachine"/> and <see cref="ToMachine"/> are machine ids; exactly one recipient.
+/// <see cref="Size"/> is the ciphertext's length in bytes. The sender signs all of it.
 /// </summary>
 public sealed record Envelope(
     Guid Id,
@@ -79,8 +90,15 @@ public sealed record Envelope(
     DateTimeOffset ExpiresOn,
     long Sequence,
     int Size,
-    MessageContent Content,
+    string Ciphertext,
+    IReadOnlyList<KeyWrap> Wraps,
     string Signature);
+
+/// <summary>
+/// The message's content key, wrapped for one reader (the recipient, or the sender's own machine) under a
+/// fresh ephemeral ECDH key. Base64 throughout.
+/// </summary>
+public sealed record KeyWrap(string Machine, string EphemeralKey, string WrappedKey);
 
 /// <summary>An envelope as the router hands it over, with when the router received it (the router's word, unsigned).</summary>
 public sealed record Delivery(Envelope Envelope, DateTimeOffset RelayedOn);
@@ -91,6 +109,18 @@ public sealed record AuthResult(MembershipStatus Status, string MachineId, strin
 
 public sealed record SendResult(Guid Id, DeliveryState State);
 
-public sealed record MachineInfo(string Id, string Name, MachineDescription Description, string PublicKey, bool Online, DateTimeOffset? LastSeenOn);
+/// <summary>
+/// An approved machine, as the router describes it. Check <see cref="EncryptionKey"/> against
+/// <see cref="EncryptionKeySignature"/> and <see cref="PublicKey"/> before encrypting to it: the router could lie.
+/// </summary>
+public sealed record MachineInfo(
+    string Id,
+    string Name,
+    MachineDescription Description,
+    string PublicKey,
+    string EncryptionKey,
+    string EncryptionKeySignature,
+    bool Online,
+    DateTimeOffset? LastSeenOn);
 
 public sealed record PresenceChange(string MachineId, string Name, bool Online, DateTimeOffset OccurredOn);

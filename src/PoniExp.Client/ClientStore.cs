@@ -6,9 +6,10 @@ using PoniExp.Core.Protocol;
 namespace PoniExp.Client;
 
 /// <summary>
-/// This machine's client database (~/.poniexp/client.db). Phase 1 holds what must survive a restart:
-/// every message sent and received (the <c>messages</c> table, which is also the replay record), sequence
-/// counters per peer machine, and metrics. Several processes may use it at once: writes are short
+/// This machine's client database (~/.poniexp/client.db): every message sent and received (the
+/// <c>messages</c> table, which is also the replay record), sequence counters per peer machine, and
+/// metrics. Messages are kept as their signed, encrypted envelopes; only routing and conversation
+/// metadata is in the clear, never a body. Several processes may use it at once: writes are short
 /// IMMEDIATE transactions and readers wait on a busy timeout.
 /// </summary>
 public sealed class ClientStore
@@ -88,15 +89,15 @@ public sealed class ClientStore
     /// Takes the next sequence number for <paramref name="toMachine"/>, signs the envelope with it and stores
     /// it, in one transaction: a number is never handed out twice, even across processes or a crash.
     /// </summary>
-    public Task<Envelope> ReserveOutgoingAsync(string toMachine, Func<long, Envelope> sign, DateTimeOffset now)
+    public Task<Envelope> ReserveOutgoingAsync(string toMachine, MessageContent content, Func<long, Envelope> seal, DateTimeOffset now)
     {
         using var connection = Open();
         using var transaction = connection.BeginTransaction(deferred: false);
         Execute(connection, transaction, "INSERT INTO sequences (peer_machine) VALUES ($peer) ON CONFLICT DO NOTHING;", ("$peer", toMachine));
         var sequence = (long)Scalar(connection, transaction, "SELECT next_outgoing FROM sequences WHERE peer_machine = $peer;", ("$peer", toMachine))!;
         Execute(connection, transaction, "UPDATE sequences SET next_outgoing = next_outgoing + 1 WHERE peer_machine = $peer;", ("$peer", toMachine));
-        var envelope = sign(sequence);
-        Insert(connection, transaction, envelope, relayedOn: null, storedOn: now, expiresOn: envelope.ExpiresOn);
+        var envelope = seal(sequence);
+        Insert(connection, transaction, envelope, content, relayedOn: null, storedOn: now, expiresOn: envelope.ExpiresOn);
         transaction.Commit();
         return Task.FromResult(envelope);
     }
@@ -115,11 +116,12 @@ public sealed class ClientStore
     /// transaction. False if it was already stored (a redelivery or a replay): the caller confirms it to the
     /// router again and drops it.
     /// </summary>
-    public Task<bool> StoreIncomingAsync(Envelope envelope, DateTimeOffset relayedOn, DateTimeOffset expiresOn, string me, DateTimeOffset now)
+    public Task<bool> StoreIncomingAsync(Envelope envelope, MessageContent content, DateTimeOffset relayedOn, DateTimeOffset expiresOn, string me,
+        DateTimeOffset now)
     {
         using var connection = Open();
         using var transaction = connection.BeginTransaction(deferred: false);
-        var stored = Insert(connection, transaction, envelope, relayedOn, now, expiresOn, ignoreExisting: true) == 1;
+        var stored = Insert(connection, transaction, envelope, content, relayedOn, now, expiresOn, ignoreExisting: true) == 1;
         if (!stored && envelope.FromMachine == me && envelope.ToMachine == me)
         {
             // Sent to this machine by this machine: the row exists as our outgoing copy; this is its arrival.
@@ -184,7 +186,7 @@ public sealed class ClientStore
     {
         using var connection = Open();
         using var command = Command(connection, null,
-            "SELECT envelope, relayed_on, stored_on, expires_on FROM messages WHERE from_machine = $from AND id = $id;",
+            "SELECT envelope, relayed_on, stored_on, expires_on, created_on FROM messages WHERE from_machine = $from AND id = $id;",
             ("$from", fromMachine), ("$id", id.ToString("D")));
         using var reader = command.ExecuteReader();
         if (!reader.Read())
@@ -193,14 +195,13 @@ public sealed class ClientStore
         }
 
         var envelope = reader.IsDBNull(0) ? null : JsonSerializer.Deserialize<Envelope>(reader.GetString(0), WireProtocol.Json);
-        return Task.FromResult<StoredMessage?>(new StoredMessage(envelope, reader.IsDBNull(1) ? null : Parse(reader.GetString(1)),
-            Parse(reader.GetString(2)), Parse(reader.GetString(3))));
+        return Task.FromResult<StoredMessage?>(new StoredMessage(envelope, Parse(reader.GetString(4)),
+            reader.IsDBNull(1) ? null : Parse(reader.GetString(1)), Parse(reader.GetString(2)), Parse(reader.GetString(3))));
     }
 
-    private int Insert(SqliteConnection connection, SqliteTransaction transaction, Envelope envelope, DateTimeOffset? relayedOn,
-        DateTimeOffset storedOn, DateTimeOffset expiresOn, bool ignoreExisting = false)
+    private int Insert(SqliteConnection connection, SqliteTransaction transaction, Envelope envelope, MessageContent c,
+        DateTimeOffset? relayedOn, DateTimeOffset storedOn, DateTimeOffset expiresOn, bool ignoreExisting = false)
     {
-        var c = envelope.Content;
         return Execute(connection, transaction, $"""
             INSERT INTO messages (from_machine, id, from_endpoint, to_machine, to_endpoint, conversation_id, reply_to, operation_id,
                 type, status, content_type, subject, sequence, created_on, relayed_on, stored_on, expires_on, envelope)
@@ -275,8 +276,12 @@ public static class ClientMetrics
     /// <summary>A message created further in the future than the clock skew allows.</summary>
     public const string FromTheFuture = "from-the-future";
     public const string Invalid = "invalid";
+    /// <summary>Signed by its sender but not decryptable here (not sealed for this machine's current key, or tampered before signing).</summary>
+    public const string Undecryptable = "undecryptable";
 }
 
 public sealed record ClientMetric(string PeerMachine, string Name, long Count, DateTimeOffset LastOn);
 
-public sealed record StoredMessage(Envelope? Envelope, DateTimeOffset? RelayedOn, DateTimeOffset StoredOn, DateTimeOffset ExpiresOn);
+/// <summary>A stored message: its envelope (still encrypted; open it with <c>RelayClient.ReadAsync</c>) and when things happened.</summary>
+public sealed record StoredMessage(Envelope? Envelope, DateTimeOffset CreatedOn, DateTimeOffset? RelayedOn, DateTimeOffset StoredOn,
+    DateTimeOffset ExpiresOn);

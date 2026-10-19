@@ -1,0 +1,46 @@
+# Everything under Interop/ is ported third-party source, kept close to upstream on purpose: the
+# only way to take a later fix from Git Credential Manager is to diff against it, and reformatting
+# to this repo's house style would throw that away. So the rules that would rewrite it are off
+# here — listed one by one because the root config escalates each explicitly, and an explicit
+# severity beats a blanket dotnet_analyzer_diagnostic setting however broad.
+#
+# The hand-written code in this project (ISecretStore and its implementations; see UPSTREAM) sits outside
+# Interop/ and is held to the house style like everything else.
+[Interop/**.cs]
+dotnet_analyzer_diagnostic.severity = none
+dotnet_diagnostic.CA1050.severity = none
+dotnet_diagnostic.CA1065.severity = none
+dotnet_diagnostic.CA1068.severity = none
+dotnet_diagnostic.CA1507.severity = none
+dotnet_diagnostic.CA1710.severity = none
+dotnet_diagnostic.CA1725.severity = none
+dotnet_diagnostic.CA1806.severity = none
+dotnet_diagnostic.CA1854.severity = none
+dotnet_diagnostic.CA1862.severity = none
+dotnet_diagnostic.CA2011.severity = none
+dotnet_diagnostic.CA2012.severity = none
+dotnet_diagnostic.CA2013.severity = none
+dotnet_diagnostic.CA2014.severity = none
+dotnet_diagnostic.CA2016.severity = none
+dotnet_diagnostic.CA2017.severity = none
+dotnet_diagnostic.CA2021.severity = none
+dotnet_diagnostic.CA2100.severity = none
+dotnet_diagnostic.CA2200.severity = none
+dotnet_diagnostic.CA2201.severity = none
+dotnet_diagnostic.CA2207.severity = none
+dotnet_diagnostic.CA2208.severity = none
+dotnet_diagnostic.CA2215.severity = none
+dotnet_diagnostic.CA2219.severity = none
+dotnet_diagnostic.CA2241.severity = none
+dotnet_diagnostic.CA2242.severity = none
+dotnet_diagnostic.CA2245.severity = none
+dotnet_diagnostic.CA2246.severity = none
+dotnet_diagnostic.CA2248.severity = none
+dotnet_diagnostic.CA2249.severity = none
+dotnet_diagnostic.CA2251.severity = none
+dotnet_diagnostic.CA2264.severity = none
+dotnet_diagnostic.CA3075.severity = none
+dotnet_diagnostic.CA5350.severity = none
+dotnet_diagnostic.CA5351.severity = none
+dotnet_diagnostic.CA5359.severity = none
+dotnet_diagnostic.CA5364.severity = none

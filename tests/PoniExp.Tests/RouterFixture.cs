@@ -60,26 +60,26 @@ public sealed class RouterFixture : IAsyncDisposable
     /// <summary>Changes a router setting while it runs, as an edited config file would.</summary>
     public void SetSetting(string key, string value) => TestSettings.Set((IConfigurationRoot)App.Configuration, key, value);
 
-    public string StorePath(MachineIdentity identity) => Path.Combine(DataDirectory + "-clients", identity.MachineId + ".db");
+    public string StorePath(MachineKeys keys) => Path.Combine(DataDirectory + "-clients", keys.MachineId + ".db");
 
-    /// <summary>A client for <paramref name="identity"/>. Its database is kept per identity, so a new client is a restart.</summary>
-    public RelayClient Client(MachineIdentity identity, string? pin = null, IConfiguration? settings = null, bool confirm = true)
+    /// <summary>A client for <paramref name="keys"/>. Its database is kept per machine, so a new client is a restart.</summary>
+    public RelayClient Client(MachineKeys keys, string? pin = null, IConfiguration? settings = null, bool confirm = true)
     {
-        var client = new RelayClient(identity, new RelayClientOptions
+        var client = new RelayClient(keys, new RelayClientOptions
         {
             RouterUrl = Url,
             PinnedCertificateSha256 = pin,
             ReconnectDelays = [TimeSpan.FromMilliseconds(100)],
             ConfirmMessages = confirm,
-        }, new ClientStore(StorePath(identity)), MessagingSettings.Monitor(settings ?? TestSettings.Create()));
+        }, new ClientStore(StorePath(keys)), MessagingSettings.Monitor(settings ?? TestSettings.Create()));
         _clients.Add(client);
         return client;
     }
 
     /// <summary>A connected, approved machine.</summary>
-    public async Task<(RelayClient Client, MachineIdentity Identity)> MemberAsync(string name, IConfiguration? settings = null)
+    public async Task<(RelayClient Client, MachineKeys Keys)> MemberAsync(string name, IConfiguration? settings = null)
     {
-        var identity = MachineIdentity.Create();
+        var identity = MachineKeys.Create();
         var client = Client(identity, settings: settings);
         await client.ConnectAsync();
         var approved = Wait.For<MembershipStatus>(h => client.MembershipChanged += h);
@@ -162,7 +162,14 @@ public static class Envelopes
         new("default", "default", Guid.NewGuid(), null, Guid.NewGuid(), null, null, MessageType.Message, "text/plain",
             new Dictionary<string, string>(), body, createdOn);
 
-    public static Envelope Sign(MachineIdentity from, string toMachine, DateTimeOffset createdOn, DateTimeOffset expiresOn,
+    public static Envelope Sign(MachineKeys from, MachineKeys to, DateTimeOffset createdOn, DateTimeOffset expiresOn,
         string body = "x", long sequence = 1) =>
-        Signatures.SignEnvelope(from, Guid.NewGuid(), toMachine, sequence, expiresOn, Content(createdOn, body));
+        Signatures.SealEnvelope(from, Guid.NewGuid(), to.MachineId, to.EncryptionPublicKey, sequence, expiresOn, Content(createdOn, body));
+
+    /// <summary>The envelope with its fields changed and signed again by <paramref name="signer"/>, as a forger would.</summary>
+    public static Envelope Resign(Envelope envelope, MachineKeys signer)
+    {
+        var unsigned = envelope with { FromMachine = signer.MachineId, Signature = string.Empty };
+        return unsigned with { Signature = signer.Sign(Signatures.EnvelopePayload(unsigned)) };
+    }
 }

@@ -9,7 +9,7 @@ public static class WireProtocol
     /// Checked when a connection says hello. Both sides must match exactly: the message format is not
     /// negotiated, so an older or newer client gets a clear "upgrade" refusal instead of garbled messages.
     /// </summary>
-    public const int Version = 2;
+    public const int Version = 3;
 
     /// <summary>Enums travel as kebab-case names ("file-receipt"), on the wire and in files.</summary>
     public static JsonSerializerOptions Configure(JsonSerializerOptions options)

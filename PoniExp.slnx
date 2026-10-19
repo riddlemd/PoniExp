@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/PoniExp.Core/PoniExp.Core.csproj" />
     <Project Path="src/PoniExp.Server/PoniExp.Server.csproj" />
+    <Project Path="src/PoniExp.Secrets/PoniExp.Secrets.csproj" />
     <Project Path="src/PoniExp.Client/PoniExp.Client.csproj" />
     <Project Path="src/PoniExp.Cli/PoniExp.Cli.csproj" />
   </Folder>

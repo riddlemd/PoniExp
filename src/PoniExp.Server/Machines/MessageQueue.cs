@@ -29,7 +29,7 @@ public sealed class MessageQueue
         _options = options;
         _time = time;
         _queue = (JsonFile.Read<List<QueuedEnvelope>>(_path) ?? [])
-            .Where(q => q.Envelope?.Content is not null) // entries from an older format can't be delivered
+            .Where(q => q.Envelope?.Ciphertext is not null) // entries from an older format can't be delivered
             .ToImmutableDictionary(q => q.Envelope.Id);
     }
 

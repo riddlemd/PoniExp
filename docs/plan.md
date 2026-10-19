@@ -225,7 +225,7 @@ is what bounds its replay window, so it doesn't take the relay's value on trust.
     recipient
   - a mismatched protocol version is refused
 
-## Phase 2: Encryption
+## Phase 2: Encryption (done)
 
 - **An encryption key per machine:** created next to the identity key, signed by it, and sent in the
   join request (required). The server distributes it; clients check the signature before encrypting
@@ -244,10 +244,11 @@ is what bounds its replay window, so it doesn't take the relay's value on trust.
   - The sender's signature covers the encrypted bytes.
 - **Keys are stored securely:**
   - Windows: DPAPI, user scope (so the daemon runs as the user; see phase 3).
-  - macOS: the Keychain.
+  - macOS: the Keychain (KHost's interop, ported from Git Credential Manager).
   - Linux: owner-only files.
 
-  This follows KHost's secret-store approach.
+  This follows KHost's secret-store approach (`PoniExp.Secrets`), except that KHost uses Credential
+  Manager on Windows and libsecret on Linux; here DPAPI files and owner-only files, as decided above.
 - **Done when:**
   - a server-substituted key is rejected by the client
   - messages on the server's disk are unreadable

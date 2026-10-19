@@ -1,0 +1,19 @@
+# What PoniExp.Secrets/Interop was ported from. Taken from KHost (riddlemd/KHost, src/KHost.Secrets/Interop),
+# which ported it from Git Credential Manager and keeps it pinned and drift-checked there. Only the macOS
+# Keychain store and the shared pieces it needs are here; the only local change is the namespace
+# (KHost.Secrets -> PoniExp.Secrets). Take upstream fixes through KHost.
+
+repo    https://github.com/git-ecosystem/git-credential-manager
+prefix  src/Core
+commit  838e34962c84e0b461ed879e5102731fe07672d2
+
+Credential.cs
+ICredentialStore.cs
+InteropException.cs
+InteropUtils.cs
+StringExtensions.cs
+MacOS/MacOSKeychain.cs
+MacOS/MacOSKeychainCredential.cs
+MacOS/Native/CoreFoundation.cs
+MacOS/Native/SecurityFramework.cs
+MacOS/Native/LibSystem.cs

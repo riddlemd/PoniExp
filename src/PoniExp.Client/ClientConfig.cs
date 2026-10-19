@@ -3,9 +3,10 @@ using System.Text.Json;
 namespace PoniExp.Client;
 
 /// <summary>
-/// ~/.poniexp/config.json: where the router is and which certificate to pin. Beside it: machine.key (the
-/// private key, owner-only), client.db (the client database) and the optional settings.json (tunable
-/// settings, e.g. the "Messaging" section). Override the directory with PONIEXP_HOME.
+/// ~/.poniexp/config.json: where the router is and which certificate to pin. Beside it: client.db (the
+/// client database) and the optional settings.json (tunable settings, e.g. the "Messaging" section). The
+/// private keys are in the platform's secret store (PoniExp.Secrets), filed per home directory. Override
+/// the directory with PONIEXP_HOME.
 /// </summary>
 public sealed record ClientConfig(string RouterUrl, string? CertificateSha256)
 {
@@ -14,8 +15,6 @@ public sealed record ClientConfig(string RouterUrl, string? CertificateSha256)
     public static string HomeDirectory =>
         Environment.GetEnvironmentVariable("PONIEXP_HOME")
         ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".poniexp");
-
-    public static string KeyPath => Path.Combine(HomeDirectory, "machine.key");
 
     public static string DatabasePath => Path.Combine(HomeDirectory, "client.db");
 

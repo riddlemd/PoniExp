@@ -12,8 +12,11 @@ public static partial class Limits
     public const int MaxMetadataKeyLength = 64;
     public const int MaxMetadataValueLength = 1024;
 
-    /// <summary>The largest content (in its signed form) the router accepts: the body plus room for the other fields.</summary>
-    public const int MaxContentBytes = MaxBodyBytes + 64 * 1024;
+    /// <summary>
+    /// The largest encrypted content the router accepts: the body (JSON-escaped, so up to six bytes per
+    /// character in the worst case) plus room for the other fields.
+    /// </summary>
+    public const int MaxContentBytes = MaxBodyBytes * 6 + 64 * 1024;
 
     public const string EndpointRule = "1-64 lowercase letters, digits, '.', '_' or '-', starting with a letter or digit";
 

@@ -17,9 +17,10 @@ another directly: laptops behind VPNs, hotel Wi-Fi or NAT just connect out.
 
 ## How trust works
 
-- **A machine is its key.** Each machine makes an ECDSA P-256 key pair on first use
-  (`~/.poniexp/machine.key`, owner-only). The private key never leaves it. The machine id is a hash
-  of the public key.
+- **A machine is its key.** Each machine makes two key pairs on first use: an identity key (ECDSA
+  P-256, which it signs with) and an encryption key (ECDH P-256, signed by the identity key). The
+  private keys never leave it and are kept in the OS's secret store: DPAPI on Windows, the login
+  keychain on macOS, owner-only files on Linux. The machine id is a hash of the identity public key.
 - **Joining.** A machine sends its public key, name and description (OS, architecture, host name,
   notes), signed with that key. The router lists it as **pending** and shows a **join code**, which is
   the start of the machine id. The joining machine prints the same code. You compare the two, then
@@ -33,7 +34,11 @@ another directly: laptops behind VPNs, hotel Wi-Fi or NAT just connect out.
 - **The router's own identity.** The router makes a self-signed TLS certificate on first start and
   keeps it in its data volume. Clients pin its SHA-256, so it needs no public CA or domain name, and a
   man in the middle is refused.
-- **Message bodies are not encrypted end to end**, only in transit (TLS). The router can read them.
+- **Messages are encrypted end to end.** Everything but what routing needs (sender and recipient
+  machine, expiry, sequence number, size) is encrypted to the recipient, and to the sender's own
+  machine so it can read what it sent. Before encrypting, a machine checks that the recipient's
+  encryption key is signed by the recipient's identity key, so the router can't hand out its own.
+  The router sees who talks to whom, when and how much, not what or which agents.
 
 ## Run the router (Wojtek)
 
@@ -91,9 +96,9 @@ Settings go in `~/.poniexp/settings.json` (or `PONIEXP_Messaging__*` environment
 From code, use `PoniExp.Client.RelayClient`:
 
 ```csharp
-using var identity = MachineIdentity.LoadOrCreate(ClientConfig.KeyPath);
+using var keys = KeyRing.LoadOrCreate(ClientConfig.HomeDirectory);   // PoniExp.Secrets
 var settings = new ConfigurationBuilder().AddJsonFile(ClientConfig.SettingsPath, optional: true, reloadOnChange: true).Build();
-await using var client = new RelayClient(identity, ClientConfig.Load()!.ToOptions(),
+await using var client = new RelayClient(keys, ClientConfig.Load()!.ToOptions(),
     new ClientStore(ClientConfig.DatabasePath), MessagingSettings.Monitor(settings));
 client.MessageReceived += async m => Console.WriteLine($"{m.From}: {m.Content.Body}");
 await client.ConnectAsync();
@@ -115,7 +120,8 @@ await client.SendAsync("wojtek/agent", new OutgoingMessage("hi") { Subject = "gr
 
 | Path | What |
 |---|---|
-| `src/PoniExp.Core` | Keys, signing, protocol records. No dependencies. |
+| `src/PoniExp.Core` | Keys, signing, encryption, protocol records. No dependencies. |
+| `src/PoniExp.Secrets` | Where private keys are kept: DPAPI, the macOS keychain (interop ported from Git Credential Manager, see `THIRD-PARTY-NOTICES.md`), owner-only files. |
 | `src/PoniExp.Server` | `poniexp`: the server executable. `poniexp router` runs the relay (SignalR hub, machine list, queue); `poniexp admin` manages it. Container image. |
 | `src/PoniExp.Client` | `RelayClient`: connect, prove the key, join, send, receive. `ClientStore`: the client database. |
 | `src/PoniExp.Cli` | `poniexp-client`: the command line each machine uses. |

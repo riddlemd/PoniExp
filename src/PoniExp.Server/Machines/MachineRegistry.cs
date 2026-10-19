@@ -51,8 +51,8 @@ public sealed class MachineRegistry
                 throw new RouterException("Too many machines are waiting for approval; try again later.", RouterErrorKind.Conflict);
             }
 
-            var record = new MachineRecord(id, request.Name, request.Description, request.PublicKey, MembershipStatus.Pending,
-                _time.GetUtcNow());
+            var record = new MachineRecord(id, request.Name, request.Description, request.PublicKey, request.EncryptionKey,
+                request.EncryptionKeySignature, MembershipStatus.Pending, _time.GetUtcNow());
             return (machines.SetItem(id, record), record);
         });
     }
@@ -72,6 +72,11 @@ public sealed class MachineRegistry
         UpdateAsync(machines => machines.TryGetValue(id, out var record)
             ? (machines.SetItem(id, record with { LastSeenOn = seenOn }), record)
             : (machines, null!));
+
+    /// <summary>For tests that play a misbehaving router: hand out another encryption key for a machine.</summary>
+    internal Task SubstituteEncryptionKeyAsync(string id, string encryptionKey, string signature) =>
+        UpdateAsync(machines => (machines.SetItem(id, machines[id] with { EncryptionKey = encryptionKey, EncryptionKeySignature = signature }),
+            machines[id]));
 
     /// <summary>
     /// Finds a machine by full id, by an id prefix of at least 4 characters, or by name. Ambiguity is an

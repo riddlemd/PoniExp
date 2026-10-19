@@ -114,7 +114,7 @@ public sealed class RelayHub(
 
         if (!PublicKeys.IsValid(request.PublicKey) || !Signatures.VerifyJoin(request))
         {
-            throw new HubException("The join request isn't signed by the key it carries.");
+            throw new HubException("The join request isn't signed by the key it carries, or lacks an encryption key signed by it.");
         }
 
         RequireFresh(request.RequestedOn);
@@ -135,8 +135,8 @@ public sealed class RelayHub(
     }
 
     /// <summary>
-    /// Checks what the router can see (sender, recipient, size, expiry, signature) and queues the envelope.
-    /// The content's own rules are the recipient's to check: from phase 2 the router can't read it.
+    /// Checks what the router can see (sender, recipient, size, expiry, who the content key is wrapped for,
+    /// the signature) and queues the envelope. The content is encrypted: its rules are the recipient's to check.
     /// </summary>
     [HubMethodName(HubMethods.Send)]
     public async Task<SendResult> SendAsync(Envelope envelope)
@@ -147,9 +147,15 @@ public sealed class RelayHub(
             throw new HubException("An envelope's FromMachine must be your own machine id.");
         }
 
-        if (envelope.Content is null || envelope.Size is < 0 or > Limits.MaxContentBytes)
+        if (envelope.Ciphertext is null || envelope.Size is < 0 or > Limits.MaxContentBytes)
         {
-            throw new HubException($"The content must be at most {Limits.MaxContentBytes} bytes.");
+            throw new HubException($"The encrypted content must be at most {Limits.MaxContentBytes} bytes.");
+        }
+
+        if (envelope.Wraps is null || envelope.Wraps.Count is 0 or > 2 || envelope.Wraps.All(w => w.Machine != envelope.ToMachine)
+            || envelope.Wraps.Any(w => w.Machine != envelope.ToMachine && w.Machine != me))
+        {
+            throw new HubException("The content key must be wrapped for the recipient (and at most the sender too).");
         }
 
         if (!Signatures.VerifyEnvelope(envelope, registry.Get(me)!.PublicKey))
@@ -186,7 +192,8 @@ public sealed class RelayHub(
         RequireMember();
         return registry.List()
             .Where(m => m.Status == MembershipStatus.Approved)
-            .Select(m => new MachineInfo(m.Id, m.Name, m.Description, m.PublicKey, presence.IsOnline(m.Id), m.LastSeenOn))
+            .Select(m => new MachineInfo(m.Id, m.Name, m.Description, m.PublicKey, m.EncryptionKey, m.EncryptionKeySignature,
+                presence.IsOnline(m.Id), m.LastSeenOn))
             .ToList();
     }
 

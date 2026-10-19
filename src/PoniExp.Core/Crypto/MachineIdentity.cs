@@ -47,20 +47,6 @@ public sealed class MachineIdentity : IDisposable
         return new MachineIdentity(key);
     }
 
-    /// <summary>Loads the key at <paramref name="path"/>, or creates it there (readable by the owner only).</summary>
-    public static MachineIdentity LoadOrCreate(string path)
-    {
-        if (File.Exists(path))
-        {
-            return FromPem(File.ReadAllText(path));
-        }
-
-        var identity = Create();
-        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
-        PrivateFiles.WriteAllText(path, identity.ExportPrivateKeyPem());
-        return identity;
-    }
-
     public string ExportPrivateKeyPem() => _key.ExportPkcs8PrivateKeyPem();
 
     /// <summary>Signs <paramref name="data"/> (SHA-256, IEEE P1363 r||s) and returns the signature as base64.</summary>

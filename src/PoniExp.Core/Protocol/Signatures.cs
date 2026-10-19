@@ -8,33 +8,18 @@ public static class Signatures
 {
     public static byte[] JoinPayload(JoinRequest request) =>
         SigningPayload.Build("join", request.Name, request.Description.OperatingSystem, request.Description.Architecture,
-            request.Description.HostName, request.Description.Notes, request.PublicKey, Stamp(request.RequestedOn));
+            request.Description.HostName, request.Description.Notes, request.PublicKey, request.EncryptionKey,
+            request.EncryptionKeySignature, Stamp(request.RequestedOn));
 
     /// <summary>The answer to a router challenge: binds this connection to the key.</summary>
     public static byte[] AuthPayload(string challenge, string publicKey) =>
         SigningPayload.Build("auth", challenge, publicKey);
 
-    /// <summary>
-    /// The content in its signed form. Its length is the envelope's Size; in phase 2 these bytes are what
-    /// gets encrypted.
-    /// </summary>
-    public static byte[] ContentPayload(MessageContent content) =>
-        SigningPayload.Build("content", [
-            content.FromEndpoint,
-            content.ToEndpoint,
-            content.ConversationId.ToString("D"),
-            content.ReplyTo?.ToString("D"),
-            content.OperationId.ToString("D"),
-            content.Status is { } status ? WireProtocol.NameOf(status) : null,
-            content.Subject,
-            WireProtocol.NameOf(content.Type),
-            content.ContentType,
-            .. Metadata(content.Metadata),
-            content.Body,
-            Stamp(content.CreatedOn),
-        ]);
+    /// <summary>What a machine's identity key signs to vouch for its encryption key.</summary>
+    public static byte[] EncryptionKeyPayload(string identityPublicKey, string encryptionPublicKey) =>
+        SigningPayload.Build("encryption-key", identityPublicKey, encryptionPublicKey);
 
-    /// <summary>Every header field, and the content: the signature covers the whole message.</summary>
+    /// <summary>Every header field, the ciphertext and every key wrap: the signature covers the whole message.</summary>
     public static byte[] EnvelopePayload(Envelope envelope) =>
         SigningPayload.Build("envelope", [
             envelope.Id.ToString("D"),
@@ -43,35 +28,56 @@ public static class Signatures
             Stamp(envelope.ExpiresOn),
             envelope.Sequence.ToString(CultureInfo.InvariantCulture),
             envelope.Size.ToString(CultureInfo.InvariantCulture),
-            Convert.ToBase64String(ContentPayload(envelope.Content)),
+            envelope.Ciphertext,
+            .. Wraps(envelope.Wraps),
         ]);
 
-    public static int SizeOf(MessageContent content) => ContentPayload(content).Length;
-
-    public static JoinRequest SignJoin(MachineIdentity identity, string name, MachineDescription description, DateTimeOffset now)
+    public static JoinRequest SignJoin(MachineKeys keys, string name, MachineDescription description, DateTimeOffset now)
     {
-        var unsigned = new JoinRequest(name, description, identity.PublicKey, Truncate(now), string.Empty);
-        return unsigned with { Signature = identity.Sign(JoinPayload(unsigned)) };
+        var unsigned = new JoinRequest(name, description, keys.PublicKey, keys.EncryptionPublicKey, keys.EncryptionKeySignature,
+            Truncate(now), string.Empty);
+        return unsigned with { Signature = keys.Sign(JoinPayload(unsigned)) };
     }
 
-    /// <summary>Signs a message to <paramref name="toMachine"/>. Timestamps are truncated to milliseconds first.</summary>
-    public static Envelope SignEnvelope(MachineIdentity identity, Guid id, string toMachine, long sequence, DateTimeOffset expiresOn,
-        MessageContent content)
+    /// <summary>
+    /// Encrypts <paramref name="content"/> for the recipient and for the sender's own machine, and signs the
+    /// envelope. <paramref name="recipientEncryptionKey"/> must already be verified (see
+    /// <see cref="PublicKeys.VerifyEncryptionKey"/>). Timestamps are truncated to milliseconds first.
+    /// </summary>
+    public static Envelope SealEnvelope(MachineKeys sender, Guid id, string toMachine, string recipientEncryptionKey, long sequence,
+        DateTimeOffset expiresOn, MessageContent content)
     {
+        var normalisedExpiry = Truncate(expiresOn);
         var normalised = content with { CreatedOn = Truncate(content.CreatedOn) };
-        var unsigned = new Envelope(id, identity.MachineId, toMachine, Truncate(expiresOn), sequence, SizeOf(normalised), normalised,
-            string.Empty);
-        return unsigned with { Signature = identity.Sign(EnvelopePayload(unsigned)) };
+        var sealedContent = MessageCrypto.Seal(normalised, id, sender.MachineId, toMachine, sequence, normalisedExpiry,
+            [new(toMachine, recipientEncryptionKey), new(sender.MachineId, sender.EncryptionPublicKey)]);
+        var unsigned = new Envelope(id, sender.MachineId, toMachine, normalisedExpiry, sequence, sealedContent.Size,
+            sealedContent.Ciphertext, sealedContent.Wraps, string.Empty);
+        return unsigned with { Signature = sender.Sign(EnvelopePayload(unsigned)) };
     }
 
     public static bool VerifyJoin(JoinRequest request) =>
-        PublicKeys.Verify(request.PublicKey, JoinPayload(request), request.Signature);
+        PublicKeys.Verify(request.PublicKey, JoinPayload(request), request.Signature)
+        && PublicKeys.VerifyEncryptionKey(request.PublicKey, request.EncryptionKey, request.EncryptionKeySignature);
 
-    public static bool VerifyEnvelope(Envelope envelope, string senderPublicKey) =>
-        envelope.Content is not null
-        && KeyFingerprint.MachineIdOf(senderPublicKey) == envelope.FromMachine
-        && envelope.Size == SizeOf(envelope.Content)
-        && PublicKeys.Verify(senderPublicKey, EnvelopePayload(envelope), envelope.Signature);
+    /// <summary>Signed by <paramref name="senderPublicKey"/>, whose hash is the sender id, with a consistent size.</summary>
+    public static bool VerifyEnvelope(Envelope envelope, string senderPublicKey)
+    {
+        if (envelope.Ciphertext is null || envelope.Wraps is null || KeyFingerprint.MachineIdOf(senderPublicKey) != envelope.FromMachine)
+        {
+            return false;
+        }
+
+        try
+        {
+            return envelope.Size == Convert.FromBase64String(envelope.Ciphertext).Length
+                   && PublicKeys.Verify(senderPublicKey, EnvelopePayload(envelope), envelope.Signature);
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+    }
 
     // Milliseconds survive every JSON round trip; ticks beyond them might not.
     public static DateTimeOffset Truncate(DateTimeOffset time) =>
@@ -80,15 +86,15 @@ public static class Signatures
     public static string Stamp(DateTimeOffset time) =>
         time.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
 
-    // A count, then sorted key/value pairs: the same map always signs the same way, whatever its order.
-    private static IEnumerable<string?> Metadata(IReadOnlyDictionary<string, string>? metadata)
+    private static IEnumerable<string?> Wraps(IReadOnlyList<KeyWrap>? wraps)
     {
-        var entries = (metadata ?? new Dictionary<string, string>()).OrderBy(m => m.Key, StringComparer.Ordinal).ToList();
-        yield return entries.Count.ToString(CultureInfo.InvariantCulture);
-        foreach (var (key, value) in entries)
+        wraps ??= [];
+        yield return wraps.Count.ToString(CultureInfo.InvariantCulture);
+        foreach (var wrap in wraps)
         {
-            yield return key;
-            yield return value;
+            yield return wrap.Machine;
+            yield return wrap.EphemeralKey;
+            yield return wrap.WrappedKey;
         }
     }
 }

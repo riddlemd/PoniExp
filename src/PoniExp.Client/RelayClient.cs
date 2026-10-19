@@ -20,7 +20,9 @@ namespace PoniExp.Client;
 /// </summary>
 public sealed class RelayClient : IAsyncDisposable
 {
-    private readonly MachineIdentity _identity;
+    private readonly MachineKeys _keys;
+    private readonly Lock _verifiedLock = new();
+    private readonly Dictionary<string, string> _verifiedKeys = [];
     private readonly HubConnection _connection;
     private readonly TimeProvider _time;
     private readonly ClientStore _store;
@@ -33,11 +35,11 @@ public sealed class RelayClient : IAsyncDisposable
     private Dictionary<string, MachineInfo> _machines = [];
 
     /// <exception cref="OptionsValidationException">The messaging settings are invalid.</exception>
-    public RelayClient(MachineIdentity identity, RelayClientOptions options, ClientStore store,
+    public RelayClient(MachineKeys keys, RelayClientOptions options, ClientStore store,
         IOptionsMonitor<MessagingOptions> messaging, TimeProvider? time = null)
     {
         _ = messaging.CurrentValue; // validates: bad settings stop the client here, not on the first message
-        _identity = identity;
+        _keys = keys;
         _store = store;
         _messaging = messaging;
         _confirm = options.ConfirmMessages;
@@ -139,7 +141,7 @@ public sealed class RelayClient : IAsyncDisposable
 
     public ClientStore Store => _store;
 
-    public string MachineId => _identity.MachineId;
+    public string MachineId => _keys.MachineId;
 
     public MembershipStatus Status { get; private set; } = MembershipStatus.Unknown;
 
@@ -157,14 +159,14 @@ public sealed class RelayClient : IAsyncDisposable
     /// <summary>Asks to join. The router shows the owner a join code; compare it with <see cref="JoinCode"/>.</summary>
     public async Task<MembershipStatus> RequestJoinAsync(string name, MachineDescription description, CancellationToken cancellationToken = default)
     {
-        var request = Signatures.SignJoin(_identity, name, description, _time.GetUtcNow());
+        var request = Signatures.SignJoin(_keys, name, description, _time.GetUtcNow());
         var result = await _connection.InvokeAsync<AuthResult>(HubMethods.RequestJoin, request, cancellationToken);
         Status = result.Status;
         Name = result.Name;
         return result.Status;
     }
 
-    public string JoinCode => KeyFingerprint.JoinCodeOf(_identity.PublicKey);
+    public string JoinCode => KeyFingerprint.JoinCodeOf(_keys.PublicKey);
 
     /// <summary>Signs and sends a message to <c>machine</c> or <c>machine/endpoint</c> (machine by id or name).</summary>
     public async Task<SentMessage> SendAsync(string to, OutgoingMessage message, CancellationToken cancellationToken = default) =>
@@ -187,10 +189,12 @@ public sealed class RelayClient : IAsyncDisposable
             throw new ArgumentException("A message has one recipient: conversation, reply-to and operation ids are for a single one.", nameof(message));
         }
 
-        var targets = new List<(string Machine, string Endpoint)>();
-        foreach (var address in to.Select(Address.Parse).ToList()) // all parsed and resolved before anything is sent
+        var targets = new List<(MachineInfo Machine, string Endpoint)>();
+        foreach (var address in to.Select(Address.Parse).ToList()) // all parsed, resolved and key-checked before anything is sent
         {
-            targets.Add(((await ResolveAsync(address.Machine, cancellationToken)).Id, address.Endpoint));
+            var machine = await ResolveAsync(address.Machine, cancellationToken);
+            VerifiedEncryptionKey(machine);
+            targets.Add((machine, address.Endpoint));
         }
 
         var sent = new List<SentMessage>();
@@ -203,13 +207,17 @@ public sealed class RelayClient : IAsyncDisposable
     }
 
     /// <summary>Replies to <paramref name="original"/>: to its sender's endpoint, in its conversation, from the endpoint it was sent to.</summary>
-    public Task<SentMessage> ReplyAsync(ReceivedMessage original, OutgoingMessage reply, CancellationToken cancellationToken = default) =>
-        SendOneAsync(original.Envelope.FromMachine, original.Content.FromEndpoint, reply with
+    public async Task<SentMessage> ReplyAsync(ReceivedMessage original, OutgoingMessage reply, CancellationToken cancellationToken = default) =>
+        await SendOneAsync(await ResolveAsync(original.Envelope.FromMachine, cancellationToken), original.Content.FromEndpoint, reply with
         {
             FromEndpoint = reply.FromEndpoint ?? original.Content.ToEndpoint,
             ConversationId = original.Content.ConversationId,
             ReplyTo = original.Envelope.Id,
         }, cancellationToken);
+
+    /// <summary>A stored message, decrypted: sent by this machine or received by it.</summary>
+    public async Task<MessageContent?> ReadAsync(string fromMachine, Guid id) =>
+        await _store.GetMessageAsync(fromMachine, id) is { Envelope: { } envelope } ? MessageCrypto.Open(envelope, _keys.MachineId, _keys.Encryption) : null;
 
     public async Task<IReadOnlyList<MachineInfo>> RefreshMachinesAsync(CancellationToken cancellationToken = default)
     {
@@ -255,8 +263,39 @@ public sealed class RelayClient : IAsyncDisposable
         }
     }
 
-    private async Task<SentMessage> SendOneAsync(string toMachine, string toEndpoint, OutgoingMessage message, CancellationToken cancellationToken)
+    /// <summary>
+    /// The machine's encryption key, after checking that its own identity key signed it. The router hands
+    /// keys out, so without this check it could hand out its own and read everything.
+    /// </summary>
+    private string VerifiedEncryptionKey(MachineInfo machine)
     {
+        lock (_verifiedLock)
+        {
+            if (_verifiedKeys.TryGetValue(machine.Id, out var known) && known == machine.EncryptionKey)
+            {
+                return known;
+            }
+        }
+
+        if (KeyFingerprint.MachineIdOf(machine.PublicKey) != machine.Id
+            || !PublicKeys.VerifyEncryptionKey(machine.PublicKey, machine.EncryptionKey, machine.EncryptionKeySignature))
+        {
+            throw new InvalidOperationException(
+                $"The router's encryption key for {machine.Name} isn't signed by {machine.Name}'s own key; refusing to encrypt to it.");
+        }
+
+        lock (_verifiedLock)
+        {
+            _verifiedKeys[machine.Id] = machine.EncryptionKey;
+        }
+
+        return machine.EncryptionKey;
+    }
+
+    private async Task<SentMessage> SendOneAsync(MachineInfo target, string toEndpoint, OutgoingMessage message, CancellationToken cancellationToken)
+    {
+        var toMachine = target.Id;
+        var recipientKey = VerifiedEncryptionKey(target);
         var settings = _messaging.CurrentValue;
         var lifetime = message.ExpiresIn ?? settings.DefaultExpiry;
         if (lifetime <= TimeSpan.Zero)
@@ -290,8 +329,8 @@ public sealed class RelayClient : IAsyncDisposable
         }
 
         // Stored, with its sequence number, before it leaves.
-        var envelope = await _store.ReserveOutgoingAsync(toMachine,
-            sequence => Signatures.SignEnvelope(_identity, id, toMachine, sequence, now + lifetime, content), now);
+        var envelope = await _store.ReserveOutgoingAsync(toMachine, content,
+            sequence => Signatures.SealEnvelope(_keys, id, toMachine, recipientKey, sequence, now + lifetime, content), now);
         SendResult result;
         try
         {
@@ -299,7 +338,7 @@ public sealed class RelayClient : IAsyncDisposable
         }
         catch (HubException)
         {
-            await _store.ForgetOutgoingAsync(_identity.MachineId, id);
+            await _store.ForgetOutgoingAsync(_keys.MachineId, id);
             throw;
         }
 
@@ -342,8 +381,8 @@ public sealed class RelayClient : IAsyncDisposable
     {
         await _connection.InvokeAsync<HelloResult>(HubMethods.Hello, WireProtocol.Version, cancellationToken);
         var challenge = await _connection.InvokeAsync<string>(HubMethods.GetChallenge, cancellationToken);
-        var signature = _identity.Sign(Signatures.AuthPayload(challenge, _identity.PublicKey));
-        var result = await _connection.InvokeAsync<AuthResult>(HubMethods.Authenticate, _identity.PublicKey, signature, cancellationToken);
+        var signature = _keys.Sign(Signatures.AuthPayload(challenge, _keys.PublicKey));
+        var result = await _connection.InvokeAsync<AuthResult>(HubMethods.Authenticate, _keys.PublicKey, signature, cancellationToken);
         Status = result.Status;
         Name = result.Name;
         if (result.Status == MembershipStatus.Approved)
@@ -380,7 +419,7 @@ public sealed class RelayClient : IAsyncDisposable
     private async Task OnReceiveAsync(Delivery delivery)
     {
         var envelope = delivery.Envelope;
-        if (envelope?.Content is null || envelope.ToMachine != _identity.MachineId)
+        if (envelope?.Ciphertext is null || envelope.ToMachine != _keys.MachineId)
         {
             MessageRejected?.Invoke(envelope!, "addressed to another machine");
             return;
@@ -398,10 +437,22 @@ public sealed class RelayClient : IAsyncDisposable
             return; // not confirmed: the router keeps it until it expires, for inspection
         }
 
-        // This machine's own clock decides, not the router's: a router can't stretch or replay messages.
         var settings = _messaging.CurrentValue;
         var now = _time.GetUtcNow();
-        var content = envelope.Content;
+        MessageContent content;
+        try
+        {
+            content = MessageCrypto.Open(envelope, _keys.MachineId, _keys.Encryption);
+        }
+        catch (CryptographicException e)
+        {
+            await _store.CountAsync(envelope.FromMachine, ClientMetrics.Undecryptable, now);
+            MessageRejected?.Invoke(envelope, $"can't decrypt: {e.Message}");
+            await ConfirmAsync(envelope.Id); // signed by its sender, so it will never decrypt: drop it
+            return;
+        }
+
+        // This machine's own clock decides, not the router's: a router can't stretch or replay messages.
         var expiresOn = envelope.ExpiresOn < content.CreatedOn + settings.MaxExpiry ? envelope.ExpiresOn : content.CreatedOn + settings.MaxExpiry;
         var refusal = MessageRules.CheckContent(content) is { } problem ? (ClientMetrics.Invalid, problem)
             : content.CreatedOn > now + settings.ClockSkew ? (ClientMetrics.FromTheFuture, "created in the future; check the sender's clock")
@@ -416,25 +467,32 @@ public sealed class RelayClient : IAsyncDisposable
         }
         else
         {
-            stored = await _store.StoreIncomingAsync(envelope, delivery.RelayedOn, expiresOn, _identity.MachineId, now);
+            stored = await _store.StoreIncomingAsync(envelope, content, delivery.RelayedOn, expiresOn, _keys.MachineId, now);
         }
 
         // Stored (or refused for good): the router can drop it. A duplicate is confirmed again and dropped quietly.
-        if (_confirm)
-        {
-            try
-            {
-                await _connection.InvokeAsync(HubMethods.Confirm, envelope.Id);
-            }
-            catch (Exception e)
-            {
-                BackgroundError?.Invoke(e); // it comes back on reconnect and is then a duplicate
-            }
-        }
+        await ConfirmAsync(envelope.Id);
 
         if (stored && MessageReceived is { } handler)
         {
-            await handler(new ReceivedMessage(envelope, sender.Name, delivery.RelayedOn));
+            await handler(new ReceivedMessage(envelope, content, sender.Name, delivery.RelayedOn));
+        }
+    }
+
+    private async Task ConfirmAsync(Guid id)
+    {
+        if (!_confirm)
+        {
+            return;
+        }
+
+        try
+        {
+            await _connection.InvokeAsync(HubMethods.Confirm, id);
+        }
+        catch (Exception e)
+        {
+            BackgroundError?.Invoke(e); // it comes back on reconnect and is then a duplicate
         }
     }
 
@@ -450,11 +508,12 @@ public sealed class RelayClient : IAsyncDisposable
     }
 }
 
-/// <summary>A stored incoming message. <see cref="RelayedOn"/> is when the router received it (its word, unsigned).</summary>
-public sealed record ReceivedMessage(Envelope Envelope, string FromName, DateTimeOffset RelayedOn)
+/// <summary>
+/// A stored incoming message: its envelope (as signed and encrypted) and its decrypted content.
+/// <see cref="RelayedOn"/> is when the router received it (its word, unsigned).
+/// </summary>
+public sealed record ReceivedMessage(Envelope Envelope, MessageContent Content, string FromName, DateTimeOffset RelayedOn)
 {
-    public MessageContent Content => Envelope.Content;
-
     /// <summary>The sender as <c>name/endpoint</c>.</summary>
     public Address From => new(FromName, Content.FromEndpoint);
 }

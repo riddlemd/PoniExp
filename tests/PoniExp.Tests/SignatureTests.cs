@@ -10,40 +10,27 @@ public class SignatureTests
     [Fact]
     public void JoinRequestVerifiesOnlyUnchanged()
     {
-        using var identity = MachineIdentity.Create();
-        var request = Signatures.SignJoin(identity, "ise", Description, DateTimeOffset.UtcNow);
+        using var keys = MachineKeys.Create();
+        using var other = MachineKeys.Create();
+        var request = Signatures.SignJoin(keys, "ise", Description, DateTimeOffset.UtcNow);
 
         Assert.True(Signatures.VerifyJoin(request));
         Assert.False(Signatures.VerifyJoin(request with { Name = "wojtek" }));
         Assert.False(Signatures.VerifyJoin(request with { Description = Description with { Notes = "x" } }));
         Assert.False(Signatures.VerifyJoin(request with { RequestedOn = request.RequestedOn.AddSeconds(1) }));
-    }
-
-    [Fact]
-    public void JoinRequestWithSomeoneElsesKeyFails()
-    {
-        using var mine = MachineIdentity.Create();
-        using var theirs = MachineIdentity.Create();
-        var request = Signatures.SignJoin(mine, "ise", Description, DateTimeOffset.UtcNow);
-
-        Assert.False(Signatures.VerifyJoin(request with { PublicKey = theirs.PublicKey }));
+        Assert.False(Signatures.VerifyJoin(request with { EncryptionKey = other.EncryptionPublicKey }));
+        Assert.False(Signatures.VerifyJoin(request with { PublicKey = other.PublicKey }));
     }
 
     [Fact]
     public void TheSignatureCoversEveryFieldAndOnlyItsSender()
     {
-        using var sender = MachineIdentity.Create();
-        using var other = MachineIdentity.Create();
+        using var sender = MachineKeys.Create();
+        using var other = MachineKeys.Create();
         var now = DateTimeOffset.UtcNow;
-        var content = Envelopes.Content(now, "hello") with
-        {
-            ReplyTo = Guid.NewGuid(),
-            Status = ReplyStatus.Progress,
-            Subject = "subject",
-            Metadata = new Dictionary<string, string> { ["a"] = "1", ["b"] = "2" },
-        };
-        var envelope = Signatures.SignEnvelope(sender, Guid.NewGuid(), other.MachineId, 7, now.AddHours(1), content);
-        var c = envelope.Content;
+        var envelope = Signatures.SealEnvelope(sender, Guid.NewGuid(), other.MachineId, other.EncryptionPublicKey, 7, now.AddHours(1),
+            Envelopes.Content(now, "hello"));
+        var wrap = envelope.Wraps[0];
 
         Assert.True(Signatures.VerifyEnvelope(envelope, sender.PublicKey));
         Assert.False(Signatures.VerifyEnvelope(envelope, other.PublicKey));
@@ -55,60 +42,13 @@ public class SignatureTests
             envelope with { ExpiresOn = envelope.ExpiresOn.AddSeconds(1) },
             envelope with { Sequence = 8 },
             envelope with { Size = envelope.Size + 1 },
-            envelope with { Content = c with { FromEndpoint = "other" } },
-            envelope with { Content = c with { ToEndpoint = "other" } },
-            envelope with { Content = c with { ConversationId = Guid.NewGuid() } },
-            envelope with { Content = c with { ReplyTo = Guid.NewGuid() } },
-            envelope with { Content = c with { OperationId = Guid.NewGuid() } },
-            envelope with { Content = c with { Status = ReplyStatus.Done } },
-            envelope with { Content = c with { Subject = "Subject" } },
-            envelope with { Content = c with { Type = MessageType.Receipt } },
-            envelope with { Content = c with { ContentType = "text/markdown" } },
-            envelope with { Content = c with { Metadata = new Dictionary<string, string> { ["a"] = "1", ["b"] = "3" } } },
-            envelope with { Content = c with { Metadata = new Dictionary<string, string> { ["a"] = "1", ["b"] = "2", ["c"] = "" } } },
-            envelope with { Content = c with { Body = "hellO" } },
-            envelope with { Content = c with { CreatedOn = c.CreatedOn.AddMilliseconds(1) } },
+            envelope with { Ciphertext = RelayTests.Flip(envelope.Ciphertext) },
+            envelope with { Wraps = [wrap with { Machine = sender.MachineId }, envelope.Wraps[1]] },
+            envelope with { Wraps = [wrap with { EphemeralKey = envelope.Wraps[1].EphemeralKey }, envelope.Wraps[1]] },
+            envelope with { Wraps = [wrap with { WrappedKey = RelayTests.Flip(wrap.WrappedKey) }, envelope.Wraps[1]] },
+            envelope with { Wraps = [wrap] },
         ];
         Assert.All(tampered, t => Assert.False(Signatures.VerifyEnvelope(t, sender.PublicKey)));
-
-        // The same metadata in another order is the same message.
-        var reordered = envelope with { Content = c with { Metadata = new Dictionary<string, string> { ["b"] = "2", ["a"] = "1" } } };
-        Assert.True(Signatures.VerifyEnvelope(reordered, sender.PublicKey));
-    }
-
-    [Theory]
-    [InlineData("wojtek", "wojtek", "default")]
-    [InlineData("wojtek/agent", "wojtek", "agent")]
-    [InlineData("3f2a91c0/hermes.main", "3f2a91c0", "hermes.main")]
-    public void AddressesParse(string text, string machine, string endpoint) =>
-        Assert.Equal(new Address(machine, endpoint), Address.Parse(text));
-
-    [Theory]
-    [InlineData("wojtek/")]
-    [InlineData("/agent")]
-    [InlineData("wojtek/Agent")]
-    [InlineData("wojtek/a/b")]
-    public void BadAddressesDont(string text) => Assert.Throws<FormatException>(() => Address.Parse(text));
-
-    [Fact]
-    public void MessageRulesCatchMalformedContent()
-    {
-        var good = Envelopes.Content(DateTimeOffset.UtcNow);
-        Assert.Null(MessageRules.CheckContent(good));
-        Assert.NotNull(MessageRules.CheckContent(good with { Status = ReplyStatus.Done }));
-        Assert.NotNull(MessageRules.CheckContent(good with { Type = (MessageType)99 }));
-        Assert.NotNull(MessageRules.CheckContent(good with { ContentType = "plain" }));
-        Assert.NotNull(MessageRules.CheckContent(good with { Subject = "" }));
-        Assert.NotNull(MessageRules.CheckContent(good with { Metadata = new Dictionary<string, string> { ["bad key"] = "x" } }));
-        Assert.NotNull(MessageRules.CheckContent(good with { Body = new string('x', Limits.MaxBodyBytes + 1) }));
-    }
-
-    [Fact]
-    public void TypesAndStatusesTravelAsKebabCase()
-    {
-        Assert.Equal("file-receipt", WireProtocol.NameOf(MessageType.FileReceipt));
-        Assert.Contains("\"type\":\"file-receipt\"", System.Text.Json.JsonSerializer.Serialize(
-            Envelopes.Content(DateTimeOffset.UtcNow) with { Type = MessageType.FileReceipt }, WireProtocol.Json));
     }
 
     [Fact]

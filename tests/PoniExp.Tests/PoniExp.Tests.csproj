@@ -12,6 +12,7 @@
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <ProjectReference Include="../../src/PoniExp.Server/PoniExp.Server.csproj" />
     <ProjectReference Include="../../src/PoniExp.Client/PoniExp.Client.csproj" />
+    <ProjectReference Include="../../src/PoniExp.Secrets/PoniExp.Secrets.csproj" />
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />
