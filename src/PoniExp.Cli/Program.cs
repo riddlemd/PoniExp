@@ -4,12 +4,12 @@ using PoniExp.Core.Crypto;
 using PoniExp.Core.Protocol;
 
 const string Usage = """
-    poniexp init <router-url> [--pin <sha256>]       where the router is; creates this machine's key
-    poniexp id                                       this machine's id and join code
-    poniexp join <name> [--notes <text>]             ask to join; waits for approval
-    poniexp status                                   membership, and which machines are online
-    poniexp send <machine> <kind> <body|->           sign and send a message ("-" reads stdin)
-    poniexp listen [--json]                          stay connected and print messages as they arrive
+    poniexp-client init <router-url> [--pin <sha256>]   where the router is; creates this machine's key
+    poniexp-client id                                   this machine's id and join code
+    poniexp-client join <name> [--notes <text>]         ask to join; waits for approval
+    poniexp-client status                               membership, and which machines are online
+    poniexp-client send <machine> <kind> <body|->       sign and send a message ("-" reads stdin)
+    poniexp-client listen [--json]                      stay connected and print messages as they arrive
     """;
 
 var identity = MachineIdentity.LoadOrCreate(ClientConfig.KeyPath);
@@ -41,7 +41,7 @@ catch (Exception e) when (e is InvalidOperationException or HttpRequestException
                                or System.Net.WebSockets.WebSocketException)
 {
     var message = e.InnerException?.InnerException is System.Security.Authentication.AuthenticationException
-        ? "the router's TLS certificate doesn't match the pinned SHA-256 (check 'poniexp init ... --pin')"
+        ? "the router's TLS certificate doesn't match the pinned SHA-256 (check 'poniexp-client init ... --pin')"
         : e.Message;
     return Fail("error: " + message);
 }
@@ -81,7 +81,7 @@ async Task<int> JoinAsync(string name, string? notes)
 
     Console.WriteLine($"asked to join as '{name}'. On the router, check this join code and approve:");
     Console.WriteLine($"    {client.JoinCode}");
-    Console.WriteLine($"    docker exec poniexp-router poniexp-router admin approve {client.MachineId[..8]}");
+    Console.WriteLine($"    docker exec poniexp-server poniexp admin approve {client.MachineId[..8]}");
     Console.WriteLine("waiting (Ctrl+C to stop; the request stays pending)...");
     var result = await approved.Task.WaitAsync(cancel.Token);
     Console.WriteLine(result == MembershipStatus.Approved ? "approved" : $"not approved: {result}");
@@ -130,7 +130,7 @@ async Task<int> ListenAsync(bool json)
 
 async Task<RelayClient> ConnectAsync()
 {
-    var config = ClientConfig.Load() ?? throw new InvalidOperationException("run 'poniexp init <router-url>' first");
+    var config = ClientConfig.Load() ?? throw new InvalidOperationException("run 'poniexp-client init <router-url>' first");
     var client = new RelayClient(identity, config.ToOptions());
     await client.ConnectAsync(cancel.Token);
     return client;
@@ -142,7 +142,7 @@ async Task<RelayClient> ConnectApprovedAsync()
     if (client.Status != MembershipStatus.Approved)
     {
         await client.DisposeAsync();
-        throw new InvalidOperationException($"this machine is {client.Status.ToString().ToLowerInvariant()}; run 'poniexp join <name>'");
+        throw new InvalidOperationException($"this machine is {client.Status.ToString().ToLowerInvariant()}; run 'poniexp-client join <name>'");
     }
 
     return client;

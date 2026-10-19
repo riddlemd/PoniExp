@@ -2,13 +2,13 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using PoniExp.Core.Protocol;
-using PoniExp.Router.Security;
+using PoniExp.Server.Security;
 
-namespace PoniExp.Router.Admin;
+namespace PoniExp.Server.Admin;
 
 /// <summary>
-/// `PoniExp.Router admin ...`: talks to a running router's admin listener on 127.0.0.1. In the container:
-/// <c>docker exec poniexp-router dotnet PoniExp.Router.dll admin list</c>.
+/// `poniexp admin ...`: talks to a running router's admin listener on 127.0.0.1. In the container:
+/// <c>docker exec poniexp-server poniexp admin list</c>.
 /// </summary>
 public static class AdminCli
 {
@@ -56,7 +56,7 @@ public static class AdminCli
                     output.WriteLine(certificate?.Sha256 ?? "(the relay is running without TLS)");
                     return 0;
                 default:
-                    output.WriteLine("usage: admin [list | approve <id|name> | reject <id|name> | remove <id|name> | certificate] [--url URL]");
+                    output.WriteLine("usage: poniexp admin [list | approve <id|name> | reject <id|name> | remove <id|name> | certificate] [--url URL]");
                     return 2;
             }
         }

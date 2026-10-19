@@ -3,7 +3,7 @@ using Microsoft.Extensions.Options;
 using PoniExp.Core.Crypto;
 using PoniExp.Core.Protocol;
 
-namespace PoniExp.Router.Machines;
+namespace PoniExp.Server.Machines;
 
 /// <summary>
 /// Every machine that has asked to join, with its status. Reads are lock-free over an immutable snapshot;

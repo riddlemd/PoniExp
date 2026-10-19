@@ -1,4 +1,4 @@
-namespace PoniExp.Router;
+namespace PoniExp.Server;
 
 /// <summary>A refusal the caller can act on; its message goes back to the client or admin as is.</summary>
 public sealed class RouterException(string message, RouterErrorKind kind = RouterErrorKind.Invalid) : Exception(message)

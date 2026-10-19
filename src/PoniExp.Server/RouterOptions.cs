@@ -1,4 +1,4 @@
-namespace PoniExp.Router;
+namespace PoniExp.Server;
 
 /// <summary>Bound from the "PoniExp" configuration section (e.g. the env var PoniExp__Port).</summary>
 public sealed class RouterOptions

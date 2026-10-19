@@ -2,7 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using PoniExp.Core.Crypto;
 
-namespace PoniExp.Router.Machines;
+namespace PoniExp.Server.Machines;
 
 internal static class JsonFile
 {

@@ -1,9 +1,9 @@
 using Microsoft.AspNetCore.SignalR;
 using PoniExp.Core.Protocol;
-using PoniExp.Router.Hubs;
-using PoniExp.Router.Machines;
+using PoniExp.Server.Hubs;
+using PoniExp.Server.Machines;
 
-namespace PoniExp.Router.Admin;
+namespace PoniExp.Server.Admin;
 
 /// <summary>Approve, reject and remove machines, and tell their live connections.</summary>
 public sealed class AdminService(

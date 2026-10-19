@@ -1,6 +1,6 @@
 using Microsoft.AspNetCore.SignalR;
 
-namespace PoniExp.Router.Hubs;
+namespace PoniExp.Server.Hubs;
 
 /// <summary>Which approved machines have a live connection. A machine may hold several (a listener and a CLI).</summary>
 public sealed class PresenceTracker

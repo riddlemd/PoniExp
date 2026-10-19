@@ -2,7 +2,7 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.SignalR.Client;
 using PoniExp.Core.Crypto;
 using PoniExp.Core.Protocol;
-using PoniExp.Router;
+using PoniExp.Server;
 
 namespace PoniExp.Tests;
 
@@ -230,7 +230,7 @@ public class RelayTests
     public async Task TlsPinningAcceptsOnlyTheRoutersCertificate()
     {
         await using var router = await RouterFixture.StartAsync(useHttps: true);
-        var pin = router.App.Services.GetRequiredService<PoniExp.Router.Security.RouterCertificateInfo>().Sha256!;
+        var pin = router.App.Services.GetRequiredService<PoniExp.Server.Security.RouterCertificateInfo>().Sha256!;
         Assert.StartsWith("https://", router.Url.ToString());
 
         var good = router.Client(MachineIdentity.Create(), pin);
@@ -250,12 +250,12 @@ public class RelayTests
         string first;
         await using (var router = await RouterFixture.StartAsync(useHttps: true, dataDirectory: data + "-a"))
         {
-            first = router.App.Services.GetRequiredService<PoniExp.Router.Security.RouterCertificateInfo>().Sha256!;
+            first = router.App.Services.GetRequiredService<PoniExp.Server.Security.RouterCertificateInfo>().Sha256!;
             File.Copy(Path.Combine(data + "-a", "router.pfx"), Path.Combine(Directory.CreateDirectory(data + "-b").FullName, "router.pfx"));
         }
 
         await using var again = await RouterFixture.StartAsync(useHttps: true, dataDirectory: data + "-b");
-        Assert.Equal(first, again.App.Services.GetRequiredService<PoniExp.Router.Security.RouterCertificateInfo>().Sha256);
+        Assert.Equal(first, again.App.Services.GetRequiredService<PoniExp.Server.Security.RouterCertificateInfo>().Sha256);
     }
 
     private static async Task<HubConnection> RawConnectionAsync(RouterFixture router)

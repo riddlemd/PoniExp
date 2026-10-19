@@ -8,9 +8,16 @@
 dotnet build PoniExp.slnx
 dotnet test PoniExp.slnx                       # starts real routers on random loopback ports
 docker compose up -d --build                   # the router, in a Linux container
-docker exec poniexp-router poniexp-router admin list
-dotnet run --project src/PoniExp.Cli -- <command>
+docker exec poniexp-server poniexp admin list    # admin, inside the container
+dotnet run --project src/PoniExp.Server -- router   # run the server locally
+dotnet run --project src/PoniExp.Cli -- <command>     # poniexp-client
 ```
+
+## Executables
+
+- `poniexp` (`src/PoniExp.Server`): server-side, one subcommand per function: `router`, `admin`. New server functionality is a new subcommand, not a new executable.
+- `poniexp-client` (`src/PoniExp.Cli`): what each machine runs.
+- The container is `poniexp-server`; its entrypoint is `poniexp router`.
 
 ## Rules
 

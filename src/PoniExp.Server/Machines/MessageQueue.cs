@@ -2,7 +2,7 @@ using System.Collections.Immutable;
 using Microsoft.Extensions.Options;
 using PoniExp.Core.Protocol;
 
-namespace PoniExp.Router.Machines;
+namespace PoniExp.Server.Machines;
 
 /// <summary>
 /// Envelopes not yet acknowledged by their recipient. An envelope stays here after it is pushed to a live

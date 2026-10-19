@@ -2,7 +2,7 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <RootNamespace>PoniExp.Cli</RootNamespace>
-    <AssemblyName>poniexp</AssemblyName>
+    <AssemblyName>poniexp-client</AssemblyName>
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
   <ItemGroup>

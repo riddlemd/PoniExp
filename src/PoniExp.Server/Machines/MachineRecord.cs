@@ -1,7 +1,7 @@
 using PoniExp.Core.Crypto;
 using PoniExp.Core.Protocol;
 
-namespace PoniExp.Router.Machines;
+namespace PoniExp.Server.Machines;
 
 public sealed record MachineRecord(
     string Id,

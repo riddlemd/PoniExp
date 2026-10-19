@@ -1,7 +1,7 @@
 using System.Net;
-using PoniExp.Router.Security;
+using PoniExp.Server.Security;
 
-namespace PoniExp.Router.Admin;
+namespace PoniExp.Server.Admin;
 
 /// <summary>
 /// The admin API. It answers only connections from the loopback address, which inside the container

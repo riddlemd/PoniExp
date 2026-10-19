@@ -3,12 +3,12 @@ using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.Options;
 using PoniExp.Core.Protocol;
-using PoniExp.Router.Admin;
-using PoniExp.Router.Hubs;
-using PoniExp.Router.Machines;
-using PoniExp.Router.Security;
+using PoniExp.Server.Admin;
+using PoniExp.Server.Hubs;
+using PoniExp.Server.Machines;
+using PoniExp.Server.Security;
 
-namespace PoniExp.Router;
+namespace PoniExp.Server;
 
 public static class RouterHost
 {

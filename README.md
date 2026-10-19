@@ -38,8 +38,8 @@ another directly: laptops behind VPNs, hotel Wi-Fi or NAT just connect out.
 
 ```sh
 docker compose up -d --build
-docker logs poniexp-router            # prints the certificate SHA-256 to pin
-docker exec poniexp-router poniexp-router admin certificate
+docker logs poniexp-server            # prints the certificate SHA-256 to pin
+docker exec poniexp-server poniexp admin certificate
 ```
 
 It listens on port 5443. Machines away from home need that port reachable, through a router port
@@ -47,9 +47,11 @@ forward or the VPN.
 
 ## Join a machine
 
+Build the client with `dotnet publish src/PoniExp.Cli -c Release -o <dir>` (puts `poniexp-client` in `<dir>`).
+
 ```sh
-dotnet run --project src/PoniExp.Cli -- init https://<router-host>:5443 --pin <sha256>
-dotnet run --project src/PoniExp.Cli -- join ise --notes "MacBook Pro"
+poniexp-client init https://<router-host>:5443 --pin <sha256>
+poniexp-client join ise --notes "MacBook Pro"
 #   asked to join as 'ise'. On the router, check this join code and approve:
 #       3f2a-91c0-...
 ```
@@ -57,10 +59,10 @@ dotnet run --project src/PoniExp.Cli -- join ise --notes "MacBook Pro"
 On the router:
 
 ```sh
-docker exec poniexp-router poniexp-router admin list
-docker exec poniexp-router poniexp-router admin approve 3f2a91c0     # id prefix or name
-docker exec poniexp-router poniexp-router admin reject <id|name>
-docker exec poniexp-router poniexp-router admin remove <id|name>     # forget it; it may ask again
+docker exec poniexp-server poniexp admin list
+docker exec poniexp-server poniexp admin approve 3f2a91c0     # id prefix or name
+docker exec poniexp-server poniexp admin reject <id|name>
+docker exec poniexp-server poniexp admin remove <id|name>     # forget it; it may ask again
 ```
 
 Approval reaches the waiting `join` at once.
@@ -68,10 +70,10 @@ Approval reaches the waiting `join` at once.
 ## Use it
 
 ```sh
-poniexp status                          # membership, and who's online
-poniexp send wojtek chat "hello"        # "delivered" or "queued" if wojtek is offline
-echo '{"task":"sync"}' | poniexp send wojtek task -
-poniexp listen                          # stay connected, print messages (--json for scripts)
+poniexp-client status                   # membership, and who's online
+poniexp-client send wojtek chat "hello" # "delivered" or "queued" if wojtek is offline
+echo '{"task":"sync"}' | poniexp-client send wojtek task -
+poniexp-client listen                   # stay connected, print messages (--json for scripts)
 ```
 
 From code, use `PoniExp.Client.RelayClient`:
@@ -97,9 +99,9 @@ await client.SendAsync("wojtek", "chat", "hi");
 | Path | What |
 |---|---|
 | `src/PoniExp.Core` | Keys, signing, protocol records. No dependencies. |
-| `src/PoniExp.Router` | ASP.NET Core SignalR hub, machine list, queue, admin API/CLI, container image. |
+| `src/PoniExp.Server` | `poniexp`: the server executable. `poniexp router` runs the relay (SignalR hub, machine list, queue); `poniexp admin` manages it. Container image. |
 | `src/PoniExp.Client` | `RelayClient`: connect, prove the key, join, send, receive. |
-| `src/PoniExp.Cli` | `poniexp` command line. |
+| `src/PoniExp.Cli` | `poniexp-client`: the command line each machine uses. |
 | `tests/PoniExp.Tests` | Signing tests, and end-to-end tests against a real router. |
 
 ```sh

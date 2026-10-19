@@ -1,8 +1,8 @@
 using PoniExp.Client;
 using PoniExp.Core.Crypto;
 using PoniExp.Core.Protocol;
-using PoniExp.Router;
-using PoniExp.Router.Admin;
+using PoniExp.Server;
+using PoniExp.Server.Admin;
 
 namespace PoniExp.Tests;
 

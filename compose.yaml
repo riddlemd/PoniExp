@@ -1,11 +1,11 @@
 # docker compose up -d --build   (Rancher Desktop / moby)
 services:
-  router:
+  server:
     build:
       context: .
-      dockerfile: src/PoniExp.Router/Dockerfile
-    image: poniexp-router:local
-    container_name: poniexp-router
+      dockerfile: src/PoniExp.Server/Dockerfile
+    image: poniexp-server:local
+    container_name: poniexp-server
     restart: unless-stopped
     ports:
       - "5443:5443"

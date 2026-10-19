@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using PoniExp.Core.Crypto;
 
-namespace PoniExp.Router.Security;
+namespace PoniExp.Server.Security;
 
 /// <summary>
 /// The router's TLS certificate: self-signed, created on first start in the data directory, kept across
@@ -18,13 +18,13 @@ public static class RouterCertificate
         if (!File.Exists(path))
         {
             using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-            var request = new CertificateRequest("CN=poniexp-router", key, HashAlgorithmName.SHA256);
+            var request = new CertificateRequest("CN=poniexp-server", key, HashAlgorithmName.SHA256);
             request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
             request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, true));
             request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension([new Oid("1.3.6.1.5.5.7.3.1")], false));
             var names = new SubjectAlternativeNameBuilder();
             names.AddDnsName("localhost");
-            names.AddDnsName("poniexp-router");
+            names.AddDnsName("poniexp-server");
             request.CertificateExtensions.Add(names.Build());
             var now = time.GetUtcNow();
             using var created = request.CreateSelfSigned(now.AddDays(-1), now.AddYears(20));

@@ -3,9 +3,9 @@ using System.Text;
 using Microsoft.AspNetCore.SignalR;
 using PoniExp.Core.Crypto;
 using PoniExp.Core.Protocol;
-using PoniExp.Router.Machines;
+using PoniExp.Server.Machines;
 
-namespace PoniExp.Router.Hubs;
+namespace PoniExp.Server.Hubs;
 
 /// <summary>
 /// The relay. A connection proves which key it holds by signing a one-time challenge; only connections

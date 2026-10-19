@@ -10,7 +10,7 @@
   </ItemGroup>
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
-    <ProjectReference Include="../../src/PoniExp.Router/PoniExp.Router.csproj" />
+    <ProjectReference Include="../../src/PoniExp.Server/PoniExp.Server.csproj" />
     <ProjectReference Include="../../src/PoniExp.Client/PoniExp.Client.csproj" />
   </ItemGroup>
   <ItemGroup>
