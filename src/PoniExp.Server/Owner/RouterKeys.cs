@@ -45,9 +45,11 @@ public sealed class RouterKeys : IDisposable
 
     public void Dispose() => Keys.Dispose();
 
-    private static RouterKeyFile ToFile(MachineKeys keys) => new(keys.Identity.ExportPrivateKeyPem(), keys.Encryption.ExportPrivateKeyPem());
+    private static RouterKeyFile ToFile(MachineKeys keys) =>
+        new(keys.Identity.ExportPrivateKeyPem(), keys.Encryption.ExportPrivateKeyPem(), keys.EncryptionKeyIssuedOn);
 
-    private static MachineKeys FromFile(RouterKeyFile file) => new(MachineIdentity.FromPem(file.Identity), EncryptionKey.FromPem(file.Encryption));
+    private static MachineKeys FromFile(RouterKeyFile file) =>
+        new(MachineIdentity.FromPem(file.Identity), EncryptionKey.FromPem(file.Encryption), file.IssuedOn == default ? DateTimeOffset.UnixEpoch : file.IssuedOn);
 }
 
-public sealed record RouterKeyFile(string Identity, string Encryption);
+public sealed record RouterKeyFile(string Identity, string Encryption, DateTimeOffset IssuedOn = default);

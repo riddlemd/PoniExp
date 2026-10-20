@@ -52,6 +52,15 @@ public sealed class TestOwner : IOwnerSigner
         return new AdminCommand(id, routerId, args, input, on, SignAsync(Key, AdminCommand.Payload(id, routerId, args, input, on), default).Result);
     }
 
+    /// <summary>The desk's signature for a waiting docker exec change.</summary>
+    public AdminCommand Approve(string routerId, AdminRequest request)
+    {
+        var id = Guid.NewGuid();
+        var on = DateTimeOffset.UtcNow;
+        return new AdminCommand(id, routerId, request.Args, null, on,
+            SignAsync(Key, AdminCommand.Payload(id, routerId, request.Args, null, on, request.Id, request.InputSha256), default).Result, request.Id, request.InputSha256);
+    }
+
     public HereClaim Here(string? machine, DateTimeOffset issued, DateTimeOffset expires)
     {
         var payload = HereClaim.Payload(machine, issued, expires);

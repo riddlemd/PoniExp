@@ -25,6 +25,7 @@ public sealed class RelayHub(
     PoniExp.Server.Owner.OwnerDesk desk,
     PoniExp.Server.Owner.RouterKeys routerKeys,
     PoniExp.Server.Owner.RemoteAdmin remoteAdmin,
+    PoniExp.Server.Owner.AdminApprovals adminApprovals,
     TimeProvider time,
     IOptionsSnapshot<RouterOptions> options,
     ILogger<RelayHub> logger) : Hub
@@ -62,7 +63,7 @@ public sealed class RelayHub(
 
         Context.Items[HelloItem] = protocolVersion;
         return new HelloResult(WireProtocol.Version, time.GetUtcNow(), options.Value.ClockSkew, routerKeys.Keys.PublicKey, routerKeys.Keys.EncryptionPublicKey,
-            routerKeys.Keys.EncryptionKeySignature);
+            routerKeys.Keys.EncryptionKeySignature, routerKeys.Keys.EncryptionKeyIssuedOn, desk.Owner?.ToString());
     }
 
     [HubMethodName(HubMethods.GetChallenge)]
@@ -126,6 +127,7 @@ public sealed class RelayHub(
         if (desk.Desk == id)
         {
             await Clients.Caller.SendAsync(HubMethods.PendingJoinsChanged, desk.PendingJoins());
+            await Clients.Caller.SendAsync(HubMethods.AdminRequestsChanged, adminApprovals.Waiting());
         }
 
         foreach (var room in rooms.Mine(id, []))
@@ -423,11 +425,69 @@ public sealed class RelayHub(
         return Room(() => remoteAdmin.RunAsync(me, command), me);
     }
 
+    [HubMethodName(HubMethods.DenyAdminRequest)]
+    public Task DenyAdminRequestAsync(Guid id)
+    {
+        var me = RequireMember();
+        return Room(async () =>
+        {
+            await adminApprovals.DenyAsync(me, id);
+            return true;
+        }, me);
+    }
+
+    [HubMethodName(HubMethods.ApproveOwnJoin)]
+    public async Task ApproveOwnJoinAsync(AdminCommand command)
+    {
+        RequireHello();
+        if (!TryItem(ProvenItem, out var id))
+        {
+            throw new HubException("Prove this machine's key first (ask to join).");
+        }
+
+        try
+        {
+            await remoteAdmin.ApproveOwnJoinAsync(id, command);
+        }
+        catch (RouterException e)
+        {
+            throw Refuse(e.Message, id);
+        }
+    }
+
+    [HubMethodName(HubMethods.GetRevocations)]
+    public IReadOnlyList<AdminCommand> GetRevocations()
+    {
+        RequireMember();
+        return desk.Revocations;
+    }
+
     [HubMethodName(HubMethods.GetOwnerHandovers)]
     public IReadOnlyList<AdminCommand> GetOwnerHandovers()
     {
         RequireMember();
         return desk.Handovers;
+    }
+
+    private MachineInfo Info(MachineRecord m) =>
+        new(m.Id, m.Name, m.Description, m.PublicKey, m.EncryptionKey, m.EncryptionKeySignature, presence.IsOnline(m.Id), m.LastSeenOn, m.Capabilities,
+            m.EncryptionKeyIssuedOn);
+
+    /// <summary>The machine rotates its encryption key: signed by its identity key, newer than the one it has, issued now.</summary>
+    [HubMethodName(HubMethods.RotateEncryptionKey)]
+    public async Task RotateEncryptionKeyAsync(EncryptionKeyUpdate update)
+    {
+        var me = RequireMember();
+        var record = registry.Get(me)!;
+        if (update is null || !PublicKeys.VerifyEncryptionKey(record.PublicKey, update.EncryptionKey, update.EncryptionKeySignature, update.IssuedOn))
+        {
+            throw Refuse("That encryption key isn't signed by this machine's identity key.", me);
+        }
+
+        RequireFresh(update.IssuedOn);
+        var next = await Room(() => registry.SetEncryptionKeyAsync(me, update), me);
+        logger.LogInformation("{Name} ({Id}) rotated its encryption key", next.Name, me[..8]);
+        await Clients.Group(MembersGroup).SendAsync(HubMethods.MachineKeyChanged, Info(next));
     }
 
     // ---- the job board ----
@@ -498,8 +558,7 @@ public sealed class RelayHub(
         RequireMember();
         return registry.List()
             .Where(m => m.Status == MembershipStatus.Approved)
-            .Select(m => new MachineInfo(m.Id, m.Name, m.Description, m.PublicKey, m.EncryptionKey, m.EncryptionKeySignature,
-                presence.IsOnline(m.Id), m.LastSeenOn, m.Capabilities))
+            .Select(m => Info(m))
             .ToList();
     }
 

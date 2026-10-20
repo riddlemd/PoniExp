@@ -25,6 +25,7 @@ public sealed class RelayClient : IAsyncDisposable
     private readonly MachineKeys _keys;
     private readonly Lock _verifiedLock = new();
     private readonly Dictionary<string, string> _verifiedKeys = [];
+    private readonly Dictionary<string, DateTimeOffset> _newestKeys = [];
     private readonly HubConnection _connection;
     private readonly TimeProvider _time;
     private readonly ClientStore _store;
@@ -120,6 +121,25 @@ public sealed class RelayClient : IAsyncDisposable
             OwnerChanged?.Invoke(handovers);
             return Task.CompletedTask;
         }));
+        _connection.On<MachineInfo>(HubMethods.MachineKeyChanged, machine => Post(() =>
+        {
+            if (!_revoked.Contains(machine.Id) && _machines.ContainsKey(machine.Id))
+            {
+                _machines = new Dictionary<string, MachineInfo>(_machines) { [machine.Id] = machine }; // checked when it's next encrypted to
+            }
+
+            return Task.CompletedTask;
+        }));
+        _connection.On<List<AdminCommand>>(HubMethods.RevocationsChanged, revocations => Post(() =>
+        {
+            RevocationsChanged?.Invoke(revocations);
+            return Task.CompletedTask;
+        }));
+        _connection.On<List<AdminRequest>>(HubMethods.AdminRequestsChanged, requests => Post(() =>
+        {
+            AdminRequestsChanged?.Invoke(requests);
+            return Task.CompletedTask;
+        }));
         _connection.On<List<PendingJoin>>(HubMethods.PendingJoinsChanged, joins => Post(() =>
         {
             PendingJoinsChanged?.Invoke(joins);
@@ -182,6 +202,15 @@ public sealed class RelayClient : IAsyncDisposable
     /// <summary>Who's waiting to join (sent to the desk machine).</summary>
     public event Action<IReadOnlyList<PendingJoin>>? PendingJoinsChanged;
 
+    /// <summary>docker exec changes waiting for the desk's signature (sent to the desk machine).</summary>
+    public event Action<IReadOnlyList<AdminRequest>>? AdminRequestsChanged;
+
+    /// <summary>The router's list of revocations (the daemon keeps those the owner signed).</summary>
+    public event Action<IReadOnlyList<AdminCommand>>? RevocationsChanged;
+
+    public async Task DenyAdminRequestAsync(Guid id, CancellationToken cancellationToken = default) =>
+        await InvokeRoomAsync<object?>(HubMethods.DenyAdminRequest, id, cancellationToken);
+
     /// <summary>True when (re)connected and authenticated; false (with the error) when the link drops.</summary>
     public event Action<bool, Exception?>? ConnectionChanged;
 
@@ -206,6 +235,22 @@ public sealed class RelayClient : IAsyncDisposable
     /// <summary>The router's identity key's fingerprint (its id), as pinned on first connect.</summary>
     public string? RouterId { get; private set; }
 
+    /// <summary>The router's owner key line, as of the last Hello (known before this machine is approved).</summary>
+    public string? RouterOwnerKey { get; private set; }
+
+    /// <summary>A machine waiting to join approves itself with an owner-signed <c>approve &lt;its id&gt;</c>.</summary>
+    public async Task ApproveOwnJoinAsync(AdminCommand command, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await _connection.InvokeAsync(HubMethods.ApproveOwnJoin, command, cancellationToken);
+        }
+        catch (HubException e)
+        {
+            throw new InvalidOperationException(ReasonOf(e), e);
+        }
+    }
+
     private string? _routerKey;
     private string? _routerEncryptionKey;
 
@@ -214,7 +259,7 @@ public sealed class RelayClient : IAsyncDisposable
     /// <summary>The router's keys are pinned on first connect (behind the TLS pin); different ones later are refused.</summary>
     private void PinRouter(HelloResult hello)
     {
-        if (!PublicKeys.IsValid(hello.RouterKey) || !PublicKeys.VerifyEncryptionKey(hello.RouterKey, hello.RouterEncryptionKey, hello.RouterEncryptionKeySignature))
+        if (!PublicKeys.IsValid(hello.RouterKey) || !PublicKeys.VerifyEncryptionKey(hello.RouterKey, hello.RouterEncryptionKey, hello.RouterEncryptionKeySignature, hello.RouterEncryptionKeyIssuedOn))
         {
             throw new InvalidOperationException("the router's encryption key isn't signed by its identity key");
         }
@@ -231,6 +276,7 @@ public sealed class RelayClient : IAsyncDisposable
         }
 
         (_routerKey, _routerEncryptionKey, RouterId) = (hello.RouterKey, hello.RouterEncryptionKey, KeyFingerprint.MachineIdOf(hello.RouterKey));
+        RouterOwnerKey = hello.OwnerKey;
     }
 
     /// <summary>
@@ -833,10 +879,76 @@ public sealed class RelayClient : IAsyncDisposable
     }
 
     /// <summary>Opens (decrypts) an envelope this machine sent or received.</summary>
-    public MessageContent Open(Envelope envelope) => MessageCrypto.Open(envelope, _keys.MachineId, _keys.Encryption);
+    public MessageContent Open(Envelope envelope) => OpenWithAnyKey(envelope);
+
+    /// <summary>With the current encryption key, else a retired one (an envelope sealed before a rotation).</summary>
+    private MessageContent OpenWithAnyKey(Envelope envelope)
+    {
+        var keys = _keys.DecryptionKeys;
+        for (var i = 0; ; i++)
+        {
+            try
+            {
+                return MessageCrypto.Open(envelope, _keys.MachineId, keys[i]);
+            }
+            catch (System.Security.Cryptography.CryptographicException) when (i + 1 < keys.Count)
+            {
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rotates this machine's encryption key (phase 11): a new key, signed with its issue time, taken by the router;
+    /// the old one is kept to open older envelopes. <paramref name="save"/> stores the keys (the daemon's secret store).
+    /// </summary>
+    public async Task RotateEncryptionKeyAsync(Action<MachineKeys>? save, CancellationToken cancellationToken = default)
+    {
+        if (!IsConnected)
+        {
+            throw new InvalidOperationException("not connected to the router: a new encryption key has to reach it");
+        }
+
+        var next = EncryptionKey.Create();
+        var issued = Signatures.Truncate(_time.GetUtcNow());
+        if (issued <= _keys.EncryptionKeyIssuedOn)
+        {
+            issued = _keys.EncryptionKeyIssuedOn.AddMilliseconds(1);
+        }
+
+        var signature = _keys.Sign(Signatures.EncryptionKeyPayload(_keys.PublicKey, next.PublicKey, issued));
+        try
+        {
+            await _connection.InvokeAsync(HubMethods.RotateEncryptionKey, new EncryptionKeyUpdate(next.PublicKey, signature, issued), cancellationToken);
+        }
+        catch (HubException e)
+        {
+            next.Dispose();
+            throw new InvalidOperationException(ReasonOf(e), e);
+        }
+
+        _keys.RotateEncryption(next, issued);
+        save?.Invoke(_keys);
+    }
 
     /// <summary>An approved machine, by id, from the last list the router gave (null if unknown).</summary>
     public MachineInfo? Machine(string id) => _machines.GetValueOrDefault(id);
+
+    private volatile HashSet<string> _revoked = [];
+
+    /// <summary>Machines the owner revoked (checked by the daemon): never trusted, whatever the router says.</summary>
+    public IReadOnlySet<string> Revoked
+    {
+        get => _revoked;
+        set
+        {
+            _revoked = [.. value];
+            _machines = _machines.Where(m => !_revoked.Contains(m.Key)).ToDictionary();
+        }
+    }
+
+    public async Task<IReadOnlyList<AdminCommand>> GetRevocationsAsync(CancellationToken cancellationToken = default) =>
+        IsConnected ? await _connection.InvokeAsync<IReadOnlyList<AdminCommand>>(HubMethods.GetRevocations, cancellationToken)
+            : throw new InvalidOperationException("not connected to the router");
 
     /// <summary>An approved machine by id or name, asking the router again if it isn't known yet.</summary>
     public async Task<MachineInfo> ResolveAsync(string to, CancellationToken cancellationToken = default)
@@ -882,11 +994,12 @@ public sealed class RelayClient : IAsyncDisposable
 
     /// <summary>A stored message, decrypted: sent by this machine or received by it.</summary>
     public async Task<MessageContent?> ReadAsync(string fromMachine, Guid id) =>
-        await _store.GetMessageAsync(fromMachine, id) is { Envelope: { } envelope } ? MessageCrypto.Open(envelope, _keys.MachineId, _keys.Encryption) : null;
+        await _store.GetMessageAsync(fromMachine, id) is { Envelope: { } envelope } ? OpenWithAnyKey(envelope) : null;
 
     public async Task<IReadOnlyList<MachineInfo>> RefreshMachinesAsync(CancellationToken cancellationToken = default)
     {
         var machines = await _connection.InvokeAsync<List<MachineInfo>>(HubMethods.GetMachines, cancellationToken);
+        machines = [.. machines.Where(m => !_revoked.Contains(m.Id))]; // even if a router lists a revoked machine again
         _machines = machines.ToDictionary(m => m.Id);
         return machines;
     }
@@ -943,10 +1056,40 @@ public sealed class RelayClient : IAsyncDisposable
         }
 
         if (KeyFingerprint.MachineIdOf(machine.PublicKey) != machine.Id
-            || !PublicKeys.VerifyEncryptionKey(machine.PublicKey, machine.EncryptionKey, machine.EncryptionKeySignature))
+            || !PublicKeys.VerifyEncryptionKey(machine.PublicKey, machine.EncryptionKey, machine.EncryptionKeySignature, machine.EncryptionKeyIssuedOn))
         {
             throw new InvalidOperationException(
                 $"The router's encryption key for {machine.Name} isn't signed by {machine.Name}'s own key; refusing to encrypt to it.");
+        }
+
+        // No rollback (phase 11): a key issued before one already seen for that machine is refused. This runs inside the
+        // sender's store transaction, so the newest is kept in memory and saved afterwards, on the worker.
+        var setting = $"encryption_issued:{machine.Id}";
+        DateTimeOffset? newest;
+        lock (_verifiedLock)
+        {
+            newest = _newestKeys.TryGetValue(machine.Id, out var n) ? n
+                : _store.GetSetting(setting) is { } seen ? DateTimeOffset.Parse(seen, System.Globalization.CultureInfo.InvariantCulture) : null;
+        }
+
+        if (machine.EncryptionKeyIssuedOn < newest)
+        {
+            throw new InvalidOperationException(
+                $"The router handed out an older encryption key for {machine.Name} than one this machine has seen; refusing to encrypt to it.");
+        }
+
+        lock (_verifiedLock)
+        {
+            _newestKeys[machine.Id] = machine.EncryptionKeyIssuedOn;
+        }
+
+        if (newest != machine.EncryptionKeyIssuedOn)
+        {
+            Post(() =>
+            {
+                _store.Transact(_time.GetUtcNow(), tx => tx.SetSetting(setting, machine.EncryptionKeyIssuedOn.ToString("O", System.Globalization.CultureInfo.InvariantCulture)));
+                return Task.CompletedTask;
+            });
         }
 
         lock (_verifiedLock)
@@ -1037,9 +1180,9 @@ public sealed class RelayClient : IAsyncDisposable
             _machines.TryGetValue(envelope.FromMachine, out sender);
         }
 
-        if (sender is null || !Signatures.VerifyEnvelope(envelope, sender.PublicKey))
+        if (sender is null || _revoked.Contains(envelope.FromMachine) || !Signatures.VerifyEnvelope(envelope, sender.PublicKey))
         {
-            MessageRejected?.Invoke(envelope, sender is null ? "unknown sender" : "bad signature");
+            MessageRejected?.Invoke(envelope, _revoked.Contains(envelope.FromMachine) ? "its machine was revoked" : sender is null ? "unknown sender" : "bad signature");
             return; // not confirmed: the router keeps it until it expires, for inspection
         }
 
@@ -1048,7 +1191,7 @@ public sealed class RelayClient : IAsyncDisposable
         MessageContent content;
         try
         {
-            content = MessageCrypto.Open(envelope, _keys.MachineId, _keys.Encryption);
+            content = OpenWithAnyKey(envelope);
         }
         catch (CryptographicException e)
         {

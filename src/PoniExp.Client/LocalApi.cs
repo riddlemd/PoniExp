@@ -270,6 +270,16 @@ public sealed class LocalApiClient : IDisposable
     public Task<LocalApproval> AnswerAsync(string id, bool approve, bool always = false, string? reason = null, CancellationToken ct = default) =>
         PostAsync<LocalApproval>($"desk/{Uri.EscapeDataString(id)}/{(approve ? "approve" : "deny")}", new LocalAnswer(always, reason), ct);
 
+    /// <summary>The router's id and owner key, as of the daemon's last connect (known before this machine is approved).</summary>
+    public Task<LocalRouter> RouterAsync(CancellationToken ct = default) => GetAsync<LocalRouter>("router", ct);
+
+    /// <summary>Approves this machine's own join with an owner-signed <c>approve &lt;its id&gt;</c>.</summary>
+    public Task<LocalOk> ApproveOwnJoinAsync(AdminCommand command, CancellationToken ct = default) => PostAsync<LocalOk>("join/approve", command, ct);
+
+    public Task<LocalKeys> KeysAsync(CancellationToken ct = default) => GetAsync<LocalKeys>("keys", ct);
+
+    public Task<LocalKeys> RotateKeysAsync(CancellationToken ct = default) => PostAsync<LocalKeys>("keys/rotate", new { }, ct);
+
     /// <summary>Runs an owner-signed admin command on the router (the caller had the SSH agent sign it).</summary>
     public Task<AdminResult> AdminAsync(AdminCommand command, CancellationToken ct = default) => PostAsync<AdminResult>("admin", command, ct);
 
@@ -730,3 +740,8 @@ public sealed record LocalApproval(Guid Id, string Direction, string From, strin
     bool Always, string? Reason, DateTimeOffset RequestedOn, DateTimeOffset? AnsweredOn, string? AnsweredBy, string? Desk);
 
 public sealed record LocalAnswer(bool Always = false, string? Reason = null);
+
+/// <summary>This machine's encryption key: when it was issued, when it's due for rotation, and when retired ones were retired.</summary>
+public sealed record LocalKeys(string MachineId, DateTimeOffset IssuedOn, DateTimeOffset DueOn, IReadOnlyList<DateTimeOffset> Retired);
+
+public sealed record LocalRouter(string? RouterId, string? OwnerKey);

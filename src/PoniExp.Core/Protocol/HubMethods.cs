@@ -33,6 +33,8 @@ public static class HubMethods
 
     /// <summary>A daemon reports what its machine has (after each authentication).</summary>
     public const string ReportCapabilities = nameof(ReportCapabilities);
+    /// <summary>A machine's new encryption key (an <see cref="EncryptionKeyUpdate"/>).</summary>
+    public const string RotateEncryptionKey = nameof(RotateEncryptionKey);
 
     // the owner and the approval desk
     public const string GetOwner = nameof(GetOwner);
@@ -44,6 +46,12 @@ public static class HubMethods
     public const string RunAdmin = nameof(RunAdmin);
     /// <summary>The owner-signed key handovers, oldest first.</summary>
     public const string GetOwnerHandovers = nameof(GetOwnerHandovers);
+    /// <summary>The desk turns down a docker exec change.</summary>
+    public const string DenyAdminRequest = nameof(DenyAdminRequest);
+    /// <summary>The owner-signed revocations (each a signed <c>revoke &lt;machine id&gt;</c>).</summary>
+    public const string GetRevocations = nameof(GetRevocations);
+    /// <summary>A joining machine whose SSH agent holds the owner key approves itself: a signed <c>approve &lt;its id&gt;</c>.</summary>
+    public const string ApproveOwnJoin = nameof(ApproveOwnJoin);
 
     // files (the chunks themselves go over HTTP, under BlobsPath, with a ticket)
     public const string BlobsPath = "/blobs";
@@ -70,4 +78,10 @@ public static class HubMethods
     public const string OwnerChanged = nameof(OwnerChanged);
     /// <summary>The machines waiting to join, to the desk machine only.</summary>
     public const string PendingJoinsChanged = nameof(PendingJoinsChanged);
+    /// <summary>The docker exec changes waiting for a signature, to the desk machine only.</summary>
+    public const string AdminRequestsChanged = nameof(AdminRequestsChanged);
+    /// <summary>A machine was revoked: the signed revocations, to every approved machine.</summary>
+    public const string RevocationsChanged = nameof(RevocationsChanged);
+    /// <summary>A machine rotated its encryption key (its <see cref="MachineInfo"/>), to every approved machine.</summary>
+    public const string MachineKeyChanged = nameof(MachineKeyChanged);
 }

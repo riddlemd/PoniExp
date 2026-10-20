@@ -16,12 +16,24 @@ public static class AdminEndpoints
         var admin = app.MapGroup("/admin").AddEndpointFilter(async (context, next) =>
             context.HttpContext.Connection.RemoteIpAddress is { } ip && IPAddress.IsLoopback(ip)
                 ? await next(context)
-                : Results.NotFound());
+                : Results.NotFound())
+            .AddEndpointFilter(async (context, next) =>
+            {
+                // Signed-only changes (phase 11): once there's an owner key, a change needs the signed-run token.
+                var http = context.HttpContext;
+                var services = http.RequestServices;
+                return HttpMethods.IsGet(http.Request.Method) || http.Request.Path.StartsWithSegments("/admin/pending-commands")
+                       || http.Request.Path.StartsWithSegments("/admin/owner") || IsSigned(http)
+                       || services.GetRequiredService<Owner.OwnerDesk>().Owner is null
+                    ? await next(context)
+                    : NeedsSignature();
+            });
 
         admin.MapGet("/machines", (AdminService service) => Results.Ok(service.List()));
         admin.MapPost("/machines/{selector}/approve", (string selector, AdminService service) => RunAsync(() => service.ApproveAsync(selector)));
         admin.MapPost("/machines/{selector}/reject", (string selector, AdminService service) => RunAsync(() => service.RejectAsync(selector)));
         admin.MapPost("/machines/{selector}/remove", (string selector, AdminService service) => RunAsync(() => service.RemoveAsync(selector)));
+        admin.MapPost("/machines/{selector}/revoke", (string selector, AdminService service) => RunAsync(() => service.RevokeAsync(selector)));
         admin.MapGet("/certificate", (RouterCertificateInfo certificate) => Results.Ok(certificate));
         admin.MapGet("/traffic-log/status", (TrafficLog log) => Results.Ok(new TrafficLogStatus(log.Enabled)));
         admin.MapPost("/traffic-log/{state:regex(^(on|off)$)}", (string state, TrafficLog log) =>
@@ -39,9 +51,20 @@ public static class AdminEndpoints
                 e.MessageId, e.Size, e.Sequence, e.Address, e.Detail)).ToList());
         });
         admin.MapGet("/groups", (AdminService service) => Results.Ok(service.Groups()));
+        admin.MapPost("/pending-commands", async (AdminPendingRequest body, Owner.AdminApprovals approvals) =>
+            Results.Ok(new AdminPendingView(await approvals.RequestAsync(body.Args, body.Input), "pending", null)));
+        admin.MapGet("/pending-commands/{id:guid}", async (Guid id, int? wait, Owner.AdminApprovals approvals) =>
+            await approvals.WaitAsync(id, TimeSpan.FromSeconds(Math.Clamp(wait ?? 0, 0, 30))) is { } p
+                ? Results.Ok(new AdminPendingView(p.Request, p.State, p.Result))
+                : Results.NotFound());
         admin.MapGet("/owner", (AdminService service) => Results.Ok(service.Owner()));
-        admin.MapPut("/owner", (AdminOwnerKey body, AdminService service) =>
+        admin.MapPut("/owner", (AdminOwnerKey body, AdminService service, Owner.OwnerDesk desk, HttpContext http) =>
         {
+            if (desk.Owner is not null && !body.LostKey && !IsSigned(http))
+            {
+                return NeedsSignature(); // replacing the key: signed by it, or --lost-key
+            }
+
             try
             {
                 return Results.Ok(service.SetOwner(body.Key));
@@ -103,6 +126,15 @@ public static class AdminEndpoints
         });
     }
 
+    private static bool IsSigned(HttpContext http) =>
+        http.Request.Headers.TryGetValue(Owner.AdminApprovals.TokenHeader, out var token)
+        && System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(System.Text.Encoding.UTF8.GetBytes(token.ToString()),
+            System.Text.Encoding.UTF8.GetBytes(http.RequestServices.GetRequiredService<Owner.AdminApprovals>().Token));
+
+    private static IResult NeedsSignature() =>
+        Results.Problem("This change needs the owner's signature: run it with poniexp-client admin, or approve it on the desk.",
+            statusCode: StatusCodes.Status403Forbidden, type: "needs-signature");
+
     private static async Task<IResult> RunAsync(Func<Task<AdminMachineView>> action)
     {
         try
@@ -128,4 +160,9 @@ public sealed record TrafficLogStatus(bool Enabled);
 public sealed record AdminTrafficEntry(DateTimeOffset OccurredOn, string Event, string? From, string? To, Guid? MessageId, int? Size, long? Sequence,
     string? Address, string? Detail);
 
-public sealed record AdminOwnerKey(string Key);
+public sealed record AdminOwnerKey(string Key, bool LostKey = false);
+
+public sealed record AdminPendingRequest(IReadOnlyList<string> Args, string? Input);
+
+/// <summary>A docker exec change: null <see cref="Request"/> means the router has no owner key, so run it directly.</summary>
+public sealed record AdminPendingView(AdminRequest? Request, string State, AdminResult? Result);

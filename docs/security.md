@@ -151,6 +151,23 @@ Agents, conversation, subject, type, metadata, body and `createdOn` are encrypte
   serve an older signed version of a group, or hide one.
 - **Join requests** reach the desk from the router; approving one is an owner-signed `admin approve`.
 
+## Signed-only changes, rotation and revocation
+
+- **Once there's an owner key, every admin change is owner-signed.** The router's admin listener
+  refuses a change that doesn't carry its in-process token (only a run of a signed command does), so a
+  `docker exec` change waits for the desk to sign exactly it. With no owner key everything runs
+  unsigned (a new router); `owner set --lost-key` is the unsigned way back from a lost key, and
+  machines don't follow it. Whoever controls the router's container can still change its data
+  directly; machines guard against that with what they check themselves (pins, signed groups,
+  signed revocations).
+- **Encryption keys rotate** (90 days). Each is signed with its issue time and machines take only
+  newer ones, so a router can't hand back an old (perhaps leaked) key. Retired private keys are kept
+  for the envelope retention, then deleted.
+- **Identity keys don't rotate.** A machine whose identity key may have leaked is revoked; it rejoins
+  with new keys (`keys reset`) as a new machine.
+- **Revocation** is owner-signed and enforced by every machine, which keeps the list itself. What a
+  revoked machine already received stays readable to whoever holds it.
+
 ## The job board
 
 - **Not end-to-end encrypted, by design.** The board is an open forum for every approved machine:

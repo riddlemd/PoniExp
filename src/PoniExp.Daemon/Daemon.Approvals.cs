@@ -17,6 +17,7 @@ public sealed partial class Daemon
     private const string HereSetting = "here";
     private const string HereSignedSetting = "here_signed_issued";
     private const string OwnerHistorySetting = "owner_history";
+    private const string RevokedSetting = "revoked";
     private const int MaxSummary = 2000;
     private const int MaxDetails = 64 * 1024;
 
@@ -32,8 +33,8 @@ public sealed partial class Daemon
 
     private HereClaim? Here => Store.GetSetting(HereSetting) is { } json ? JsonSerializer.Deserialize<HereClaim>(json, WireProtocol.Json) : null;
 
-    /// <summary>The desk machine now, or null.</summary>
-    internal string? Desk => Here?.DeskAt(Now);
+    /// <summary>The desk machine now, or null: the newest claim, unexpired, naming this machine or an approved one.</summary>
+    internal string? Desk => Here?.DeskAt(Now) is { } m && (m == MachineId || _relay.Machine(m) is not null) ? m : null;
 
     // ---- the owner and the desk ----
 
@@ -41,6 +42,7 @@ public sealed partial class Daemon
     {
         _routerOwner = await _relay.GetOwnerAsync();
         FollowHandovers(await _relay.GetOwnerHandoversAsync());
+        ApplyRevocations(await _relay.GetRevocationsAsync());
         if (await _relay.GetHereAsync() is { } claim)
         {
             await ApplyHereAsync(claim);
@@ -57,7 +59,7 @@ public sealed partial class Daemon
         var router = _routerOwner is { } line ? OwnerKey.Parse(line) : null;
         var pinned = PinnedOwner;
         var here = Here;
-        var desk = here?.DeskAt(Now);
+        var desk = Desk;
         return new LocalOwner(MachineId, _relay.RouterId, router?.ToString(), router?.Fingerprint, pinned?.ToString(), pinned?.Fingerprint, desk,
             desk is null ? null : desk == MachineId ? OwnName : NameOf(desk), desk is null ? null : here!.ExpiresOn, desk == MachineId,
             _options.CurrentValue.HereLifetime);
@@ -204,7 +206,8 @@ public sealed partial class Daemon
         {
             if (before == MachineId)
             {
-                foreach (var waiting in tx.GetApprovals(ApprovalRecord.In, ApprovalRecord.Pending).Concat(tx.GetApprovals(ApprovalRecord.Join, ApprovalRecord.Pending)))
+                foreach (var waiting in tx.GetApprovals(ApprovalRecord.In, ApprovalRecord.Pending).Concat(tx.GetApprovals(ApprovalRecord.Join, ApprovalRecord.Pending))
+                             .Concat(tx.GetApprovals(ApprovalRecord.Admin, ApprovalRecord.Pending)))
                 {
                     tx.SaveApproval(waiting with { State = ApprovalRecord.Moved });
                 }
@@ -294,6 +297,52 @@ public sealed partial class Daemon
         }
     }
 
+    /// <summary>Machines revoked by the owner, as this daemon checked (kept even if the router forgets them).</summary>
+    internal IReadOnlySet<string> RevokedMachines =>
+        Store.GetSetting(RevokedSetting) is { } json ? JsonSerializer.Deserialize<HashSet<string>>(json, WireProtocol.Json)! : [];
+
+    /// <summary>Loads what's known at start, before connecting.</summary>
+    internal void LoadRevocations() => _relay.Revoked = RevokedMachines;
+
+    /// <summary>Takes the revocations the owner signed (the current or an earlier owner key): those machines are refused here from now on.</summary>
+    private void ApplyRevocations(IReadOnlyList<AdminCommand> revocations)
+    {
+        var owner = PinnedOwner;
+        if (owner is null)
+        {
+            return;
+        }
+
+        var keys = OwnerHistory.Append(owner).ToList();
+        var known = RevokedMachines.ToHashSet();
+        var added = revocations.Where(r => r.RevokedMachine is { } m && !known.Contains(m) && m != MachineId && keys.Any(r.IsSignedBy))
+            .Select(r => r.RevokedMachine!).ToList();
+        if (added.Count == 0)
+        {
+            return;
+        }
+
+        known.UnionWith(added);
+        Store.Transact(Now, tx =>
+        {
+            tx.SetSetting(RevokedSetting, JsonSerializer.Serialize(known, WireProtocol.Json));
+            foreach (var machine in added)
+            {
+                foreach (var asked in tx.GetApprovals(ApprovalRecord.In, ApprovalRecord.Pending).Where(a => a.Machine == machine))
+                {
+                    tx.SaveApproval(asked with { State = ApprovalRecord.Withdrawn, AnsweredOn = Now, Reason = "its machine was revoked" });
+                }
+            }
+        });
+        _relay.Revoked = known;
+        foreach (var machine in added)
+        {
+            Diagnose("warning", "owner", $"machine {machine[..8]} was revoked by the owner: refused from now on", machine);
+        }
+
+        SignalApprovals();
+    }
+
     /// <summary>Owner keys this machine followed a handover from.</summary>
     private IReadOnlyList<OwnerKey> OwnerHistory =>
         Store.GetSetting(OwnerHistorySetting) is { } json ? [.. JsonSerializer.Deserialize<List<string>>(json, WireProtocol.Json)!.Select(OwnerKey.Parse)] : [];
@@ -320,7 +369,30 @@ public sealed partial class Daemon
     // ---- join requests on the desk ----
 
     /// <summary>The router's list of machines waiting to join, sent to the desk: kept as "join" approvals.</summary>
-    private void OnPendingJoins(IReadOnlyList<PendingJoin> joins) => Background(async () =>
+    private void OnPendingJoins(IReadOnlyList<PendingJoin> joins)
+    {
+        _latestJoins = joins; // on the relay's worker, in the order the router sent them
+        Background(ApplyLatestJoinsAsync);
+    }
+
+    private volatile IReadOnlyList<PendingJoin> _latestJoins = [];
+    private readonly SemaphoreSlim _joinsGate = new(1, 1);
+
+    /// <summary>One at a time, always the newest list: an older one applied late would mark a new request gone.</summary>
+    private async Task ApplyLatestJoinsAsync()
+    {
+        await _joinsGate.WaitAsync();
+        try
+        {
+            await ApplyJoinsAsync(_latestJoins);
+        }
+        finally
+        {
+            _joinsGate.Release();
+        }
+    }
+
+    private async Task ApplyJoinsAsync(IReadOnlyList<PendingJoin> joins)
     {
         if (Desk != MachineId)
         {
@@ -340,7 +412,8 @@ public sealed partial class Daemon
             {
                 if (tx.GetApproval(id) is not { State: ApprovalRecord.Pending })
                 {
-                    tx.SaveApproval(new ApprovalRecord(id, ApprovalRecord.Join, join.MachineId, join.Name, $"Machine '{join.Name}' asks to join",
+                    tx.SaveApproval(new ApprovalRecord(id, ApprovalRecord.Join, join.MachineId, join.Name,
+                        join.Replaces is { } old ? $"Machine '{join.Name}' asks to join with new keys, replacing the revoked {old[..8]}" : $"Machine '{join.Name}' asks to join",
                         $"join code {join.JoinCode}\n{join.OperatingSystem}, host {join.HostName}{(join.Notes is { Length: > 0 } n ? $"\nnotes: {n}" : "")}",
                         "join", join.JoinCode, join.RequestedOn, ApprovalRecord.Pending, MachineId));
                 }
@@ -354,7 +427,36 @@ public sealed partial class Daemon
             }
         });
         SignalApprovals();
-    });
+    }
+
+    /// <summary>docker exec changes waiting for this desk's signature: kept as "admin" approvals (the request in Command, as JSON).</summary>
+    private void OnAdminRequests(IReadOnlyList<AdminRequest> requests)
+    {
+        if (Desk != MachineId)
+        {
+            return;
+        }
+
+        var waiting = requests.ToDictionary(r => r.Id);
+        Store.Transact(Now, tx =>
+        {
+            foreach (var (id, request) in waiting)
+            {
+                if (tx.GetApproval(id) is null)
+                {
+                    tx.SaveApproval(new ApprovalRecord(id, ApprovalRecord.Admin, "router", "docker exec", $"poniexp admin {string.Join(" ", request.Args)}",
+                        $"code {request.Code}{(request.InputBytes > 0 ? $", with {request.InputBytes} bytes of input (sha256 {request.InputSha256![..16]}...)" : "")}",
+                        "admin", JsonSerializer.Serialize(request, WireProtocol.Json), request.CreatedOn, ApprovalRecord.Pending, MachineId));
+                }
+            }
+
+            foreach (var gone in tx.GetApprovals(ApprovalRecord.Admin, ApprovalRecord.Pending).Where(a => !waiting.ContainsKey(a.Id)))
+            {
+                tx.SaveApproval(gone with { State = ApprovalRecord.Withdrawn, AnsweredOn = Now, Reason = "no longer waiting (answered, denied or timed out)" });
+            }
+        });
+        SignalApprovals();
+    }
 
     private static Guid JoinId(string machineId) => Guid.TryParseExact(machineId, "N", out var id) ? id : Guid.Empty;
 
@@ -495,7 +597,7 @@ public sealed partial class Daemon
     /// <summary>What waits on this desk: other machines' requests, and this machine's own.</summary>
     internal IReadOnlyList<LocalApproval> DeskApprovals() =>
         Desk != MachineId ? [] : [.. Store.GetApprovals(state: ApprovalRecord.Pending)
-            .Where(a => a.Direction is ApprovalRecord.In or ApprovalRecord.Join || a.SentTo == MachineId).OrderBy(a => a.RequestedOn).Select(ToLocalApproval)];
+            .Where(a => a.Direction is ApprovalRecord.In or ApprovalRecord.Join or ApprovalRecord.Admin || a.SentTo == MachineId).OrderBy(a => a.RequestedOn).Select(ToLocalApproval)];
 
     internal async Task<LocalApproval> AnswerAsync(string id, bool approve, bool always, string? reason)
     {
@@ -509,7 +611,7 @@ public sealed partial class Daemon
             throw new ArgumentException($"a reason is at most {MaxSummary} characters");
         }
 
-        var waiting = Store.GetApprovals(state: ApprovalRecord.Pending).Where(a => (a.Direction is ApprovalRecord.In or ApprovalRecord.Join || a.SentTo == MachineId)
+        var waiting = Store.GetApprovals(state: ApprovalRecord.Pending).Where(a => (a.Direction is ApprovalRecord.In or ApprovalRecord.Join or ApprovalRecord.Admin || a.SentTo == MachineId)
             && (a.Id.ToString() == id || (id.Length >= 4 && a.Id.ToString().StartsWith(id, StringComparison.Ordinal)))).ToList();
         var approval = waiting switch
         {
@@ -521,6 +623,19 @@ public sealed partial class Daemon
         if (approval.Direction == ApprovalRecord.Join)
         {
             throw new InvalidOperationException("a join is answered with the owner key: poniexp-client approve <id> (it signs and runs admin approve)");
+        }
+
+        if (approval.Direction == ApprovalRecord.Admin)
+        {
+            if (approve)
+            {
+                throw new InvalidOperationException("a docker exec change is approved with the owner key: poniexp-client approve <id> (it signs that command)");
+            }
+
+            await _relay.DenyAdminRequestAsync(approval.Id);
+            Store.Transact(Now, tx => tx.SaveApproval(approval with { State = ApprovalRecord.Denied, AnsweredOn = Now, AnsweredBy = OwnName, Reason = reason }));
+            SignalApprovals();
+            return ToLocalApproval(Store.GetApproval(approval.Id)!);
         }
 
         var answer = new ApprovalAnswerBody(approval.Id, approve, approve && always, reason);
@@ -637,6 +752,6 @@ public sealed partial class Daemon
     private void SignalApprovals() => Interlocked.Exchange(ref _approvalsChanged, new(TaskCreationOptions.RunContinuationsAsynchronously)).TrySetResult();
 
     private LocalApproval ToLocalApproval(ApprovalRecord a) =>
-        new(a.Id, a.Direction, a.Direction == ApprovalRecord.Join ? $"{a.Agent} (new machine)" : $"{(a.Machine == MachineId ? OwnName : NameOf(a.Machine))}/{a.Agent}", a.Summary, a.Details, a.Tool, a.Command, a.State, a.Always,
+        new(a.Id, a.Direction, a.Direction == ApprovalRecord.Join ? $"{a.Agent} (new machine)" : a.Direction == ApprovalRecord.Admin ? "docker exec on the router" : $"{(a.Machine == MachineId ? OwnName : NameOf(a.Machine))}/{a.Agent}", a.Summary, a.Details, a.Tool, a.Command, a.State, a.Always,
             a.Reason, a.RequestedOn, a.AnsweredOn, a.AnsweredBy, a.SentTo is null ? null : a.SentTo == MachineId ? OwnName : NameOf(a.SentTo));
 }

@@ -31,6 +31,11 @@ public sealed class AdminService(
 
     public async Task<AdminMachineView> ApproveAsync(string selector)
     {
+        if (desk.Revocations.Any(r => r.RevokedMachine == registry.Resolve(selector).Id))
+        {
+            throw new RouterException("That machine was revoked: its key is refused for good (it can rejoin with new keys: poniexp-client keys reset).");
+        }
+
         var record = await registry.ApproveAsync(selector);
         logger.LogInformation("Approved {Name} ({Id})", record.Name, record.Id[..8]);
         await hub.Clients.Group(RelayHub.KeyGroup(record.Id)).SendAsync(HubMethods.MembershipChanged, record.Status);
@@ -49,16 +54,38 @@ public sealed class AdminService(
         return View(record);
     }
 
+    /// <summary>
+    /// Revokes a machine (phase 11): refused for good (it can't ask to join again with that key), and everything
+    /// waiting on it dropped, as a removal does, plus its jobs. Daemons enforce it themselves from the signed revocation.
+    /// </summary>
+    public async Task<AdminMachineView> RevokeAsync(string selector)
+    {
+        var record = await registry.RejectAsync(selector);
+        logger.LogInformation("Revoked {Name} ({Id})", record.Name, record.Id[..8]);
+        // Recorded unsigned first (the router refuses it); a signed revoke replaces this with the owner's signature, which daemons enforce.
+        await desk.AddRevocationAsync(new AdminCommand(Guid.Empty, routerKeys.Id, ["revoke", record.Id], null, time.GetUtcNow(), ""));
+        await hub.Clients.Group(RelayHub.KeyGroup(record.Id)).SendAsync(HubMethods.MembershipChanged, MembershipStatus.Rejected);
+        await AfterLeavingAsync(record);
+        await jobs.MachineRevokedAsync(record.Id);
+        return View(record);
+    }
+
+    private async Task AfterLeavingAsync(MachineRecord record)
+    {
+        presence.Disconnect(record.Id);
+        await queue.DropForAsync(record.Id);
+        blobs.Forget(record.Id);
+        await rooms.MachineRemovedAsync(record.Id);
+        await desk.EndDeskIfAsync(record.Id);
+        await desk.PushPendingJoinsAsync();
+    }
+
     public async Task<AdminMachineView> RemoveAsync(string selector)
     {
         var record = await registry.RemoveAsync(selector);
         logger.LogInformation("Removed {Name} ({Id})", record.Name, record.Id[..8]);
         await hub.Clients.Group(RelayHub.KeyGroup(record.Id)).SendAsync(HubMethods.MembershipChanged, MembershipStatus.Unknown);
-        presence.Disconnect(record.Id);
-        await queue.DropForAsync(record.Id);
-        blobs.Forget(record.Id);
-        await rooms.MachineRemovedAsync(record.Id);
-        await desk.PushPendingJoinsAsync();
+        await AfterLeavingAsync(record);
         return View(record) with { Status = MembershipStatus.Unknown };
     }
 
@@ -89,7 +116,8 @@ public sealed class AdminService(
         return new RouterBackup(BackupFormat, 1, time.GetUtcNow(), certificate.Sha256,
             File.Exists(pfx) ? Convert.ToBase64String(File.ReadAllBytes(pfx)) : null,
             [.. registry.List().Where(m => m.Status == MembershipStatus.Approved)],
-            [.. jobs.List(includeFinished: false)], desk.Owner?.ToString(), routerKeys.Export(), [.. desk.Handovers]);
+            [.. jobs.List(includeFinished: false)], desk.Owner?.ToString(), routerKeys.Export(), [.. desk.Handovers], [.. desk.Revocations],
+            [.. registry.List().Where(m => m.Status == MembershipStatus.Rejected)]);
     }
 
     /// <summary>
@@ -129,6 +157,16 @@ public sealed class AdminService(
         if (backup.OwnerHandovers is { Count: > 0 } handovers)
         {
             desk.RestoreHandovers(handovers);
+        }
+
+        if (backup.Revocations is { Count: > 0 } revocations)
+        {
+            desk.RestoreRevocations(revocations);
+        }
+
+        if (backup.Refused is { Count: > 0 } refused)
+        {
+            await registry.RestoreAsync([.. refused.Where(m => m.Status == MembershipStatus.Rejected && KeyFingerprint.MachineIdOf(m.PublicKey) == m.Id)]);
         }
         logger.LogInformation("Restored {Count} machines from a backup of {On}; certificate {Changed}", machines.Count, backup.CreatedOn,
             certificateChanged ? "changed (restart to serve it)" : "unchanged");
@@ -264,7 +302,7 @@ public sealed record AdminMachineView(
 /// <summary>A router backup: its TLS certificate (PKCS#12, base64, with the private key) and the approved machines.</summary>
 public sealed record RouterBackup(string Format, int Version, DateTimeOffset CreatedOn, string? CertificateSha256, string? Certificate,
     IReadOnlyList<MachineRecord> Machines, IReadOnlyList<Job>? Jobs = null, string? OwnerKey = null, Owner.RouterKeyFile? RouterKeys = null,
-    IReadOnlyList<AdminCommand>? OwnerHandovers = null);
+    IReadOnlyList<AdminCommand>? OwnerHandovers = null, IReadOnlyList<AdminCommand>? Revocations = null, IReadOnlyList<MachineRecord>? Refused = null);
 
 public sealed record RestoreResult(int Machines, bool CertificateChanged, string? CertificateSha256, int Jobs = 0, bool RouterKeysChanged = false);
 

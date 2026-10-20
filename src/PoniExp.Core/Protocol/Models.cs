@@ -62,7 +62,8 @@ public sealed record JoinRequest(
     string EncryptionKey,
     string EncryptionKeySignature,
     DateTimeOffset RequestedOn,
-    string Signature);
+    string Signature,
+    DateTimeOffset EncryptionKeyIssuedOn = default);
 
 /// <summary>
 /// The part of a message only the two agents need. It travels encrypted (see <see cref="Envelope.Ciphertext"/>):
@@ -161,7 +162,7 @@ public sealed record Delivery(Envelope Envelope, DateTimeOffset RelayedOn);
 /// </summary>
 /// <summary>The router's own keys come with it (phase 10): machines pin them on first connect.</summary>
 public sealed record HelloResult(int ProtocolVersion, DateTimeOffset ServerTime, TimeSpan ClockSkew, string RouterKey, string RouterEncryptionKey,
-    string RouterEncryptionKeySignature);
+    string RouterEncryptionKeySignature, DateTimeOffset RouterEncryptionKeyIssuedOn, string? OwnerKey = null);
 
 public sealed record AuthResult(MembershipStatus Status, string MachineId, string? Name);
 
@@ -180,7 +181,11 @@ public sealed record MachineInfo(
     string EncryptionKeySignature,
     bool Online,
     DateTimeOffset? LastSeenOn,
-    MachineCapabilities? Capabilities = null);
+    MachineCapabilities? Capabilities = null,
+    DateTimeOffset EncryptionKeyIssuedOn = default);
+
+/// <summary>A machine's new encryption key (phase 11): signed by its identity key with when it was issued.</summary>
+public sealed record EncryptionKeyUpdate(string EncryptionKey, string EncryptionKeySignature, DateTimeOffset IssuedOn);
 
 public sealed record PresenceChange(string MachineId, string Name, bool Online, DateTimeOffset OccurredOn);
 

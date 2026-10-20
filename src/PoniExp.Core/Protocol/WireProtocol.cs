@@ -15,7 +15,8 @@ public static class WireProtocol
     /// 7: the job board (signed job actions, open jobs on the router); no roles.
     /// 8: approvals (approval-request/-answer/-withdrawn), the owner key and the desk (here).
     /// 9: owner admin from anywhere (the router's keys in Hello, RunAdmin, owner handovers, signed groups, joins on the desk).
-    public const int Version = 9;
+    /// 10: signed-only changes (docker exec through the desk), revocations, encryption key rotation (keys signed with their issue time).
+    public const int Version = 10;
 
     /// <summary>Enums travel as kebab-case names ("file-receipt"), on the wire and in files.</summary>
     public static JsonSerializerOptions Configure(JsonSerializerOptions options)

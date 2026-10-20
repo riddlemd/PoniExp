@@ -18,7 +18,11 @@ public sealed class OwnerDesk(RouterStore store, MachineRegistry machines, IHubC
     private const string OwnerState = "owner_key";
     private const string HereState = "here";
     private const string HandoverState = "owner_handovers";
+    private const string RevocationState = "revocations";
     private readonly Lock _lock = new();
+
+    /// <summary>The desk changed (others push what waits on it).</summary>
+    public event Action? DeskMoved;
 
     public OwnerKey? Owner => store.GetState(OwnerState) is { } line ? OwnerKey.Parse(line) : null;
 
@@ -57,6 +61,50 @@ public sealed class OwnerDesk(RouterStore store, MachineRegistry machines, IHubC
         await hub.Clients.Group(RelayHub.MembersGroup).SendAsync(HubMethods.OwnerChanged, all);
     }
 
+    /// <summary>The owner-signed revocations, oldest first.</summary>
+    public IReadOnlyList<AdminCommand> Revocations =>
+        store.GetState(RevocationState) is { Length: > 0 } json ? JsonSerializer.Deserialize<List<AdminCommand>>(json, WireProtocol.Json)! : [];
+
+    public async Task AddRevocationAsync(AdminCommand revocation)
+    {
+        List<AdminCommand> all;
+        lock (_lock)
+        {
+            all = [.. Revocations.Where(r => r.RevokedMachine != revocation.RevokedMachine), revocation];
+            store.SetState(RevocationState, JsonSerializer.Serialize(all, WireProtocol.Json));
+        }
+
+        await hub.Clients.Group(RelayHub.MembersGroup).SendAsync(HubMethods.RevocationsChanged, all);
+    }
+
+    public void RestoreRevocations(IReadOnlyList<AdminCommand> revocations)
+    {
+        lock (_lock)
+        {
+            store.SetState(RevocationState, JsonSerializer.Serialize(revocations.ToList(), WireProtocol.Json));
+        }
+    }
+
+    /// <summary>The desk machine was revoked or removed: the desk ends (as if it had left).</summary>
+    public async Task EndDeskIfAsync(string machine)
+    {
+        HereClaim away;
+        lock (_lock)
+        {
+            if (Latest?.MachineId != machine || Latest.DeskAt(time.GetUtcNow()) is null)
+            {
+                return;
+            }
+
+            var now = time.GetUtcNow();
+            away = new HereClaim(null, now > Latest.IssuedOn ? now : Latest.IssuedOn.AddTicks(1), now, "");
+            store.SetState(HereState, JsonSerializer.Serialize(away, WireProtocol.Json));
+        }
+
+        await hub.Clients.Group(RelayHub.MembersGroup).SendAsync(HubMethods.HereChanged, away);
+        DeskMoved?.Invoke();
+    }
+
     public void RestoreHandovers(IReadOnlyList<AdminCommand> handovers)
     {
         lock (_lock)
@@ -74,9 +122,13 @@ public sealed class OwnerDesk(RouterStore store, MachineRegistry machines, IHubC
         }
     }
 
-    public IReadOnlyList<PendingJoin> PendingJoins() =>
-        [.. machines.List().Where(m => m.Status == MembershipStatus.Pending).OrderBy(m => m.RequestedOn)
-            .Select(m => new PendingJoin(m.Id, m.Name, m.JoinCode, m.Description.OperatingSystem, m.Description.HostName, m.Description.Notes, m.RequestedOn))];
+    public IReadOnlyList<PendingJoin> PendingJoins()
+    {
+        var all = machines.List();
+        return [.. all.Where(m => m.Status == MembershipStatus.Pending).OrderBy(m => m.RequestedOn)
+            .Select(m => new PendingJoin(m.Id, m.Name, m.JoinCode, m.Description.OperatingSystem, m.Description.HostName, m.Description.Notes, m.RequestedOn,
+                all.FirstOrDefault(o => o.Id != m.Id && o.Name == m.Name && o.Status == MembershipStatus.Rejected)?.Id))];
+    }
 
     /// <summary>Takes a new owner-signed desk claim and sends it to every machine.</summary>
     public async Task<HereClaim> SetHereAsync(string from, HereClaim claim)
@@ -112,6 +164,7 @@ public sealed class OwnerDesk(RouterStore store, MachineRegistry machines, IHubC
             machines.Get(from)?.Name ?? from[..8]);
         await hub.Clients.Group(RelayHub.MembersGroup).SendAsync(HubMethods.HereChanged, claim);
         await PushPendingJoinsAsync();
+        DeskMoved?.Invoke();
         return claim;
     }
 

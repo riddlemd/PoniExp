@@ -51,9 +51,9 @@ public static class PublicKeys
     /// True if <paramref name="encryptionKey"/> is signed by <paramref name="identityPublicKey"/> and isn't the
     /// identity key itself (the two must stay separate). Check this before encrypting to a machine.
     /// </summary>
-    public static bool VerifyEncryptionKey(string identityPublicKey, string? encryptionKey, string? signature) =>
+    public static bool VerifyEncryptionKey(string identityPublicKey, string? encryptionKey, string? signature, DateTimeOffset issuedOn) =>
         IsValidEncryptionKey(encryptionKey) && encryptionKey != identityPublicKey && signature is not null
-        && Verify(identityPublicKey, Protocol.Signatures.EncryptionKeyPayload(identityPublicKey, encryptionKey!), signature);
+        && Verify(identityPublicKey, Protocol.Signatures.EncryptionKeyPayload(identityPublicKey, encryptionKey!, issuedOn), signature);
 
     /// <summary>An ECDH P-256 public key from base64 SubjectPublicKeyInfo, or null if it isn't one.</summary>
     internal static ECDiffieHellman? ImportEncryptionKey(string publicKey)

@@ -779,7 +779,7 @@ needs `Router:AdminPort`; refuses `--url` and file paths), owner handovers and g
 `router_key`), follow handovers, check group signatures, and keep join requests as `join` approvals
 (their id is the machine id). The CLI signs; `approve`/`deny` of a join runs `admin approve`/`remove`.
 
-## Phase 11: Key rotation, revocation and signed-only changes (workshop)
+## Phase 11: Key rotation, revocation and signed-only changes (workshop, done)
 
 - **Only owner-signed changes,** once the router has an owner key. Admin commands that only read
   (`list`, `groups`, `rooms`, `jobs`, `blobs`, `owner`, `certificate`, `traffic-log` status,
@@ -788,7 +788,7 @@ needs `Router:AdminPort`; refuses `--url` and file paths), owner handovers and g
   - `docker exec -it poniexp-server poniexp admin <change>` prints the command and a short code and
     waits; the router puts it on the desk as a card with the same code; `approve <id>` there signs
     exactly that command (one prompt) and the router runs it, the output going back to the waiting
-    `docker exec`. `deny`, or `Router:AdminApprovalTimeout` (5 minutes), cancels it. No desk: it says
+    `docker exec`. `deny`, or `PoniExp:AdminApprovalTimeout` (5 minutes), cancels it. No desk: it says
     so and waits.
   - Recovery: with no owner key everything runs unsigned (a new router, a restore);
     `owner set --lost-key <key>` replaces a lost key unsigned, and machines don't follow it (re-pin
@@ -823,6 +823,22 @@ needs `Router:AdminPort`; refuses `--url` and file paths), owner handovers and g
 
 Live: a `docker exec` change approved on the desk with the real Bitwarden prompt; a key rotation; a
 revocation.
+
+**As built:** protocol 10.
+- Signed-only: an endpoint filter on the admin listener refuses non-GET requests without the router's
+  in-process signed-run token once there's an owner key; `AdminApprovals` holds docker exec changes
+  (code, timeout) and pushes them to the desk (`admin` approvals); a desk `approve` signs the command
+  with the request's id and input hash (`AdminCommand.PendingId`, `InputSha256`).
+- **The first machine** on a router that has an owner key can't be approved by anyone else (no desk
+  yet): `join` offers to approve itself when its SSH agent holds the owner key (`ApproveOwnJoin`,
+  a signed `approve <its id>`). Found in the live check.
+- Rotation: `EncryptionKeyPayload` signs the issue time; `MachineKeys.RotateEncryption` keeps retired
+  keys (`KeyRing` stores them), `RelayClient` opens with any of them and remembers the newest issue
+  time it saw per machine; `RotateEncryptionKey` / `MachineKeyChanged` on the hub.
+- Revocation: a revoked machine is `Rejected` on the router and in `revocations` (signed, in
+  backups); approve refuses it; daemons keep the signed ones in their `revoked` setting and filter
+  the router's machine list and incoming envelopes. `JobRules.MachineRevoked`; `PosterRevoked` lets
+  anyone cancel. A desk naming a machine that isn't approved is ignored.
 
 ## Phase 12: Web interface (workshop)
 

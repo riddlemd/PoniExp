@@ -209,6 +209,8 @@ public static class LocalApiEndpoints
             return Results.NoContent();
         }));
         app.MapGet("/desk", (Daemon d) => Results.Ok(d.DeskApprovals()));
+        app.MapGet("/keys", (Daemon d) => Results.Ok(d.Keys()));
+        app.MapPost("/keys/rotate", (Daemon d, CancellationToken ct) => Handle(async () => Results.Ok(await d.RotateEncryptionKeyAsync(ct))));
         app.MapPost("/admin", (Daemon d, AdminCommand command, CancellationToken ct) => Handle(async () => Results.Ok(await d.RunAdminAsync(command, ct))));
         app.MapPost("/desk/{id}/{verb}", (Daemon d, string id, string verb, LocalAnswer request) => Handle(async () => verb switch
         {
@@ -309,6 +311,12 @@ public static class LocalApiEndpoints
         app.MapGet("/diagnostics", (Daemon d) => Results.Ok(d.Store.GetDiagnostics()));
 
         // Joining goes through the daemon: in system mode only it holds the keys.
+        app.MapGet("/router", (Daemon d) => Results.Ok(new LocalRouter(d.Relay.RouterId, d.Relay.RouterOwnerKey)));
+        app.MapPost("/join/approve", (Daemon d, AdminCommand command, CancellationToken ct) => Handle(async () =>
+        {
+            await d.Relay.ApproveOwnJoinAsync(command, ct);
+            return Results.Ok(new LocalOk(true));
+        }));
         app.MapPost("/join", (Daemon d, LocalJoinRequest request, CancellationToken ct) => Handle(async () =>
         {
             if (!d.Relay.IsReachable)

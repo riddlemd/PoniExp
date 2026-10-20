@@ -15,7 +15,8 @@ public static class AdminCli
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } };
 
     /// <param name="input">What <c>restore -</c> reads (default: stdin); a remote command carries it.</param>
-    public static async Task<int> RunAsync(string[] args, TextWriter output, string? input = null)
+    /// <param name="signedToken">Set when the router runs an owner-signed command (phase 11): changes go straight through.</param>
+    public static async Task<int> RunAsync(string[] args, TextWriter output, string? input = null, string? signedToken = null)
     {
         var url = Environment.GetEnvironmentVariable("PONIEXP_ADMIN_URL") ?? "http://127.0.0.1:5081";
         var rest = new List<string>();
@@ -31,16 +32,49 @@ public static class AdminCli
             }
         }
 
-        using var http = new HttpClient { BaseAddress = new Uri(url.TrimEnd('/') + "/") };
+        using var http = new HttpClient { BaseAddress = new Uri(url.TrimEnd('/') + "/"), Timeout = TimeSpan.FromMinutes(2) };
+        if (signedToken is not null)
+        {
+            http.DefaultRequestHeaders.Add(Owner.AdminApprovals.TokenHeader, signedToken);
+        }
+
         try
         {
+            if (signedToken is null && IsChange(rest) && !(rest is ["owner", "set", ..] && rest.Contains("--lost-key")))
+            {
+                if (rest is ["restore", var from])
+                {
+                    input = from == "-" ? await Console.In.ReadToEndAsync() : await File.ReadAllTextAsync(from);
+                    rest[1] = "-";
+                }
+
+                if (rest is ["revoke", var who] && !(who.Length == 32 && who.All(Uri.IsHexDigit)))
+                {
+                    // the owner signs the full machine id, which daemons check
+                    var all = await http.GetFromJsonAsync<List<AdminMachineView>>("admin/machines", Json) ?? [];
+                    var found = all.Where(m => m.Name == who || (who.Length >= 4 && m.Id.StartsWith(who, StringComparison.Ordinal))).ToList();
+                    if (found is not [var one])
+                    {
+                        output.WriteLine($"error: {(found.Count == 0 ? $"no machine matches '{who}'" : $"'{who}' matches {found.Count} machines; use the id")}");
+                        return 1;
+                    }
+
+                    rest[1] = one.Id;
+                }
+
+                if (await ThroughTheDeskAsync(http, rest, input, output) is { } exitCode)
+                {
+                    return exitCode;
+                }
+            }
+
             switch (rest)
             {
                 case ["list"] or []:
                     var machines = await http.GetFromJsonAsync<List<AdminMachineView>>("admin/machines", Json) ?? [];
                     WriteTable(output, machines);
                     return 0;
-                case [var verb and ("approve" or "reject" or "remove"), var selector]:
+                case [var verb and ("approve" or "reject" or "remove" or "revoke"), var selector]:
                     var response = await http.PostAsync($"admin/machines/{Uri.EscapeDataString(selector)}/{verb}", null);
                     if (!response.IsSuccessStatusCode)
                     {
@@ -50,7 +84,9 @@ public static class AdminCli
                     }
 
                     var machine = (await response.Content.ReadFromJsonAsync<AdminMachineView>(Json))!;
-                    output.WriteLine($"{verb}d {machine.Name} ({machine.Id[..8]}), join code {machine.JoinCode}: now {machine.Status}");
+                    output.WriteLine(verb == "revoke"
+                        ? $"revoked {machine.Name} ({machine.Id[..8]}): its key is refused for good, and every machine is told"
+                        : $"{verb}d {machine.Name} ({machine.Id[..8]}), join code {machine.JoinCode}: now {machine.Status}");
                     return 0;
                 case ["traffic-log", var state and ("on" or "off")]:
                     var set = await ReadAsync<TrafficLogStatus>(await http.PostAsync($"admin/traffic-log/{state}", null), output);
@@ -120,12 +156,22 @@ public static class AdminCli
                     output.WriteLine(owner?.Key is null ? "no owner key (poniexp admin owner set \"<ssh public key>\")" : ShowOwner(owner));
                     return 0;
                 case ["owner", "set", .. var keyParts] when keyParts.Count > 0:
-                    var setOwner = await ReadAsync<AdminOwnerView>(await http.PutAsJsonAsync("admin/owner", new AdminOwnerKey(string.Join(" ", keyParts)), Json), output);
+                    var lostKey = keyParts.Remove("--lost-key");
+                    var setOwner = await ReadAsync<AdminOwnerView>(await http.PutAsJsonAsync("admin/owner", new AdminOwnerKey(string.Join(" ", keyParts), lostKey), Json), output);
+                    if (lostKey && setOwner is not null)
+                    {
+                        output.WriteLine("Machines keep the key they pinned (no signed handover): run `poniexp-client owner pin` on each.");
+                    }
+
                     output.WriteLine(setOwner is null ? "" : ShowOwner(setOwner));
                     return setOwner is null ? 1 : 0;
                 case ["groups"]:
                     var groups = await http.GetFromJsonAsync<List<GroupInfo>>("admin/groups", Json) ?? [];
-                    output.WriteLine(groups.Count == 0 ? "no groups" : string.Join("\n", groups.Select(g => $"{g.Name,-20} {string.Join(" ", g.Members)}")));
+                    var present = (await http.GetFromJsonAsync<List<AdminMachineView>>("admin/machines", Json) ?? [])
+                        .Where(m => m.Status == MembershipStatus.Approved).Select(m => m.Name).ToHashSet();
+                    output.WriteLine(groups.Count == 0 ? "no groups" : string.Join("\n", groups.Select(g =>
+                        $"{g.Name,-20} {string.Join(" ", g.Members.Select(m => present.Contains(m.Split('/')[0]) ? m : $"{m} (gone)"))}" +
+                        (g.Signed is null ? "  [unsigned: machines with a pinned owner key ignore it]" : ""))));
                     return 0;
                 case ["group", "set", var group, .. var members] when members.Count > 0:
                     var setGroup = await ReadAsync<GroupInfo>(await http.PutAsJsonAsync($"admin/groups/{Uri.EscapeDataString(group)}",
@@ -207,7 +253,7 @@ public static class AdminCli
                 default:
                     output.WriteLine("usage: poniexp admin [list | approve <id|name> | reject <id|name> | remove <id|name> | clear-pending | certificate\n" +
                                      "                      | backup <path|-> | restore <path|-> | blobs [clear --for <machine>]\n" +
-                                     "                      | rooms [--collapsed [--since <time>]] | jobs [--all] | job remove <id>\n" +
+                                     "                      | rooms [--collapsed [--since <time>]] | jobs [--all] | job remove <id> | revoke <machine>\n" +
         "         | owner | owner set <ssh public key>\n" +
                                      "                      | groups | group set <name> <machine/agent>... | group remove <name>\n" +
                                      "                      | traffic-log [on | off | status | show [--since 2h|date] [--machine name] [--limit n] [--json]]] [--url URL]");
@@ -233,6 +279,59 @@ public static class AdminCli
             'd' => TimeSpan.FromDays(amount),
             _ => throw new ArgumentException($"'{text}' isn't a duration like 30m, 2h or 3d"),
         };
+    }
+
+    /// <summary>Admin commands that change something: once there's an owner key, they run only signed.</summary>
+    internal static bool IsChange(IReadOnlyList<string> args) => args switch
+    {
+        ["approve" or "reject" or "remove" or "revoke", _] => true,
+        ["traffic-log", "on" or "off"] => true,
+        ["job", "remove", _] or ["group", "set" or "remove", ..] or ["owner", "set", ..] or ["blobs", "clear", ..] => true,
+        ["clear-pending"] or ["restore", _] => true,
+        _ => false,
+    };
+
+    /// <summary>
+    /// A docker exec change once the router has an owner key: it waits on the desk, which signs it. Null if the router
+    /// has no owner key (run it directly).
+    /// </summary>
+    private static async Task<int?> ThroughTheDeskAsync(HttpClient http, List<string> args, string? input, TextWriter output)
+    {
+        var asked = await http.PostAsJsonAsync("admin/pending-commands", new AdminPendingRequest(args, input), Json);
+        asked.EnsureSuccessStatusCode();
+        var view = (await asked.Content.ReadFromJsonAsync<AdminPendingView>(Json))!;
+        if (view.Request is not { } request)
+        {
+            return null;
+        }
+
+        var owner = await http.GetFromJsonAsync<AdminOwnerView>("admin/owner", Json);
+        output.WriteLine($"This change needs the owner's signature. On your desk run `poniexp-client approvals` and approve the one with code {request.Code}");
+        if (owner?.Desk is null)
+        {
+            output.WriteLine("There's no desk right now: run `poniexp-client here` on the machine you're at.");
+        }
+
+        output.WriteLine($"(waiting until {request.ExpiresOn.ToLocalTime():HH:mm:ss}; Ctrl+C stops waiting, and it times out on its own)...");
+        output.Flush();
+        while (true)
+        {
+            var state = await http.GetFromJsonAsync<AdminPendingView>($"admin/pending-commands/{request.Id}?wait=25", Json);
+            switch (state?.State)
+            {
+                case "pending":
+                    continue;
+                case "approved" when state.Result is { } result:
+                    output.Write(result.Output);
+                    return result.ExitCode;
+                case "denied":
+                    output.WriteLine("denied on the desk");
+                    return 1;
+                default:
+                    output.WriteLine("timed out: nobody approved it on the desk");
+                    return 1;
+            }
+        }
     }
 
     private static string ShowOwner(AdminOwnerView o) =>

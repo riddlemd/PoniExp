@@ -85,11 +85,13 @@ public class EncryptionTests
         using var ise = MachineKeys.Create();
         using var mallory = MachineKeys.Create();
 
-        Assert.True(PublicKeys.VerifyEncryptionKey(ise.PublicKey, ise.EncryptionPublicKey, ise.EncryptionKeySignature));
-        Assert.False(PublicKeys.VerifyEncryptionKey(ise.PublicKey, mallory.EncryptionPublicKey, mallory.EncryptionKeySignature));
-        Assert.False(PublicKeys.VerifyEncryptionKey(ise.PublicKey, mallory.EncryptionPublicKey, ise.EncryptionKeySignature));
-        var selfSigned = ise.Sign(Signatures.EncryptionKeyPayload(ise.PublicKey, ise.PublicKey));
-        Assert.False(PublicKeys.VerifyEncryptionKey(ise.PublicKey, ise.PublicKey, selfSigned)); // the identity key can't double as one
+        var issued = ise.EncryptionKeyIssuedOn;
+        Assert.True(PublicKeys.VerifyEncryptionKey(ise.PublicKey, ise.EncryptionPublicKey, ise.EncryptionKeySignature, issued));
+        Assert.False(PublicKeys.VerifyEncryptionKey(ise.PublicKey, ise.EncryptionPublicKey, ise.EncryptionKeySignature, issued.AddDays(1))); // the issue time is signed
+        Assert.False(PublicKeys.VerifyEncryptionKey(ise.PublicKey, mallory.EncryptionPublicKey, mallory.EncryptionKeySignature, mallory.EncryptionKeyIssuedOn));
+        Assert.False(PublicKeys.VerifyEncryptionKey(ise.PublicKey, mallory.EncryptionPublicKey, ise.EncryptionKeySignature, issued));
+        var selfSigned = ise.Sign(Signatures.EncryptionKeyPayload(ise.PublicKey, ise.PublicKey, issued));
+        Assert.False(PublicKeys.VerifyEncryptionKey(ise.PublicKey, ise.PublicKey, selfSigned, issued)); // the identity key can't double as one
     }
 
     // ---- through the router ----
@@ -174,7 +176,7 @@ public class EncryptionTests
         {
             foreach (var file in Directory.GetFiles(Path.GetDirectoryName(router.StorePath(keys))!, Path.GetFileName(router.StorePath(keys)) + "*"))
             {
-                Assert.DoesNotContain("battery staple", Encoding.UTF8.GetString(await File.ReadAllBytesAsync(file)));
+                Assert.DoesNotContain("battery staple", ReadShared(file)); // the client may still be writing (a setting, on its worker)
             }
         }
     }

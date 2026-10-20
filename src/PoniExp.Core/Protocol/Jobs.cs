@@ -43,7 +43,7 @@ public sealed record JobEntry(DateTimeOffset OccurredOn, string Actor, string Wh
 /// <c>machineId/agent</c>.
 /// </summary>
 public sealed record Job(Guid Id, string Title, string Description, IReadOnlyList<JobRequirement> Requirements, string Poster, JobColumn Column, string? Claimant,
-    DateTimeOffset? LeaseExpiresOn, string? Result, DateTimeOffset PostedOn, DateTimeOffset UpdatedOn, IReadOnlyList<JobEntry> History)
+    DateTimeOffset? LeaseExpiresOn, string? Result, DateTimeOffset PostedOn, DateTimeOffset UpdatedOn, IReadOnlyList<JobEntry> History, bool PosterRevoked = false)
 {
     public bool IsFinished => Column is JobColumn.Done or JobColumn.Failed;
 }
@@ -170,6 +170,7 @@ public static class JobRules
                 return isClaimant ? Next(JobColumn.Ready, "released", null, null) : throw No("only the claimant can release the job");
             case JobActionKind.Cancel:
                 return job.Poster == a.Actor ? Next(JobColumn.Failed, "cancelled", null, null, "cancelled by the poster")
+                    : job.PosterRevoked ? Next(JobColumn.Failed, "cancelled", null, null, "cancelled (its poster's machine was revoked)")
                     : throw No("only the poster can cancel the job");
             case JobActionKind.Move:
                 switch (a.Column)
@@ -192,6 +193,37 @@ public static class JobRules
     }
 
     /// <summary>A claim whose lease ran out: back to ready.</summary>
+    /// <summary>A machine was revoked (phase 11): what it held goes back to ready, what it posted is marked so anyone may cancel it.</summary>
+    public static Job? MachineRevoked(Job job, string machineId, DateTimeOffset now)
+    {
+        static bool On(string? actor, string machine) => actor is not null && actor.StartsWith(machine + "/", StringComparison.Ordinal);
+        if (job.IsFinished)
+        {
+            return null;
+        }
+
+        var next = job;
+        if (On(job.Claimant, machineId))
+        {
+            next = next with
+            {
+                Column = JobColumn.Ready, Claimant = null, LeaseExpiresOn = null, UpdatedOn = now,
+                History = [.. next.History, new JobEntry(now, Router, "its claimant's machine was revoked", JobColumn.Ready)],
+            };
+        }
+
+        if (On(job.Poster, machineId) && !job.PosterRevoked)
+        {
+            next = next with
+            {
+                PosterRevoked = true, UpdatedOn = now,
+                History = [.. next.History, new JobEntry(now, Router, "its poster's machine was revoked; anyone may cancel it")],
+            };
+        }
+
+        return ReferenceEquals(next, job) ? null : next;
+    }
+
     public static Job LeaseExpired(Job job, DateTimeOffset now) =>
         job with
         {

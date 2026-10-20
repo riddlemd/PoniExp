@@ -72,6 +72,7 @@ public static class RouterHost
         builder.Services.AddSingleton<Owner.OwnerDesk>();
         builder.Services.AddSingleton(Owner.RouterKeys.LoadOrCreate(options.DataDirectory));
         builder.Services.AddSingleton<Owner.RemoteAdmin>();
+        builder.Services.AddSingleton<Owner.AdminApprovals>();
         builder.Services.AddSignalR(signalR =>
             {
                 signalR.MaximumReceiveMessageSize = Limits.MaxContentBytes * 2 + 64 * 1024;

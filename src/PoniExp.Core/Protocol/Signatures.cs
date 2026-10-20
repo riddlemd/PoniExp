@@ -9,15 +9,18 @@ public static class Signatures
     public static byte[] JoinPayload(JoinRequest request) =>
         SigningPayload.Build("join", request.Name, request.Description.OperatingSystem, request.Description.Architecture,
             request.Description.HostName, request.Description.Notes, request.PublicKey, request.EncryptionKey,
-            request.EncryptionKeySignature, Stamp(request.RequestedOn));
+            request.EncryptionKeySignature, Stamp(request.RequestedOn), Stamp(request.EncryptionKeyIssuedOn));
 
     /// <summary>The answer to a router challenge: binds this connection to the key.</summary>
     public static byte[] AuthPayload(string challenge, string publicKey) =>
         SigningPayload.Build("auth", challenge, publicKey);
 
-    /// <summary>What a machine's identity key signs to vouch for its encryption key.</summary>
-    public static byte[] EncryptionKeyPayload(string identityPublicKey, string encryptionPublicKey) =>
-        SigningPayload.Build("encryption-key", identityPublicKey, encryptionPublicKey);
+    /// <summary>
+    /// What a machine's identity key signs to vouch for its encryption key, with when it was issued: machines take only
+    /// a newer key than the one they have, so a router can't hand out an old one again (phase 11).
+    /// </summary>
+    public static byte[] EncryptionKeyPayload(string identityPublicKey, string encryptionPublicKey, DateTimeOffset issuedOn) =>
+        SigningPayload.Build("encryption-key", identityPublicKey, encryptionPublicKey, Stamp(issuedOn));
 
     /// <summary>Every header field, the ciphertext and every key wrap: the signature covers the whole message.</summary>
     public static byte[] EnvelopePayload(Envelope envelope) =>
@@ -35,7 +38,7 @@ public static class Signatures
     public static JoinRequest SignJoin(MachineKeys keys, string name, MachineDescription description, DateTimeOffset now)
     {
         var unsigned = new JoinRequest(name, description, keys.PublicKey, keys.EncryptionPublicKey, keys.EncryptionKeySignature,
-            Truncate(now), string.Empty);
+            Truncate(now), string.Empty, keys.EncryptionKeyIssuedOn);
         return unsigned with { Signature = keys.Sign(JoinPayload(unsigned)) };
     }
 
@@ -120,7 +123,7 @@ public static class Signatures
 
     public static bool VerifyJoin(JoinRequest request) =>
         PublicKeys.Verify(request.PublicKey, JoinPayload(request), request.Signature)
-        && PublicKeys.VerifyEncryptionKey(request.PublicKey, request.EncryptionKey, request.EncryptionKeySignature);
+        && PublicKeys.VerifyEncryptionKey(request.PublicKey, request.EncryptionKey, request.EncryptionKeySignature, request.EncryptionKeyIssuedOn);
 
     /// <summary>Signed by <paramref name="senderPublicKey"/>, whose hash is the sender id, with a consistent size.</summary>
     public static bool VerifyEnvelope(Envelope envelope, string senderPublicKey)

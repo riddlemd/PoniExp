@@ -9,7 +9,9 @@ using PoniExp.Core.Protocol;
 namespace PoniExp.Daemon;
 
 /// <summary>What a daemon runs on: this machine's keys, its home directory, how to reach the router, and its database.</summary>
-public sealed record DaemonContext(MachineKeys Keys, string Home, RelayClientOptions Relay, ClientStore Store, LocalAddress Address);
+/// <param name="SaveKeys">Stores the keys after an encryption key rotation (the secret store; null in tests: kept in memory).</param>
+public sealed record DaemonContext(MachineKeys Keys, string Home, RelayClientOptions Relay, ClientStore Store, LocalAddress Address,
+    Action<MachineKeys>? SaveKeys = null);
 
 /// <summary>
 /// The machine's daemon: its only connection to the router. It routes incoming messages to local
@@ -80,6 +82,8 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
         relay.HereChanged += OnHereChanged;
         relay.OwnerChanged += FollowHandovers;
         relay.PendingJoinsChanged += OnPendingJoins;
+        relay.AdminRequestsChanged += OnAdminRequests;
+        relay.RevocationsChanged += ApplyRevocations;
         relay.JobChanged += OnJobChanged;
         relay.MessageRejected += (envelope, why) => Diagnose("warning", why.Contains("signature", StringComparison.Ordinal) ? "signature" : "delivery",
             $"refused a message: {why}", envelope?.FromMachine, envelope?.Id);
@@ -112,6 +116,7 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
             }
         });
 
+        LoadRevocations();
         await ConnectAsync(stoppingToken);
         using var timer = new PeriodicTimer(_options.CurrentValue.SweepInterval, _time);
         while (await timer.WaitForNextTickAsync(stoppingToken))
@@ -147,6 +152,7 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
         await _relay.FlushOutboxAsync(cancellationToken);
         await RenewJobLeasesAsync(cancellationToken);
         await CheckDeskExpiryAsync();
+        await RotateIfDueAsync(cancellationToken);
         var retention = _retention.CurrentValue;
         if (Now - _lastRetention >= retention.Interval)
         {

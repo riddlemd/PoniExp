@@ -35,6 +35,9 @@ public sealed class RouterOptions
     /// <summary>How far a signed timestamp (a join request) may be from the router's clock.</summary>
     public TimeSpan ClockSkew { get; set; } = TimeSpan.FromMinutes(5);
 
+    /// <summary>How long a docker exec change waits for the desk to sign it (phase 11).</summary>
+    public TimeSpan AdminApprovalTimeout { get; set; } = TimeSpan.FromMinutes(5);
+
     /// <summary>Caps unapproved join requests, so nobody can fill the list.</summary>
     public int MaxPendingMachines { get; set; } = 50;
 
@@ -117,6 +120,11 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
         if (options.MaxExpiry <= TimeSpan.Zero)
         {
             errors.Add("PoniExp:MaxExpiry must be positive.");
+        }
+
+        if (options.AdminApprovalTimeout <= TimeSpan.Zero || options.AdminApprovalTimeout > TimeSpan.FromDays(1))
+        {
+            errors.Add("PoniExp:AdminApprovalTimeout must be positive and at most a day.");
         }
 
         if (options.ClockSkew < TimeSpan.Zero || options.ClockSkew >= options.MaxExpiry)

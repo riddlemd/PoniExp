@@ -190,6 +190,20 @@ you're working at: your *desk*.
 
 The router sees only who the desk is; what's asked and answered is end-to-end encrypted.
 
+**Changes need your signature.** Once the router has an owner key, admin commands that change
+something run only signed. `docker exec poniexp-server poniexp admin <change>` prints a short code
+and waits; the same command shows on your desk (`approvals`), and `approve <id>` there signs it (one
+Bitwarden prompt), after which `docker exec` prints the result. Reads (`list`, `groups`, `backup`, ...)
+run at once. The first machine on such a router approves itself: `join` offers to sign its own
+approval when your SSH agent holds the owner key. A lost owner key: `poniexp admin owner set
+--lost-key "<new key>"`, then `poniexp-client owner pin` on each machine.
+
+**Keys.** `poniexp-client keys` shows the encryption key's age; it rotates every 90 days
+(`Daemon:EncryptionKeyLifetime`) or with `keys rotate`, keeping old keys to read older messages. A
+lost or stolen machine: `poniexp-client admin revoke <machine>`; every machine then refuses its key,
+even if the router were to list it again. To bring it back, `poniexp-client keys reset` on it (daemon
+stopped) makes new keys, and it joins again under the same name.
+
 **Admin from any machine.** `poniexp-client admin <command>` runs any `poniexp admin` command from
 wherever you are (`admin list`, `admin approve <id>`, `admin group set oncall wojtek/agent`,
 `admin backup ~/poniexp-backup.json`, ...), signed with your owner key: one Bitwarden prompt per

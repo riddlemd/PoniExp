@@ -27,7 +27,14 @@ public sealed partial class Daemon
                     throw new InvalidOperationException(problem);
                 }
 
-                resolved.AddRange(found.Members);
+                if (found.Members.Any(member => Address.Parse(member).Machine is var m && m != OwnName && _relay.Machines.All(k => k.Name != m)))
+                {
+                    await _relay.RefreshMachinesAsync(cancellationToken); // maybe approved since we last asked
+                }
+
+                // Members on a machine that's gone (removed or revoked) are skipped: the owner's signed list stays as it was.
+                resolved.AddRange(found.Members.Where(member => Address.Parse(member).Machine is var machine
+                    && (machine == OwnName || _relay.Machines.Any(m => m.Name == machine))));
             }
             else
             {

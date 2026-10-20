@@ -52,7 +52,7 @@ public sealed class MachineRegistry
             }
 
             var record = new MachineRecord(id, request.Name, request.Description, request.PublicKey, request.EncryptionKey,
-                request.EncryptionKeySignature, MembershipStatus.Pending, now);
+                request.EncryptionKeySignature, MembershipStatus.Pending, now, EncryptionKeyIssuedOn: request.EncryptionKeyIssuedOn);
             return (machines.SetItem(id, record), record);
         });
     }
@@ -113,10 +113,26 @@ public sealed class MachineRegistry
             ? (machines.SetItem(id, record with { LastSeenOn = seenOn }), record)
             : (machines, null!));
 
+    /// <summary>A machine's new encryption key (its identity key's signature checked by the caller), if newer than the one it has.</summary>
+    public Task<MachineRecord> SetEncryptionKeyAsync(string id, EncryptionKeyUpdate update) =>
+        UpdateAsync(machines =>
+        {
+            var record = machines.GetValueOrDefault(id) ?? throw new RouterException("Unknown machine.", RouterErrorKind.NotFound);
+            if (update.IssuedOn <= record.EncryptionKeyIssuedOn)
+            {
+                throw new RouterException("That encryption key isn't newer than the one in use.");
+            }
+
+            var next = record with { EncryptionKey = update.EncryptionKey, EncryptionKeySignature = update.EncryptionKeySignature, EncryptionKeyIssuedOn = update.IssuedOn };
+            return (machines.SetItem(id, next), next);
+        });
+
     /// <summary>For tests that play a misbehaving router: hand out another encryption key for a machine.</summary>
-    internal Task SubstituteEncryptionKeyAsync(string id, string encryptionKey, string signature) =>
-        UpdateAsync(machines => (machines.SetItem(id, machines[id] with { EncryptionKey = encryptionKey, EncryptionKeySignature = signature }),
-            machines[id]));
+    internal Task SubstituteEncryptionKeyAsync(string id, string encryptionKey, string signature, DateTimeOffset? issuedOn = null) =>
+        UpdateAsync(machines => (machines.SetItem(id, machines[id] with
+        {
+            EncryptionKey = encryptionKey, EncryptionKeySignature = signature, EncryptionKeyIssuedOn = issuedOn ?? machines[id].EncryptionKeyIssuedOn,
+        }), machines[id]));
 
     /// <summary>
     /// Finds a machine by full id, by an id prefix of at least 4 characters, or by name. Ambiguity is an

@@ -43,7 +43,7 @@ public class ServerTests
         var data = Directory.CreateDirectory(NewDataDirectory()).FullName;
         using var keys = MachineKeys.Create();
         var record = new MachineRecord(keys.MachineId, "ise", Description, keys.PublicKey, keys.EncryptionPublicKey, keys.EncryptionKeySignature,
-            MembershipStatus.Approved, DateTimeOffset.UtcNow.AddDays(-3), DateTimeOffset.UtcNow.AddDays(-3));
+            MembershipStatus.Approved, DateTimeOffset.UtcNow.AddDays(-3), DateTimeOffset.UtcNow.AddDays(-3), EncryptionKeyIssuedOn: keys.EncryptionKeyIssuedOn);
         var json = WireProtocol.Configure(new JsonSerializerOptions(JsonSerializerDefaults.Web));
         await File.WriteAllTextAsync(Path.Combine(data, "machines.json"), JsonSerializer.Serialize(new[] { record }, json));
         var envelope = Envelopes.Sign(keys, keys, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddHours(1));

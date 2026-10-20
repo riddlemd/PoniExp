@@ -150,6 +150,29 @@ public sealed class JobBoard
         }
     }
 
+    /// <summary>A machine was revoked: its claims go back to ready, its open posts are marked.</summary>
+    public async Task MachineRevokedAsync(string machineId)
+    {
+        var now = _time.GetUtcNow();
+        var changes = new List<JobChange>();
+        lock (_lock)
+        {
+            foreach (var job in _jobs.Values.ToList())
+            {
+                if (JobRules.MachineRevoked(job, machineId, now) is { } next)
+                {
+                    Save(next);
+                    changes.Add(new JobChange(next, next.Column == JobColumn.Ready && job.Column != JobColumn.Ready));
+                }
+            }
+        }
+
+        foreach (var change in changes)
+        {
+            await PushAsync(change);
+        }
+    }
+
     /// <summary>The owner takes a job off the board (<c>poniexp admin job remove</c>): spam, or a poster that's gone.</summary>
     public async Task<Job> RemoveAsync(Guid id)
     {

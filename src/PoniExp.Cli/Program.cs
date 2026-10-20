@@ -74,6 +74,9 @@ const string Usage = """
                                            rooms: named conversations everyone in sees; invitees accept, members leave
       admin <command> [args]               a router admin command from here, signed with your owner key (one prompt):
                                            any `poniexp admin` command (list, approve <code>, group set ..., backup <file>, ...)
+      keys                                 this machine's encryption key: issued, next rotation
+      keys rotate                          a new encryption key now (also automatic: Daemon:EncryptionKeyLifetime, 90 days)
+      keys reset                           new keys for a revoked machine (daemon stopped): the old data is kept aside; then join again
       owner                                the owner key (router's and pinned here) and the approval desk
       owner pin                            pin the router's owner key here (shows its fingerprint to compare)
       here [--hours <n>]                   make this machine your approval desk (your SSH agent signs: one prompt)
@@ -132,6 +135,9 @@ try
         ["mcp", .. var rest] => await McpAsync(Option(rest, "--agent") ?? throw new ArgumentException("mcp needs --agent <name>")),
         ["capabilities"] => await CapabilitiesAsync(),
         ["admin", .. var adminArgs] when adminArgs.Length > 0 => await RemoteAdminAsync(adminArgs),
+        ["keys"] => await KeysAsync(false),
+        ["keys", "rotate"] => await KeysAsync(true),
+        ["keys", "reset"] => await KeysResetAsync(),
         ["owner"] => await OwnerAsync(),
         ["owner", "pin"] => await PinOwnerAsync(),
         ["here", .. var rest] => await HereAsync(Option(rest, "--hours") is { } h ? TimeSpan.FromHours(double.Parse(h, CultureInfo.InvariantCulture)) : null),
@@ -196,7 +202,8 @@ async Task<int> DaemonAsync(bool windowsService)
     }
 
     using var keys = KeyRing.LoadOrCreate(home);
-    var context = new DaemonContext(keys, home, config.ToOptions(), new ClientStore(ClientConfig.DatabasePath), LocalAddress.ForHome(home));
+    var context = new DaemonContext(keys, home, config.ToOptions(), new ClientStore(ClientConfig.DatabasePath), LocalAddress.ForHome(home),
+        k => KeyRing.SaveEncryption(home, k));
     await using var app = DaemonHost.Build(context, windowsService: windowsService);
     await DaemonHost.StartAsync(app, context, cancel.Token);
     Console.Error.WriteLine($"* daemon for {keys.MachineId[..8]} ({home}) listening on {context.Address}; Ctrl+C to stop");
@@ -216,7 +223,16 @@ async Task<int> JoinAsync(string name, string? notes)
             return result.Membership == "approved" ? 0 : 1;
         }
 
-        PrintJoinInstructions(name, result.JoinCode, result.MachineId);
+        var router = await api.RouterAsync(cancel.Token);
+        if (await OfferSelfApprovalAsync(router.RouterId, router.OwnerKey, result.MachineId) is { } selfApproval)
+        {
+            await api.ApproveOwnJoinAsync(selfApproval, cancel.Token);
+        }
+        else
+        {
+            PrintJoinInstructions(name, result.JoinCode, result.MachineId);
+        }
+
         while (true)
         {
             await Task.Delay(TimeSpan.FromSeconds(2), cancel.Token);
@@ -246,7 +262,15 @@ async Task<int> JoinAsync(string name, string? notes)
         return asked == MembershipStatus.Approved ? 0 : 1;
     }
 
-    PrintJoinInstructions(name, client.JoinCode, client.MachineId);
+    if (await OfferSelfApprovalAsync(client.RouterId, client.RouterOwnerKey, client.MachineId) is { } own)
+    {
+        await client.ApproveOwnJoinAsync(own, cancel.Token);
+    }
+    else
+    {
+        PrintJoinInstructions(name, client.JoinCode, client.MachineId);
+    }
+
     var outcome = await approved.Task.WaitAsync(cancel.Token);
     Console.WriteLine(outcome == MembershipStatus.Approved ? "approved" : $"not approved: {outcome}");
     return outcome == MembershipStatus.Approved ? 0 : 1;
@@ -865,6 +889,90 @@ async Task<int> JobAsync(string[] rest)
     }
 }
 
+/// <summary>
+/// The router has an owner key and this machine's SSH agent holds it: offer to approve this machine with it (one prompt).
+/// Null if not (then it waits for the desk, or docker exec).
+/// </summary>
+async Task<PoniExp.Core.Protocol.AdminCommand?> OfferSelfApprovalAsync(string? routerId, string? ownerKey, string machineId)
+{
+    if (routerId is null || ownerKey is null || await AgentHoldsAsync(ownerKey) is not { } key)
+    {
+        return null;
+    }
+
+    Console.Write($"Your SSH agent holds the router's owner key ({key.Fingerprint}). Approve this machine with it? [Y/n] ");
+    if (Console.ReadLine()?.Trim().ToLowerInvariant() is "n" or "no")
+    {
+        return null;
+    }
+
+    Console.WriteLine("Approve the signing request in your SSH agent (e.g. Bitwarden)...");
+    var id = Guid.NewGuid();
+    var issued = DateTimeOffset.UtcNow;
+    string[] args = ["approve", machineId];
+    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancel.Token);
+    timeout.CancelAfter(TimeSpan.FromMinutes(2));
+    var signature = await new PoniExp.Core.Crypto.SshAgent().SignAsync(key, PoniExp.Core.Protocol.AdminCommand.Payload(id, routerId, args, null, issued), timeout.Token);
+    return new PoniExp.Core.Protocol.AdminCommand(id, routerId, args, null, issued, signature);
+}
+
+// ---- keys ----
+
+async Task<int> KeysAsync(bool rotate)
+{
+    using var api = await DaemonAsync2();
+    var keys = rotate ? await api.RotateKeysAsync(cancel.Token) : await api.KeysAsync(cancel.Token);
+    Console.WriteLine($"{(rotate ? "rotated: " : "")}encryption key issued {keys.IssuedOn.ToLocalTime():yyyy-MM-dd HH:mm}, next rotation {keys.DueOn.ToLocalTime():yyyy-MM-dd}" +
+                      (keys.Retired.Count > 0 ? $"; {keys.Retired.Count} retired key(s) kept to open older messages" : ""));
+    return 0;
+}
+
+/// <summary>
+/// `keys reset`: for a machine whose keys were revoked (or may have leaked). The daemon must be stopped. The old
+/// database and keys move to a folder beside them (the old messages stay readable there); new keys are made; the
+/// machine then joins again, under the same name.
+/// </summary>
+async Task<int> KeysResetAsync()
+{
+    var home = ClientConfig.HomeDirectory;
+    using (var probe = await LocalApiClient.FindAsync(home, cancel.Token))
+    {
+        if (await probe.IsRunningAsync(cancel.Token))
+        {
+            return Fail("stop the daemon first (poniexp-client service uninstall, or Ctrl+C on `poniexp-client daemon`)");
+        }
+    }
+
+    Console.Write("This makes new keys: this machine becomes a new machine to the router, and must be approved again. Continue? [y/N] ");
+    if (Console.ReadLine()?.Trim().ToLowerInvariant() is not ("y" or "yes"))
+    {
+        return Fail("nothing changed");
+    }
+
+    var archive = Path.Combine(home, $"reset-{DateTime.UtcNow:yyyyMMdd-HHmmss}");
+    Directory.CreateDirectory(archive);
+    foreach (var file in Directory.GetFiles(Path.GetDirectoryName(ClientConfig.DatabasePath)!, Path.GetFileName(ClientConfig.DatabasePath) + "*"))
+    {
+        File.Move(file, Path.Combine(archive, Path.GetFileName(file)));
+    }
+
+    var store = SecretStores.ForHome(home);
+    var kept = SecretStores.ForHome(archive);
+    foreach (var name in new[] { KeyRing.IdentityName, KeyRing.EncryptionName, KeyRing.EncryptionIssuedName, KeyRing.RetiredName })
+    {
+        if (store.Load(name) is { } secret)
+        {
+            kept.Save(name, secret);
+            store.Delete(name);
+        }
+    }
+
+    using var keys = KeyRing.LoadOrCreate(home);
+    Console.WriteLine($"New keys: machine {keys.MachineId[..8]}, join code {KeyFingerprint.JoinCodeOf(keys.PublicKey)}. The old data is in {archive}.");
+    Console.WriteLine("Start the daemon and join again under the same name: poniexp-client join <name> (the desk shows it replaces the old machine).");
+    return 0;
+}
+
 // ---- the owner, the desk and approvals ----
 
 static void ShowOwner(LocalOwner o) => Console.WriteLine(
@@ -1000,7 +1108,7 @@ async Task<int> AwayAsync()
 
 static void ShowApproval(LocalApproval a) => Console.WriteLine(
     $"{a.Id.ToString()[..8]}  {a.From}  {a.RequestedOn.ToLocalTime():MM-dd HH:mm}  {a.State}{(a.Always ? " (always)" : "")}{(a.AnsweredBy is { } by ? $" by {by}" : "")}" +
-    $"{(a.Reason is { } why ? $" ({why})" : "")}\n    {a.Summary}" + (a.Command is { } c && a.Direction != "join" && !a.Summary.Contains(c, StringComparison.Ordinal) ? $"\n    $ {c}" : "") +
+    $"{(a.Reason is { } why ? $" ({why})" : "")}\n    {a.Summary}" + (a.Command is { } c && a.Direction is not ("join" or "admin") && !a.Summary.Contains(c, StringComparison.Ordinal) ? $"\n    $ {c}" : "") +
     (a.Details is { Length: > 0 } d && d != a.Command ? $"\n    {d.ReplaceLineEndings("\n    ")}" : ""));
 
 async Task<int> ApprovalsAsync(bool mine)
@@ -1037,7 +1145,7 @@ async Task<int> RemoteAdminAsync(string[] args)
     return await RunSignedAdminAsync(api, args);
 }
 
-async Task<int> RunSignedAdminAsync(LocalApiClient api, string[] args)
+async Task<int> RunSignedAdminAsync(LocalApiClient api, string[] args, PoniExp.Core.Protocol.AdminRequest? approving = null)
 {
     var owner = await api.OwnerAsync(cancel.Token);
     if (owner.RouterId is null)
@@ -1054,7 +1162,22 @@ async Task<int> RunSignedAdminAsync(LocalApiClient api, string[] args)
     string? input = null;
     string? backupTo = null;
     var sent = args.ToList();
-    if (args is ["backup", var to] && to != "-")
+    if (approving is not null)
+    {
+        // a docker exec change: exactly its arguments; the router holds its input
+    }
+    else if (args is ["revoke", var who] && !(who.Length == 32 && who.All(Uri.IsHexDigit)))
+    {
+        var found = (await api.MachinesAsync(cancel.Token)).Where(m => m.Name == who || (who.Length >= 4 && m.Id.StartsWith(who, StringComparison.Ordinal))).ToList();
+        if (found is not [var one])
+        {
+            return Fail(found.Count == 0 ? $"no machine matches '{who}'" : $"'{who}' matches {found.Count} machines; use the id");
+        }
+
+        sent[1] = one.Id; // the owner signs the full id, which every machine checks
+        Console.WriteLine($"Revoking {one.Name} ({one.Id[..8]}): its key is refused for good.");
+    }
+    else if (args is ["backup", var to] && to != "-")
     {
         (sent[1], backupTo) = ("-", to);
     }
@@ -1069,7 +1192,7 @@ async Task<int> RunSignedAdminAsync(LocalApiClient api, string[] args)
     Console.Error.WriteLine("Approve the signing request in your SSH agent (e.g. Bitwarden)...");
     using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancel.Token);
     timeout.CancelAfter(TimeSpan.FromMinutes(2));
-    var payload = PoniExp.Core.Protocol.AdminCommand.Payload(id, owner.RouterId, sent, input, issued);
+    var payload = PoniExp.Core.Protocol.AdminCommand.Payload(id, owner.RouterId, sent, input, issued, approving?.Id, approving?.InputSha256);
     string signature;
     try
     {
@@ -1080,7 +1203,8 @@ async Task<int> RunSignedAdminAsync(LocalApiClient api, string[] args)
         return Fail($"not signed: {e.Message}");
     }
 
-    var result = await api.AdminAsync(new PoniExp.Core.Protocol.AdminCommand(id, owner.RouterId, sent, input, issued, signature), cancel.Token);
+    var result = await api.AdminAsync(new PoniExp.Core.Protocol.AdminCommand(id, owner.RouterId, sent, input, issued, signature, approving?.Id,
+        approving?.InputSha256), cancel.Token);
     if (backupTo is not null && result.ExitCode == 0)
     {
         PoniExp.Core.Crypto.PrivateFiles.WriteAllText(backupTo, result.Output);
@@ -1099,6 +1223,15 @@ async Task<int> AnswerAsync(string id, bool approve, bool always, string? reason
     using var api = await DaemonAsync2();
     var join = (await api.DeskAsync(cancel.Token)).Where(a => a.Direction == "join" && (a.Id.ToString() == id || (id.Length >= 4 && a.Id.ToString().StartsWith(id, StringComparison.Ordinal))))
         .ToList();
+    var change = (await api.DeskAsync(cancel.Token)).Where(a => a.Direction == "admin" && (a.Id.ToString() == id || (id.Length >= 4 && a.Id.ToString().StartsWith(id, StringComparison.Ordinal))))
+        .ToList();
+    if (change is [var pending] && approve)
+    {
+        var request = JsonSerializer.Deserialize<PoniExp.Core.Protocol.AdminRequest>(pending.Command!, WireProtocol.Json)!;
+        Console.WriteLine($"Approving the docker exec change {request.Code}: poniexp admin {string.Join(" ", request.Args)}");
+        return await RunSignedAdminAsync(api, [.. request.Args], request);
+    }
+
     if (join is [var machine])
     {
         Console.WriteLine($"{(approve ? "Approving" : "Removing")} {machine.From}, join code {machine.Command}:");

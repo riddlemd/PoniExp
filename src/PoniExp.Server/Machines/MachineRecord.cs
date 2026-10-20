@@ -14,7 +14,8 @@ public sealed record MachineRecord(
     DateTimeOffset RequestedOn,
     DateTimeOffset? DecidedOn = null,
     DateTimeOffset? LastSeenOn = null,
-    MachineCapabilities? Capabilities = null)
+    MachineCapabilities? Capabilities = null,
+    DateTimeOffset EncryptionKeyIssuedOn = default)
 {
     public string JoinCode => KeyFingerprint.JoinCodeOf(PublicKey);
 }
