@@ -24,8 +24,7 @@ public sealed class PoniExpTools(McpAgent me)
         "Send a message to one or more agents. Each recipient gets its own message (and starts its own conversation " +
         "unless conversationId is given, which needs a single recipient). Recipients are 'machine' or 'machine/agent'.")]
     public async Task<string> SendAsync(
-        [Description("Recipients: 'machine' (its default agent), 'machine/agent', 'role:<role>' (any one agent with that role), " +
-                     "'role:<role>/all' (every one) or 'group:<name>' (the owner's list).")] string[] to,
+        [Description("Recipients: 'machine' (its default agent), 'machine/agent', 'group:<name>' (the owner's list) or 'room:<name>'.")] string[] to,
         [Description("The message text.")] string body,
         [Description("A short title (optional).")] string? subject = null,
         [Description("Continue this conversation (one recipient only).")] string? conversationId = null,
@@ -112,16 +111,24 @@ public sealed class PoniExpTools(McpAgent me)
     public async Task<string> JobsAsync(bool all = false, string? column = null, CancellationToken cancellationToken = default) =>
         Json(await me.Api.JobsAsync(all, column, cancellationToken));
 
+    [McpServerTool(Name = "capabilities", ReadOnly = true), Description(
+        "What this machine has (OS, CPU, cores, memory, GPUs, tags), which job requirements are checked against. " +
+        "The 'jobs' list shows for each job what this machine doesn't meet ('unmet').")]
+    public async Task<string> CapabilitiesAsync(CancellationToken cancellationToken = default) => Json(await me.Api.CapabilitiesAsync(cancellationToken));
+
     [McpServerTool(Name = "job", ReadOnly = true), Description("One job, with its description, result and history (moves and comments).")]
     public async Task<string> JobAsync([Description("The job's id (or the start of it).")] string id, CancellationToken cancellationToken = default) =>
         Json(await me.Api.JobAsync(id, cancellationToken));
 
     [McpServerTool(Name = "job_post"), Description(
-        "Post a job to the board for any agent to pick up. With a role, only agents declaring it may claim it. " +
+        "Post a job to the board for any agent to pick up. With requirements, only machines meeting all of them may claim it: " +
+        "e.g. 'os=linux', 'memory>=32', 'memory<=8' (to test on small machines), 'cores>=8', 'gpu~rtx', 'gpu-memory>=16', 'tag=docker'. " +
         "It goes to 'ready' (or 'backlog' if it isn't ready to be picked up yet).")]
     public async Task<string> JobPostAsync([Description("A one-line title.")] string title, [Description("What to do (markdown).")] string? description = null,
-        [Description("The role an agent needs to claim it (optional).")] string? role = null, bool backlog = false, CancellationToken cancellationToken = default) =>
-        Json(await me.Api.PostJobAsync(new LocalJobPost(me.Agent, title, description, role, backlog), cancellationToken));
+        [Description("Requirements on the claiming machine: key op value, keys os, os-version, arch, cpu, cores, memory (GB), gpu, gpu-memory (GB), " +
+                     "gpus, tag; ops =, !=, >=, <=, ~ (contains).")] string[]? requirements = null, bool backlog = false,
+        CancellationToken cancellationToken = default) =>
+        Json(await me.Api.PostJobAsync(new LocalJobPost(me.Agent, title, description, requirements, backlog), cancellationToken));
 
     [McpServerTool(Name = "job_claim"), Description(
         "Claim a ready job when you have capacity: it's yours while you stay connected. Move it to 'running' when you start, " +
@@ -177,13 +184,13 @@ public sealed class PoniExpTools(McpAgent me)
         "Open a room with you in it. Its name must be free among live rooms. Anyone invited must accept; members only ever " +
         "leave (nobody can remove anyone). The room collapses when the last member leaves or it goes quiet for long enough.")]
     public async Task<string> RoomCreateAsync([Description("The room's name: lowercase letters, digits, '.', '_' or '-'.")] string name,
-        [Description("Agents to invite: 'machine/agent', 'role:<role>' or 'role:<role>/all', or 'group:<name>'.")] string[]? invite = null,
+        [Description("Agents to invite: 'machine/agent' or 'group:<name>'.")] string[]? invite = null,
         CancellationToken cancellationToken = default) =>
         Json(await me.Api.CreateRoomAsync(new LocalRoomCreate(me.Agent, name, invite), cancellationToken));
 
     [McpServerTool(Name = "room_invite"), Description("Invite agents to a room you're in. They must accept (room_join).")]
     public async Task<string> RoomInviteAsync([Description("The room's name or id.")] string room,
-        [Description("Agents to invite: 'machine/agent', 'role:<role>' or 'role:<role>/all', or 'group:<name>'.")] string[] invite,
+        [Description("Agents to invite: 'machine/agent' or 'group:<name>'.")] string[] invite,
         CancellationToken cancellationToken = default) =>
         Json(await me.Api.InviteToRoomAsync(room, new LocalRoomInviteRequest(me.Agent, invite), cancellationToken));
 
@@ -237,7 +244,7 @@ public static class McpServer
     /// Runs the MCP server on stdin/stdout as <paramref name="agent"/>, registered with the daemon (online)
     /// for as long as it runs. Logs go to stderr: stdout is the protocol.
     /// </summary>
-    public static async Task RunAsync(LocalApiClient api, string agent, CancellationToken cancellationToken, IReadOnlyList<string>? roles = null)
+    public static async Task RunAsync(LocalApiClient api, string agent, CancellationToken cancellationToken)
     {
         if (!Limits.IsValidAgent(agent) || agent is Address.DaemonAgent or RoomAddress.Agent)
         {
@@ -250,7 +257,7 @@ public static class McpServer
         }
 
         await using var connection = new AgentConnection(api, agent, _ => Task.CompletedTask,
-            onError: e => Console.Error.WriteLine($"poniexp: agent connection: {e.Message}"), roles: roles);
+            onError: e => Console.Error.WriteLine($"poniexp: agent connection: {e.Message}"));
         var builder = Host.CreateApplicationBuilder();
         builder.Logging.ClearProviders();
         builder.Logging.AddConsole(o => o.LogToStandardErrorThreshold = LogLevel.Trace);

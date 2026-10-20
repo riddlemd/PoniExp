@@ -102,6 +102,12 @@ public sealed class MachineRegistry
 
     private bool IsExpired(MachineRecord pending, DateTimeOffset now) => now - pending.RequestedOn > _options.CurrentValue.JoinRequestExpiry;
 
+    /// <summary>What the machine's daemon reported it has (job requirements are checked against it).</summary>
+    public Task SetCapabilitiesAsync(string id, MachineCapabilities capabilities) =>
+        UpdateAsync(machines => machines.TryGetValue(id, out var record)
+            ? (machines.SetItem(id, record with { Capabilities = capabilities }), record)
+            : (machines, null!));
+
     public Task TouchAsync(string id, DateTimeOffset seenOn) =>
         UpdateAsync(machines => machines.TryGetValue(id, out var record)
             ? (machines.SetItem(id, record with { LastSeenOn = seenOn }), record)

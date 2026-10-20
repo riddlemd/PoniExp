@@ -31,6 +31,9 @@ public static class HubMethods
     public const string GetJob = nameof(GetJob);
     public const string RenewJobLeases = nameof(RenewJobLeases);
 
+    /// <summary>A daemon reports what its machine has (after each authentication).</summary>
+    public const string ReportCapabilities = nameof(ReportCapabilities);
+
     // files (the chunks themselves go over HTTP, under BlobsPath, with a ticket)
     public const string BlobsPath = "/blobs";
     public const string BeginUpload = nameof(BeginUpload);

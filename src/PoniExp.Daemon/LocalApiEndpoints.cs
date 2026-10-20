@@ -56,7 +56,7 @@ public static class LocalApiEndpoints
             var announced = d.Store.GetPeerAgents().ToLookup(e => e.Machine);
             return Task.FromResult(Results.Ok(d.Relay.Machines.Where(m => m.Id != d.MachineId).OrderBy(m => m.Name).Select(m =>
                 new LocalMachine(m.Id, m.Name, m.Online, m.LastSeenOn, m.Description.OperatingSystem, [.. announced[m.Id].Select(e =>
-                    new LocalPeerAgent(e.Agent, m.Online ? WireProtocol.NameOf(e.State) : "offline", e.ChangedOn, e.Roles))])).ToList()));
+                    new LocalPeerAgent(e.Agent, m.Online ? WireProtocol.NameOf(e.State) : "offline", e.ChangedOn))], m.Capabilities)).ToList()));
         }));
 
         app.MapPost("/send", (Daemon d, LocalSendRequest request, CancellationToken ct) => Handle(async () =>
@@ -181,13 +181,15 @@ public static class LocalApiEndpoints
         app.MapGet("/jobs", (Daemon d, bool? all, string? column, CancellationToken ct) => Handle(async () =>
             Results.Ok(await d.JobsAsync(all == true, column, ct))));
 
+        app.MapGet("/capabilities", (Daemon d) => Results.Ok(new LocalCapabilities(d.Capabilities, d.Capabilities.Summary())));
+
         app.MapGet("/jobs/{id}", (Daemon d, string id, CancellationToken ct) => Handle(async () => Results.Ok(await d.JobAsync(id, ct))));
 
         app.MapPost("/jobs", (Daemon d, LocalJobPost request, CancellationToken ct) => Handle(async () =>
         {
             RequireAgent(request.Agent);
             return Results.Ok(await d.PostJobAsync(request.Agent, request.Title ?? throw new ArgumentException("a job needs a title"), request.Description,
-                request.Role, request.Backlog, ct));
+                request.Requirements, request.Backlog, ct));
         }));
 
         app.MapPost("/jobs/{id}/{verb}", (Daemon d, string id, string verb, LocalJobAction request, CancellationToken ct) => Handle(async () =>
@@ -322,15 +324,9 @@ public static class LocalApiEndpoints
     /// </summary>
     private static async Task StreamAsync(HttpContext http, Daemon d, string agent, IOptionsMonitor<DaemonOptions> options)
     {
-        IReadOnlyList<string> roles;
         try
         {
             RequireAgent(agent);
-            roles = http.Request.Query["roles"].ToString() is { Length: > 0 } text ? text.Split(',') : [];
-            if (roles.Count > Limits.MaxRoles || roles.Any(r => !Limits.IsValidAgent(r)))
-            {
-                throw new ArgumentException($"at most {Limits.MaxRoles} roles, each {Limits.AgentRule}");
-            }
         }
         catch (ArgumentException e)
         {
@@ -348,7 +344,7 @@ public static class LocalApiEndpoints
         using var done = CancellationTokenSource.CreateLinkedTokenSource(http.RequestAborted, session.Ended);
         try
         {
-            await d.SetAgentStateAsync(agent, AgentState.Online, roles);
+            await d.SetAgentStateAsync(agent, AgentState.Online);
             http.Response.ContentType = "text/event-stream";
             http.Response.Headers.CacheControl = "no-cache";
             await WriteAsync(http, new LocalEvent(LocalEventKinds.Registered), done.Token);
@@ -403,7 +399,7 @@ public static class LocalApiEndpoints
     private static List<LocalAgentInfo> Agents(Daemon d) =>
         [.. d.Store.GetAgents().Select(e => new LocalAgentInfo(e.Name,
             e.RetiredOn is not null ? "retired" : d.Sessions.IsOnline(e.Name) ? "online" : WireProtocol.NameOf(e.State == AgentState.Online
-                ? AgentState.TimedOut : e.State), e.ChangedOn, e.RetiredOn, e.Roles))];
+                ? AgentState.TimedOut : e.State), e.ChangedOn, e.RetiredOn))];
 
     private static void RequireAgent(string? agent)
     {

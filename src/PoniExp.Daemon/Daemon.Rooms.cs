@@ -325,7 +325,7 @@ public sealed partial class Daemon
         }
     }
 
-    /// <summary>Plain addresses (roles and groups resolved) as <c>machineId/agent</c>.</summary>
+    /// <summary>Plain addresses (groups resolved) as <c>machineId/agent</c>.</summary>
     private async Task<IReadOnlyList<string>> InviteeIdsAsync(IReadOnlyCollection<string> addresses, string from, CancellationToken cancellationToken)
     {
         if (addresses.Count == 0)

@@ -37,12 +37,13 @@ only has to build on the ones before it; a protection that arrives in a later ph
   file receipts; release; limits with per-machine overrides; the message queue's own cap; `send/reply
   --attach`, `fetch`, `release`, `blobs`, `cancel`, `listen --auto-fetch`; MCP `attach`, `fetch`, `release`;
   `admin blobs`. Protocol 5.
-- **Rooms, roles, groups (phase 7):** roles in announcements (`role:x`, `role:x/all`), owner groups
+- **Rooms and groups (phase 7):** owner groups
   (`group:x`, `admin group`), named rooms with a signed invite/join/leave log on the router,
   envelopes sealed for exactly the members' machines, collapse when empty or idle, statistics
   afterwards (`admin rooms`). Endpoints are called agents. Protocol 6.
 - **Job board (phase 8):** an open forum on the router: signed job actions, columns from backlog to
-  done / failed, leases renewed by the claimant's daemon, `job-ready` events by role, retention,
+  done / failed, leases renewed by the claimant's daemon, requirements matched against each machine's detected
+  capabilities, `job-ready` events to machines that qualify, retention,
   backups and re-posting by posters' daemons. Protocol 7.
 - **Executables:**
   - `poniexp` (`src/PoniExp.Server`), with the subcommands `router` and `admin`.
@@ -72,10 +73,11 @@ only has to build on the ones before it; a protection that arrives in a later ph
 | Doing a request once | A retry is a message with the same `operationId` from the same sender agent. The recipient's daemon handles it, and the agent never sees a duplicate. While the first is still running (no `done` or `failed` reply yet), the daemon answers with a `progress` reply, "still running". Once it's finished, it re-sends a copy of the final reply. `operationId` defaults to the message id, so only deliberate retries are deduplicated. The record is kept for the maximum expiry plus skew. |
 | Log export | `poniexp-client log --export` writes metadata only; `--bodies` decrypts bodies into it (they are then on disk in the clear). |
 | Traffic log | Off by default (`poniexp admin traffic-log on`), kept 30 days. Besides what the server can see about each message (time, sender and recipient machine, id, size, sequence), it records the event (relayed, delivered, confirmed, expired, refused) and refusals with their reason (bad signature, limits, join requests), so delays and attacks show. |
-| Roles | Self-declared per agent, carried in the signed agent announcements (phase 7). Labels for addressing only: permissions are per machine (phase 9). |
+| Roles | Removed. Agents carry no roles; addressing is by `machine/agent`, groups and rooms, and jobs match machines by requirements. |
+| Capabilities and requirements | Each daemon detects what its machine has (OS, version, architecture, CPU, cores, memory, GPUs and their memory, plus tags from its settings) and reports it to the router on each connect. A job lists requirements (`key op value`: `=`, `!=`, `>=`, `<=`, `~`), all of which a machine must meet to claim it; minimums and maximums both, so `memory<=8` keeps a low-end test off a big machine. The router enforces them on the claim, against what the machine reported. |
 | Permission level | Machines only. No per-agent keys or permissions: an agent is a name any local process may use, so separating agents takes separate machines (or containers, each its own machine). |
 | Naming | What was called an endpoint is an **agent**: addresses are `machine/agent`, flags `--agent`, the automatic announcement type `agent`. Agent names are labels, not identities. |
-| Job board | An open forum for every approved machine: jobs are in the clear on the router (signed changes, approved machines only) so a dashboard can show them. Any agent posts and comments; an agent matching the job's role claims it under a lease its daemon renews, and moves it through backlog, ready, claimed, running, done / failed. Live jobs are in `admin backup`, and posters' daemons re-post their open jobs. GitHub issues stay outside PoniExp. |
+| Job board | An open forum for every approved machine: jobs are in the clear on the router (signed changes, approved machines only) so a dashboard can show them. Any agent posts and comments; an agent on a machine meeting the job's requirements claims it under a lease its daemon renews, and moves it through backlog, ready, claimed, running, done / failed. Live jobs are in `admin backup`, and posters' daemons re-post their open jobs. GitHub issues stay outside PoniExp. |
 | Web interface | Its own workshop phase (12), after owner admin, before the Hermes bridge. |
 | Rooms | Named (unique on the router while live), created by any agent; members invite, invitees accept, members leave; no admins, no removals. Membership is a log of signed events the router keeps and orders and can see (agents included); each message's key is wrapped for exactly the current members' machines, checked by the router. A room collapses when empty or idle (`RoomIdleExpiry`); the router then keeps only stats, per machine (no subjects, bodies or sending agents). |
 | Groups | Owner-defined lists of addresses on the router (`admin group`), resolved by the sender's daemon into separate messages. |
@@ -522,28 +524,17 @@ database.
   and the local copy surviving acknowledgement and being deleted only after every local agent
   has released it.
 
-## Phase 7: Rooms, roles and groups (workshop, done)
+## Phase 7: Rooms and groups (workshop, done)
 
-Decided in the workshop (see the decisions table): roles are self-declared, groups are the owner's,
-rooms have no shared key.
-
-### Roles
-
-- A role is a tag on an **agent** (`reviewer`, `gpu`), same rules as an agent name. An agent
-  declares its roles when it registers (`mcp --agent claude --role reviewer`,
-  `listen --role ...`). They're kept in the agent registry and travel in the daemon's signed
-  agent announcement, so the router can't invent or hide a holder. Phase 9 may restrict who can
-  claim which role.
-- **Addressing:** `role:reviewer` is any one holder: the sender's daemon picks an online one (at
-  random), otherwise the one seen most recently, and sends it an ordinary message. `role:reviewer/all`
-  is every holder: one separate message each. Neither is anything new to the router.
+Decided in the workshop (see the decisions table): groups are the owner's, rooms have no shared key.
+Roles were built here and later removed (jobs match machines by requirements, phase 8).
 
 ### Groups
 
-- A named list of addresses (`machine/agent` or `role:...`), set by the owner:
+- A named list of `machine/agent` addresses, set by the owner:
   `poniexp admin group set <name> <address>...`, `group remove`, `groups`. Kept in `router.db`.
-- `group:<name>` is resolved by the sender's daemon into separate messages, one per member (roles
-  expanded as above). A group isn't a room: its members don't see each other.
+- `group:<name>` is resolved by the sender's daemon into separate messages, one per member. A group
+  isn't a room: its members don't see each other.
 - The router serves the lists, so a compromised router could point a group at another approved
   machine (it still can't read what it relays). Owner-signed lists can come with phase 9.
 
@@ -593,7 +584,7 @@ Revised after review (the first build used admins and versioned snapshots; that 
   - each message's timestamp and size.
 
   No subjects or bodies: the router never has them. `poniexp admin rooms [--collapsed]` shows them.
-- **CLI / MCP:** `room create <name>`, `room invite <room> <address>...` (roles and groups resolved
+- **CLI / MCP:** `room create <name>`, `room invite <room> <address>...` (groups resolved
   when invited), `room join <room>` (accept), `room leave <room>`, `room list`, `room invites`,
   `room read`, `room send`. MCP `rooms`, `room_invites`, `room_join`, `room_leave`, `room_invite`,
   `room` (read), `room_send`, `room_create`.
@@ -619,19 +610,20 @@ an agent that matches picks it up when it has capacity and moves it through the 
   holds jobs in the clear (over TLS, reachable only by approved machines) and can show them on a
   dashboard (phase 12). Every change is signed by the machine that makes it and names its agent; the
   router checks the signature and the rules. Secrets don't belong on the board: send them as messages.
-- **A job:** id, title, description (markdown), optional role, poster, column, claimant, lease, a
+- **A job:** id, title, description (markdown), requirements, poster, column, claimant, lease, a
   result note, and a history of moves and comments, each with when and by whom.
 - **Columns:** `backlog` → `ready` → `claimed` → `running` → `done` / `failed`.
   - Any agent moves a job between `backlog` and `ready`, and comments on any job.
-  - **Claim:** a `ready` job, by one agent at a time; if the job names a role, only an agent declaring
-    it (phase 7 labels) may claim.
+  - **Claim:** a `ready` job, by one agent at a time, on a machine that meets all the job's
+    requirements (checked by the router against what that machine reported).
   - **Lease:** the claimant's daemon renews it while the agent is online (`JobLease`, default 2
     minutes); when it runs out, the job goes back to `ready` and the history says so.
   - The claimant moves it to `running`, then `done` or `failed` with a result note, or releases it
     back to `ready`.
   - The poster can cancel an unfinished job: `failed`, "cancelled by the poster".
-- **Finding work:** when a job becomes `ready`, online agents declaring its role (every agent, for a
-  job with no role) get a `job-ready` event on their stream. They claim when free, or browse the board.
+- **Finding work:** when a job becomes `ready`, online agents on machines that meet its requirements
+  get a `job-ready` event on their stream. They claim when free, or browse the board (`job list` shows
+  what this machine lacks for each job).
 - **Results:** the result note is on the job, for everyone. Files and anything private go to the
   poster as an ordinary encrypted reply (`replyTo` the job's id is not used: jobs aren't messages).
 - **Retention:** finished jobs stay on the router for `JobRetention` (90 days), then are dropped.
@@ -641,15 +633,21 @@ an agent that matches picks it up when it has capacity and moves it through the 
 - **CLI / MCP:** `job post|list|show|claim|move|release|comment|cancel`; MCP `jobs`, `job`,
   `job_post`, `job_claim`, `job_move`, `job_release`, `job_comment`, `job_cancel`; `admin jobs [--all]` on the
   router. Approved machines read the board over the hub (`GetJobs`); phase 12 adds the web view.
-- **Roles are checked by the claimant's daemon:** the router doesn't know agents' roles (they're
-  self-declared labels in machine-to-machine announcements), so a claim's role check is a courtesy,
-  not a permission; permissions are per machine (phase 9).
-- **Limits:** title 200 characters, description 64 KB, comment 16 KB, 1000 live jobs per machine
-  (settings).
+- **Capabilities:** each daemon detects its machine (OS, version, architecture, CPU model, logical
+  cores, memory as the runtime sees it, so a container's limit counts; GPUs and their memory from
+  `nvidia-smi`, else the OS's display adapters) and adds tags from `Daemon:CapabilityTags`. It reports
+  them to the router on each connect; `machines`, `capabilities` and `admin list` show them.
+- **Requirements:** `key op value`, all must hold. Keys: os, os-version, arch, cpu, cores, memory,
+  gpu, gpu-memory, gpus, tag. Ops: `=`, `!=`, `>=`, `<=` (numbers), `~` (contains). `memory>=2` with
+  `memory<=8` targets small machines. The router checks a claim against what the claiming machine
+  reported (its own word); the daemon checks first for a clearer message.
+- **The owner removes a job** with `admin job remove <id>` (spam, or a poster that's gone).
 
 **Done when:** tests show:
 - a job posted on one machine is seen and claimed on another;
-- a second claim is refused, and a claim without the job's role is refused;
+- a second claim is refused, and a claim from a machine not meeting the requirements is refused,
+  by the router too;
+- requirements match minimums, maximums, text and cards;
 - a lease that isn't renewed returns the job to `ready`;
 - only the claimant moves a claimed job on, and only the poster cancels;
 - a forged or altered change is refused;
@@ -661,8 +659,8 @@ an agent that matches picks it up when it has capacity and moves it through the 
 
 - Deny by default, Cotal-style: which machines may send to which machines, and which may post or
   claim which jobs. **Permissions are per machine only.** Agents have no keys, and any local
-  process can use any agent name (local processes are trusted), so a rule about agents or
-  roles couldn't be enforced. Agent names and roles stay labels for addressing, logs and stats.
+  process can use any agent name (local processes are trusted), so a rule about agents
+  couldn't be enforced. Agent names stay labels for addressing, logs and stats.
 - **Approval cards** are part of the permission logic: a request outside the rules is held, and a
   card goes to wherever you're active, approved with Touch ID using the owner key.
 - This phase introduces the owner identity.

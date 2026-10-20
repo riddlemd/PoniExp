@@ -4,34 +4,9 @@ using PoniExp.Core.Protocol;
 
 namespace PoniExp.Tests;
 
-/// <summary>Phase 7: roles, groups and rooms.</summary>
+/// <summary>Phase 7: groups and rooms.</summary>
 public class RoomTests
 {
-    // ---- roles ----
-
-    [Fact]
-    public async Task ARoleReachesAnyOneOnlineHolderOrEveryHolder()
-    {
-        await using var router = await RouterFixture.StartAsync();
-        await using var ise = await DaemonFixture.StartAsync(router, "ise");
-        await using var wojtek = await DaemonFixture.StartAsync(router, "wojtek");
-        await using var blinky = await DaemonFixture.StartAsync(router, "blinky");
-        await using var online = new AgentConnection(wojtek.Api, "rev", _ => Task.CompletedTask, roles: ["reviewer", "gpu"]);
-        await online.Registered.WaitAsync(TimeSpan.FromSeconds(10));
-        await RegisterAndLeaveAsync(blinky, "rev2", ["reviewer"]); // a holder, but offline
-        await RouterFixture.EventuallyAsync(async () => (await ise.Api.MachinesAsync()).SelectMany(m => m.Agents)
-            .Count(e => e.Roles?.Contains("reviewer") == true) == 2);
-        await RouterFixture.EventuallyAsync(async () => (await ise.Api.MachinesAsync()).SelectMany(m => m.Agents) // and has heard rev2 left
-            .Any(e => e.Name == "rev2" && e.State != "online"));
-
-        var one = Assert.Single(await ise.Api.SendAsync(new LocalSendRequest("ops", ["role:reviewer"], "review this")));
-        Assert.Equal("wojtek/rev", one.To); // the online one
-        var all = await ise.Api.SendAsync(new LocalSendRequest("ops", ["role:reviewer/all"], "everyone review"));
-        Assert.Equal(["blinky/rev2", "wojtek/rev"], all.Select(s => s.To).Order());
-        var missing = await Assert.ThrowsAsync<LocalApiException>(() => ise.Api.SendAsync(new LocalSendRequest("ops", ["role:nobody"], "?")));
-        Assert.Contains("no agent declares the role 'nobody'", missing.Message);
-    }
-
     // ---- groups ----
 
     [Fact]
@@ -42,11 +17,11 @@ public class RoomTests
         await using var wojtek = await DaemonFixture.StartAsync(router, "wojtek");
         await using var blinky = await DaemonFixture.StartAsync(router, "blinky");
         await RegisterAndLeaveAsync(wojtek, "agent");
-        await RegisterAndLeaveAsync(blinky, "bot", ["gpu"]);
-        await RouterFixture.EventuallyAsync(async () => (await ise.Api.MachinesAsync()).SelectMany(m => m.Agents).Any(e => e.Roles?.Contains("gpu") == true));
-        router.Admin.SetGroup("team", ["wojtek/agent", "role:gpu/all"]);
+        await RegisterAndLeaveAsync(blinky, "bot");
+        router.Admin.SetGroup("team", ["wojtek/agent", "blinky/bot"]);
         Assert.Throws<PoniExp.Server.RouterException>(() => router.Admin.SetGroup("nested", ["group:team"]));
         Assert.Throws<PoniExp.Server.RouterException>(() => router.Admin.SetGroup("ghost", ["nobody/agent"]));
+        Assert.Throws<PoniExp.Server.RouterException>(() => router.Admin.SetGroup("old", ["role:gpu/all"])); // roles are gone
 
         var sent = await ise.Api.SendAsync(new LocalSendRequest("ops", ["group:team"], "standup in 5"));
 
@@ -282,9 +257,9 @@ public class RoomTests
         return room;
     }
 
-    private static async Task RegisterAndLeaveAsync(DaemonFixture daemon, string agent, IReadOnlyList<string>? roles = null)
+    private static async Task RegisterAndLeaveAsync(DaemonFixture daemon, string agent)
     {
-        await using var connection = new AgentConnection(daemon.Api, agent, _ => Task.CompletedTask, roles: roles);
+        await using var connection = new AgentConnection(daemon.Api, agent, _ => Task.CompletedTask);
         await connection.Registered.WaitAsync(TimeSpan.FromSeconds(10));
     }
 }

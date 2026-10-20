@@ -13,7 +13,8 @@ public sealed record MachineRecord(
     MembershipStatus Status,
     DateTimeOffset RequestedOn,
     DateTimeOffset? DecidedOn = null,
-    DateTimeOffset? LastSeenOn = null)
+    DateTimeOffset? LastSeenOn = null,
+    MachineCapabilities? Capabilities = null)
 {
     public string JoinCode => KeyFingerprint.JoinCodeOf(PublicKey);
 }

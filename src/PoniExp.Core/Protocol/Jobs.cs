@@ -32,8 +32,8 @@ public enum JobActionKind
 /// fingerprint is the machine id in <see cref="Actor"/>, <c>machineId/agent</c>). <see cref="Text"/> is the description
 /// (post), the result note (move to done or failed) or the comment.
 /// </summary>
-public sealed record JobAction(Guid ActionId, Guid JobId, JobActionKind Kind, string Actor, JobColumn? Column, string? Title, string? Text, string? Role,
-    DateTimeOffset OccurredOn, string ActorKey, string Signature);
+public sealed record JobAction(Guid ActionId, Guid JobId, JobActionKind Kind, string Actor, JobColumn? Column, string? Title, string? Text,
+    IReadOnlyList<JobRequirement>? Requirements, DateTimeOffset OccurredOn, string ActorKey, string Signature);
 
 /// <summary>One line in a job's history: who did what, when. Router entries (a lease running out) have actor <c>router</c>.</summary>
 public sealed record JobEntry(DateTimeOffset OccurredOn, string Actor, string What, JobColumn? Column = null, string? Text = null);
@@ -42,7 +42,7 @@ public sealed record JobEntry(DateTimeOffset OccurredOn, string Actor, string Wh
 /// A job as the router keeps it: in the clear (the board is an open forum for approved machines). Poster and claimant are
 /// <c>machineId/agent</c>.
 /// </summary>
-public sealed record Job(Guid Id, string Title, string Description, string? Role, string Poster, JobColumn Column, string? Claimant,
+public sealed record Job(Guid Id, string Title, string Description, IReadOnlyList<JobRequirement> Requirements, string Poster, JobColumn Column, string? Claimant,
     DateTimeOffset? LeaseExpiresOn, string? Result, DateTimeOffset PostedOn, DateTimeOffset UpdatedOn, IReadOnlyList<JobEntry> History)
 {
     public bool IsFinished => Column is JobColumn.Done or JobColumn.Failed;
@@ -76,7 +76,8 @@ public static class JobRules
     /// <summary>The job after <paramref name="a"/>, or why it isn't allowed.</summary>
     /// <param name="current">The job, or null for a post.</param>
     /// <param name="lease">How long a claim lasts unless renewed.</param>
-    public static Job Apply(Job? current, JobAction a, DateTimeOffset now, TimeSpan lease)
+    /// <param name="claimant">What the acting machine reported it has (checked against a claimed job's requirements).</param>
+    public static Job Apply(Job? current, JobAction a, DateTimeOffset now, TimeSpan lease, MachineCapabilities? claimant = null)
     {
         static JobRuleException No(string why) => new(why);
         if (System.Text.Encoding.UTF8.GetByteCount(a.Text ?? "") > (a.Kind == JobActionKind.Post ? MaxDescriptionBytes : MaxTextBytes))
@@ -96,9 +97,22 @@ public static class JobRules
                 throw No($"a job needs a title of 1-{MaxTitleLength} characters, on one line");
             }
 
-            if (a.Role is { } role && !Limits.IsValidAgent(role))
+            if (a.Requirements is { Count: > JobRequirement.MaxPerJob })
             {
-                throw No($"a role is {Limits.AgentRule}");
+                throw No($"a job has at most {JobRequirement.MaxPerJob} requirements");
+            }
+
+            var requirements = new List<JobRequirement>();
+            foreach (var requirement in a.Requirements ?? [])
+            {
+                try
+                {
+                    requirements.Add(JobRequirement.Parse(requirement.ToString()));
+                }
+                catch (FormatException e)
+                {
+                    throw No(e.Message);
+                }
             }
 
             if (a.Column is not (null or JobColumn.Backlog or JobColumn.Ready))
@@ -107,7 +121,7 @@ public static class JobRules
             }
 
             var column = a.Column ?? JobColumn.Ready;
-            return new Job(a.JobId, title, a.Text ?? "", a.Role, a.Actor, column, null, null, null, now, now,
+            return new Job(a.JobId, title, a.Text ?? "", requirements, a.Actor, column, null, null, null, now, now,
                 [new JobEntry(a.OccurredOn, a.Actor, "posted", column)]);
         }
 
@@ -144,6 +158,12 @@ public static class JobRules
 
                 return job with { UpdatedOn = now, History = [.. job.History, new JobEntry(a.OccurredOn, a.Actor, "commented", null, a.Text)] };
             case JobActionKind.Claim:
+                if (job.Column == JobColumn.Ready && JobRequirement.Unmet(job.Requirements, claimant) is { Count: > 0 } unmet)
+                {
+                    throw No(claimant is null ? "this machine hasn't reported what it has, so it meets no requirements"
+                        : $"this machine doesn't meet {string.Join(", ", unmet)}");
+                }
+
                 return job.Column == JobColumn.Ready ? Next(JobColumn.Claimed, "claimed", a.Actor, now + lease)
                     : throw No(job.Claimant is { } c ? $"the job is already claimed by {c}" : $"only a ready job can be claimed (it's {WireProtocol.NameOf(job.Column)})");
             case JobActionKind.Release:

@@ -14,6 +14,7 @@ namespace PoniExp.Server.Jobs;
 public sealed class JobBoard
 {
     private readonly RouterStore _store;
+    private readonly MachineRegistry _machines;
     private readonly IHubContext<RelayHub> _hub;
     private readonly IOptionsMonitor<RouterOptions> _options;
     private readonly TimeProvider _time;
@@ -21,10 +22,12 @@ public sealed class JobBoard
     private readonly Lock _lock = new();
     private readonly Dictionary<Guid, Job> _jobs;
 
-    public JobBoard(RouterStore store, IHubContext<RelayHub> hub, IOptionsMonitor<RouterOptions> options, TimeProvider time, ILogger<JobBoard> logger)
+    public JobBoard(RouterStore store, MachineRegistry machines, IHubContext<RelayHub> hub, IOptionsMonitor<RouterOptions> options, TimeProvider time,
+        ILogger<JobBoard> logger)
     {
-        (_store, _hub, _options, _time, _logger) = (store, hub, options, time, logger);
-        _jobs = store.LoadJobs().ToDictionary(j => j.Id);
+        (_store, _machines, _hub, _options, _time, _logger) = (store, machines, hub, options, time, logger);
+        // Rows written before a field existed load with it null: fill in its empty value.
+        _jobs = store.LoadJobs().Select(j => j with { Requirements = j.Requirements ?? [], History = j.History ?? [] }).ToDictionary(j => j.Id);
     }
 
     /// <summary>Applies a signed action by the caller's machine.</summary>
@@ -64,7 +67,7 @@ public sealed class JobBoard
 
             try
             {
-                job = JobRules.Apply(current, a, now, _options.CurrentValue.JobLease);
+                job = JobRules.Apply(current, a, now, _options.CurrentValue.JobLease, _machines.Get(caller)?.Capabilities);
             }
             catch (JobRuleException e)
             {
@@ -145,6 +148,25 @@ public sealed class JobBoard
         {
             await PushAsync(change);
         }
+    }
+
+    /// <summary>The owner takes a job off the board (<c>poniexp admin job remove</c>): spam, or a poster that's gone.</summary>
+    public async Task<Job> RemoveAsync(Guid id)
+    {
+        Job job;
+        lock (_lock)
+        {
+            if (!_jobs.Remove(id, out job!))
+            {
+                throw new RouterException("No such job.", RouterErrorKind.NotFound);
+            }
+
+            _store.DeleteJob(id);
+        }
+
+        _logger.LogInformation("Job {Id} ({Title}) removed by the owner", id.ToString()[..8], job.Title);
+        await PushAsync(new JobChange(job, false, Removed: true));
+        return job;
     }
 
     /// <summary>Puts back the live jobs from a backup (ones the board already has are kept as they are).</summary>

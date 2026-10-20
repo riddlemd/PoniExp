@@ -36,22 +36,60 @@ public class JobTests
     }
 
     [Fact]
-    public async Task OneClaimantAtATimeAndARoleJobOnlyForItsHolders()
+    public async Task OneClaimantAtATimeAndOnlyAMachineMeetingTheRequirements()
     {
         await using var router = await RouterFixture.StartAsync();
         await using var ise = await DaemonFixture.StartAsync(router, "ise");
         await using var wojtek = await DaemonFixture.StartAsync(router, "wojtek");
-        await using var blinky = await DaemonFixture.StartAsync(router, "blinky");
-        await RegisterAndLeaveAsync(wojtek, "plain");
-        await RegisterAndLeaveAsync(blinky, "trainer", ["gpu"]);
-        await RegisterAndLeaveAsync(wojtek, "trainer2", ["gpu"]);
-        var job = await ise.Api.PostJobAsync(new LocalJobPost("ops", "Fine-tune the model", Role: "gpu"));
+        await using var blinky = await DaemonFixture.StartAsync(router, "blinky", Tags("gpu-box"));
+        await using var dazzle = await DaemonFixture.StartAsync(router, "dazzle", Tags("gpu-box"));
+        var cores = Environment.ProcessorCount;
+        await RouterFixture.Eventually(() => router.Admin.List().Count(m => m.Capabilities is not null) == 4);
+        var job = await ise.Api.PostJobAsync(new LocalJobPost("ops", "Fine-tune the model", Requirements: ["tag=gpu-box", $"cores>={cores}", "memory>=1"]));
+        Assert.Equal(["tag=gpu-box", $"cores>={cores}", "memory>=1"], job.Requirements);
+        Assert.Equal(["tag=gpu-box"], (await wojtek.Api.JobAsync(job.Id.ToString())).Unmet); // what wojtek lacks
 
-        var noRole = await Assert.ThrowsAsync<LocalApiException>(() => wojtek.Api.JobActionAsync(job.Id.ToString(), "claim", new LocalJobAction("plain")));
-        Assert.Contains("doesn't declare the role 'gpu'", noRole.Message);
+        var lacking = await Assert.ThrowsAsync<LocalApiException>(() => wojtek.Api.JobActionAsync(job.Id.ToString(), "claim", new LocalJobAction("worker")));
+        Assert.Contains("doesn't meet tag=gpu-box", lacking.Message);
         await blinky.Api.JobActionAsync(job.Id.ToString(), "claim", new LocalJobAction("trainer"));
-        var second = await Assert.ThrowsAsync<LocalApiException>(() => wojtek.Api.JobActionAsync(job.Id.ToString(), "claim", new LocalJobAction("trainer2")));
+        var second = await Assert.ThrowsAsync<LocalApiException>(() => dazzle.Api.JobActionAsync(job.Id.ToString(), "claim", new LocalJobAction("trainer")));
         Assert.Contains("already claimed by", second.Message);
+    }
+
+    [Fact]
+    public async Task TheRouterEnforcesRequirementsEvenIfADaemonDoesnt()
+    {
+        await using var router = await RouterFixture.StartAsync();
+        await using var ise = await DaemonFixture.StartAsync(router, "ise");
+        await using var wojtek = await DaemonFixture.StartAsync(router, "wojtek");
+        await RouterFixture.Eventually(() => router.Admin.List().All(m => m.Capabilities is not null));
+        var small = await ise.Api.PostJobAsync(new LocalJobPost("ops", "Test on a small machine", Requirements: ["memory<=1"])); // no test host is this small
+
+        var claim = wojtek.Daemon.Relay.SignJobAction(new JobAction(Guid.NewGuid(), small.Id, JobActionKind.Claim, $"{wojtek.Keys.MachineId}/worker", null,
+            null, null, null, DateTimeOffset.UtcNow, "", ""));
+        var refused = await Assert.ThrowsAsync<InvalidOperationException>(() => wojtek.Daemon.Relay.SubmitJobActionAsync(claim));
+        Assert.Contains("doesn't meet memory<=1", refused.Message);
+        Assert.Contains("lacks memory<=1", (await wojtek.Api.JobsAsync()).Single().Unmet.Select(u => $"lacks {u}").Single());
+    }
+
+    [Fact]
+    public void RequirementsMatchMinimumsMaximumsTextAndCards()
+    {
+        var big = new MachineCapabilities("linux", "6.8", "x64", "AMD Ryzen 9 7950X", 32, 64, [new GpuInfo("NVIDIA GeForce RTX 3090 Ti", 24)], ["cuda"],
+            DateTimeOffset.UtcNow);
+        var small = big with { Cpu = "Intel Celeron N4020", Cores = 2, MemoryGb = 4, Gpus = [], Tags = [] };
+        bool Meets(MachineCapabilities m, params string[] requirements) => JobRequirement.Unmet([.. requirements.Select(JobRequirement.Parse)], m).Count == 0;
+
+        Assert.False(Meets(big, "memory<=8")); // the 64 GB machine doesn't take the low-end job
+        Assert.True(Meets(small, "memory>=2", "memory<=8"));
+        Assert.True(Meets(big, "memory>=64", "os=Linux", "arch=x64", "cpu~ryzen", "cores>=16", "gpu~rtx", "gpu-memory>=16", "gpus=1", "tag=cuda"));
+        Assert.False(Meets(small, "gpu~rtx"));
+        Assert.True(Meets(small, "gpus=0", "tag!=cuda", "cpu!=AMD Ryzen 9 7950X"));
+        Assert.False(Meets(big, "gpu-memory<=8"));
+        Assert.False(JobRequirement.Parse("memory>=1").IsMetBy(null)); // a machine that reported nothing meets nothing
+        Assert.Throws<FormatException>(() => JobRequirement.Parse("ram>=8"));
+        Assert.Throws<FormatException>(() => JobRequirement.Parse("os>=linux"));
+        Assert.Throws<FormatException>(() => JobRequirement.Parse("memory>=lots"));
     }
 
     [Fact]
@@ -130,19 +168,20 @@ public class JobTests
     }
 
     [Fact]
-    public async Task JobReadyReachesOnlyOnlineAgentsThatMayClaimIt()
+    public async Task JobReadyReachesOnlineAgentsOnMachinesThatMayClaimIt()
     {
         await using var router = await RouterFixture.StartAsync();
         await using var ise = await DaemonFixture.StartAsync(router, "ise");
-        await using var wojtek = await DaemonFixture.StartAsync(router, "wojtek");
+        await using var wojtek = await DaemonFixture.StartAsync(router, "wojtek", Tags("gpu-box"));
+        await using var blinky = await DaemonFixture.StartAsync(router, "blinky");
         var gpu = new List<LocalEvent>();
         var plain = new List<LocalEvent>();
-        await using var gpuAgent = new AgentConnection(wojtek.Api, "trainer", e => { lock (gpu) { gpu.Add(e); } return Task.CompletedTask; }, roles: ["gpu"]);
-        await using var plainAgent = new AgentConnection(wojtek.Api, "plain", e => { lock (plain) { plain.Add(e); } return Task.CompletedTask; });
+        await using var gpuAgent = new AgentConnection(wojtek.Api, "trainer", e => { lock (gpu) { gpu.Add(e); } return Task.CompletedTask; });
+        await using var plainAgent = new AgentConnection(blinky.Api, "plain", e => { lock (plain) { plain.Add(e); } return Task.CompletedTask; });
         await gpuAgent.Registered.WaitAsync(TimeSpan.FromSeconds(10));
         await plainAgent.Registered.WaitAsync(TimeSpan.FromSeconds(10));
 
-        await ise.Api.PostJobAsync(new LocalJobPost("ops", "Needs a GPU", Role: "gpu"));
+        await ise.Api.PostJobAsync(new LocalJobPost("ops", "Needs the GPU box", Requirements: ["tag=gpu-box"]));
         await ise.Api.PostJobAsync(new LocalJobPost("ops", "Anyone"));
         await ise.Api.PostJobAsync(new LocalJobPost("ops", "Not yet", Backlog: true));
 
@@ -156,7 +195,7 @@ public class JobTests
 
         await RouterFixture.Eventually(() => Ready(gpu).Length == 2 && Ready(plain).Length == 1);
         await Task.Delay(300);
-        Assert.Equal(["Anyone", "Needs a GPU"], Ready(gpu));
+        Assert.Equal(["Anyone", "Needs the GPU box"], Ready(gpu));
         Assert.Equal(["Anyone"], Ready(plain));
     }
 
@@ -175,6 +214,10 @@ public class JobTests
 
         Assert.Equal([open.Id], (await ise.Api.JobsAsync(all: true)).Select(j => j.Id));
         Assert.Equal([open.Id], router.Admin.Jobs(includeFinished: true).Select(j => j.Id));
+
+        await router.Admin.RemoveJobAsync(open.Id.ToString()[..8]); // the owner takes one off the board
+        Assert.Empty(await ise.Api.JobsAsync(all: true));
+        await RouterFixture.Eventually(() => ise.Store.GetOpenPostedJobs().Count == 0); // and its poster won't re-post it
     }
 
     [Fact]
@@ -185,7 +228,7 @@ public class JobTests
         var port = router.Url.Port;
         await using var ise = await DaemonFixture.StartAsync(router, "ise");
         var first = await ise.Api.PostJobAsync(new LocalJobPost("ops", "First", "details"));
-        var second = await ise.Api.PostJobAsync(new LocalJobPost("ops", "Second", Role: "gpu", Backlog: true));
+        var second = await ise.Api.PostJobAsync(new LocalJobPost("ops", "Second", Requirements: ["memory>=1"], Backlog: true));
         var done = await ise.Api.PostJobAsync(new LocalJobPost("ops", "Done already"));
         await ise.Api.JobActionAsync(done.Id.ToString(), "cancel", new LocalJobAction("ops"));
         var backup = router.Admin.Backup(router.App.Services.GetRequiredService<RouterCertificateInfo>());
@@ -213,14 +256,12 @@ public class JobTests
         await RouterFixture.Eventually(() => back.Admin.Jobs(includeFinished: true).Count == 2);
         var reposted = back.Admin.Jobs(includeFinished: true).OrderBy(j => j.Title).ToList();
         Assert.Equal([first.Id, second.Id], reposted.Select(j => j.Id));
-        Assert.Equal(("details", JobColumn.Backlog, "gpu"), (reposted[0].Description, reposted[1].Column, reposted[1].Role));
+        Assert.Equal(("details", JobColumn.Backlog, "memory>=1"), (reposted[0].Description, reposted[1].Column, reposted[1].Requirements.Single().ToString()));
         Assert.Contains(ise.Store.GetDiagnostics(), d => d.Detail.Contains("re-posted job", StringComparison.Ordinal));
         await router.DisposeAsync();
     }
 
-    private static async Task RegisterAndLeaveAsync(DaemonFixture daemon, string agent, IReadOnlyList<string>? roles = null)
-    {
-        await using var connection = new AgentConnection(daemon.Api, agent, _ => Task.CompletedTask, roles: roles);
-        await connection.Registered.WaitAsync(TimeSpan.FromSeconds(10));
-    }
+    /// <summary>Daemon settings giving the machine capability tags (every test daemon runs on the same hardware).</summary>
+    private static Dictionary<string, string?> Tags(params string[] tags) =>
+        tags.Select((t, i) => (t, i)).ToDictionary(x => $"Daemon:CapabilityTags:{x.i}", x => (string?)x.t);
 }

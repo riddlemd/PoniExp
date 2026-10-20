@@ -23,44 +23,23 @@ public readonly record struct Address(string Machine, string Agent)
 
     public override string ToString() => $"{Machine}/{Agent}";
 
-    public const string RolePrefix = "role:";
     public const string GroupPrefix = "group:";
-    public const string AllSuffix = "/all";
 
-    /// <summary>
-    /// <c>role:name</c> (any one holder), <c>role:name/all</c> (every holder) or <c>group:name</c>; null for a plain address.
-    /// Role and group names follow the agent rules.
-    /// </summary>
+    /// <summary><c>group:name</c> (the owner's list); null for a plain address. Group names follow the agent rules.</summary>
     public static Indirect? ParseIndirect(string text)
     {
-        if (text.StartsWith(RolePrefix, StringComparison.Ordinal))
-        {
-            var rest = text[RolePrefix.Length..];
-            var all = rest.EndsWith(AllSuffix, StringComparison.Ordinal);
-            var role = all ? rest[..^AllSuffix.Length] : rest;
-            return Limits.IsValidAgent(role) ? new Indirect(IndirectKind.Role, role, all)
-                : throw new FormatException($"'{text}': a role is {Limits.AgentRule}");
-        }
-
         if (text.StartsWith(GroupPrefix, StringComparison.Ordinal))
         {
             var group = text[GroupPrefix.Length..];
-            return Limits.IsValidAgent(group) ? new Indirect(IndirectKind.Group, group, true)
-                : throw new FormatException($"'{text}': a group is {Limits.AgentRule}");
+            return Limits.IsValidAgent(group) ? new Indirect(group) : throw new FormatException($"'{text}': a group is {Limits.AgentRule}");
         }
 
         return null;
     }
 }
 
-public enum IndirectKind
+/// <summary>A group address, resolved by the sender's daemon into plain ones.</summary>
+public readonly record struct Indirect(string Name)
 {
-    Role,
-    Group,
-}
-
-/// <summary>A role or group address, resolved by the sender's daemon into plain ones.</summary>
-public readonly record struct Indirect(IndirectKind Kind, string Name, bool All)
-{
-    public override string ToString() => Kind == IndirectKind.Role ? $"{Address.RolePrefix}{Name}{(All ? Address.AllSuffix : "")}" : $"{Address.GroupPrefix}{Name}";
+    public override string ToString() => $"{Address.GroupPrefix}{Name}";
 }

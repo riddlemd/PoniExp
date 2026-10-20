@@ -68,6 +68,7 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
                 Background(() => AnnounceAsync(null));
                 Background(SyncRoomsAsync);
                 Background(SyncJobsAsync);
+                Background(ReportCapabilitiesAsync);
             }
             else
             {
@@ -450,11 +451,11 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
     // ---- the agent registry ----
 
     /// <summary>Records a local agent's new state and announces the agent list to every online machine.</summary>
-    internal async Task SetAgentStateAsync(string name, AgentState state, IReadOnlyList<string>? roles = null)
+    internal async Task SetAgentStateAsync(string name, AgentState state)
     {
         Store.Transact(Now, tx =>
         {
-            tx.SetAgentState(name, state, roles);
+            tx.SetAgentState(name, state);
             if (!Stopping)
             {
                 ComposeAnnouncements(tx, null);
@@ -506,7 +507,7 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
         var announcement = new AgentAnnouncement(tx.NextCounter(AnnouncementCounter), [.. tx.GetAgents()
             .Where(e => e.RetiredOn is null)
             .Select(e => new AnnouncedAgent(e.Name, _sessions.IsOnline(e.Name) ? AgentState.Online : e.State == AgentState.Online
-                ? AgentState.TimedOut : e.State, e.ChangedOn, e.Roles is { Count: > 0 } r ? r : null))]);
+                ? AgentState.TimedOut : e.State, e.ChangedOn))]);
         var body = JsonSerializer.Serialize(announcement, WireProtocol.Json);
         foreach (var machine in targets)
         {

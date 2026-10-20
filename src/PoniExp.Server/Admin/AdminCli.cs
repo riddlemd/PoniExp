@@ -89,10 +89,14 @@ public static class AdminCli
                     }
 
                     return 0;
+                case ["job", "remove", var jobId]:
+                    var gone = await ReadAsync<Job>(await http.PostAsync($"admin/jobs/{Uri.EscapeDataString(jobId)}/remove", null), output);
+                    output.WriteLine(gone is null ? "" : $"removed job {gone.Id.ToString()[..8]} ({gone.Title})");
+                    return gone is null ? 1 : 0;
                 case ["jobs", .. var jobArgs]:
                     var board = await http.GetFromJsonAsync<List<Job>>("admin/jobs" + (jobArgs.Contains("--all") ? "?all=true" : ""), Json) ?? [];
                     output.WriteLine(board.Count == 0 ? "the board is empty" : string.Join("\n", board.Select(j =>
-                        $"{j.Id.ToString()[..8]}  {WireProtocol.NameOf(j.Column),-8} {j.Title}" + (j.Role is { } role ? $"  [role:{role}]" : "") +
+                        $"{j.Id.ToString()[..8]}  {WireProtocol.NameOf(j.Column),-8} {j.Title}" + (j.Requirements.Count > 0 ? $"  [{string.Join(", ", j.Requirements)}]" : "") +
                         $"\n    posted by {j.Poster} {j.PostedOn.ToLocalTime():yyyy-MM-dd HH:mm}" + (j.Claimant is { } who ? $", claimed by {who}" : ""))));
                     return 0;
                 case ["rooms"]:
@@ -193,8 +197,8 @@ public static class AdminCli
                 default:
                     output.WriteLine("usage: poniexp admin [list | approve <id|name> | reject <id|name> | remove <id|name> | clear-pending | certificate\n" +
                                      "                      | backup <path|-> | restore <path|-> | blobs [clear --for <machine>]\n" +
-                                     "                      | rooms [--collapsed [--since <time>]] | jobs [--all]\n" +
-                                     "                      | groups | group set <name> <machine/agent|role:x[/all]>... | group remove <name>\n" +
+                                     "                      | rooms [--collapsed [--since <time>]] | jobs [--all] | job remove <id>\n" +
+                                     "                      | groups | group set <name> <machine/agent>... | group remove <name>\n" +
                                      "                      | traffic-log [on | off | status | show [--since 2h|date] [--machine name] [--limit n] [--json]]] [--url URL]");
                     return 2;
             }
@@ -264,7 +268,8 @@ public static class AdminCli
             var online = m.Status == MembershipStatus.Approved ? (m.Online ? "yes" : "no") : "-";
             output.WriteLine($"{m.Status,-9} {m.Name,-16} {m.Id[..8],-10} {m.JoinCode,-30} {online,-7} " +
                              $"{m.Description.HostName}: {m.Description.OperatingSystem} {m.Description.Architecture}" +
-                             (string.IsNullOrEmpty(m.Description.Notes) ? string.Empty : $" ({m.Description.Notes})"));
+                             (string.IsNullOrEmpty(m.Description.Notes) ? string.Empty : $" ({m.Description.Notes})") +
+                             (m.Capabilities is { } c ? $"\n          {c.Summary()}" : ""));
         }
     }
 

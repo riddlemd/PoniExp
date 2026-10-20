@@ -27,7 +27,7 @@ const string Usage = """
     Messaging (through the daemon)
       status                               this machine, its agents, and message metrics
       machines                             the other machines and their agents
-      send --to <machine[/agent] | role:<r>[/all] | group:<g>> [--to ...] [options] <body|->
+      send --to <machine[/agent] | group:<g> | room:<name>> [--to ...] [options] <body|->
                                            one separate message per --to
           --from <agent>        sending agent (default: "default")
           --subject <text>         a title for conversation lists
@@ -58,13 +58,15 @@ const string Usage = """
           --bodies                 decrypt bodies into the output (they're then in the clear)
       job list [--all] [--column <c>]        the job board (open to every approved machine)
       job show <id>
-      job post <title> --as <agent> [--description <text|->] [--role <role>] [--backlog]
+      job post <title> --as <agent> [--description <text|->] [--require <key op value>]... [--backlog]
+                                           e.g. --require os=linux --require memory>=4 --require memory<=8 --require gpu~rtx
+      capabilities                         what this machine has (job requirements are checked against it)
       job claim|release|cancel <id> --as <agent>
       job move <id> <backlog|ready|running|done|failed> --as <agent> [--note <result>]
       job comment <id> --as <agent> <text>
       room list [--agent <name>]          rooms an agent here is in, was in, or is invited to
       room create <name> --as <agent> [--invite <address>]...
-      room invite <room> --as <agent> <address>...   (roles and groups are resolved now)
+      room invite <room> --as <agent> <address>...   (groups are resolved now)
       room invites [--agent <name>]       open invitations
       room join|leave <room> --as <agent>
       room read <room> --as <agent> [--since <time>] [--json]
@@ -73,8 +75,7 @@ const string Usage = """
       agent list | agent retire <name>
                                            the agent registry; a retired agent's messages are rejected
       diagnostics                          recent connection, signature and delivery problems
-      mcp --agent <name> [--role <r>]...
-                                           an MCP server (stdio) for an agent, as that agent, declaring its roles
+      mcp --agent <name>                   an MCP server (stdio) for an agent, as that agent
 
     "-" as a body reads stdin. Settings: <home>/settings.json, e.g.
       { "Messaging": { "DefaultExpiry": "1.00:00:00" }, "Daemon": { "AgentTimeout": "00:01:00" } }
@@ -105,8 +106,7 @@ try
         ["reply", var id, .. var rest] => await ReplyAsync(Guid.Parse(id), rest),
         ["message", var id, .. var rest] => await MessageAsync(AgentOf(rest), Guid.Parse(id)),
         ["conversation", var id, .. var rest] => await ConversationAsync(AgentOf(rest), Guid.Parse(id), rest.Contains("--json")),
-        ["listen", .. var rest] => await ListenAsync(AgentOf(rest), rest.Contains("--json"), rest.Contains("--ack"), rest.Contains("--auto-fetch"),
-            Options(rest, "--role")),
+        ["listen", .. var rest] => await ListenAsync(AgentOf(rest), rest.Contains("--json"), rest.Contains("--ack"), rest.Contains("--auto-fetch")),
         ["fetch", var id, .. var rest] => await FetchAsync(AgentOf(rest), Guid.Parse(id), Option(rest, "--blob") is { } b ? Guid.Parse(b) : null),
         ["release", var id, .. var rest] => await ReleaseAsync(AgentOf(rest), Guid.Parse(id), Option(rest, "--blob") is { } b ? Guid.Parse(b) : null),
         ["blobs"] => await BlobsAsync(),
@@ -118,7 +118,8 @@ try
         ["agent", "list"] => await AgentsAsync(),
         ["agent", "retire", var name] => await RetireAsync(name),
         ["diagnostics"] => await DiagnosticsAsync(),
-        ["mcp", .. var rest] => await McpAsync(Option(rest, "--agent") ?? throw new ArgumentException("mcp needs --agent <name>"), Options(rest, "--role")),
+        ["mcp", .. var rest] => await McpAsync(Option(rest, "--agent") ?? throw new ArgumentException("mcp needs --agent <name>")),
+        ["capabilities"] => await CapabilitiesAsync(),
         ["service", "install", .. var rest] => await ServiceInstallAsync(rest.Contains("--system") ? ServiceMode.System : ServiceMode.User, rest.Contains("--dry-run")),
         ["service", "uninstall", .. var rest] => await ServiceUninstallAsync(rest.Contains("--system") ? ServiceMode.System : ServiceMode.User, rest.Contains("--dry-run")),
         ["service", "status"] => await ServiceStatusAsync(),
@@ -466,7 +467,7 @@ async Task<int> StatusAsync()
     Console.WriteLine("agents:");
     foreach (var e in s.Agents)
     {
-        Console.WriteLine($"  {e.Name,-20} {e.State,-10} since {e.ChangedOn.ToLocalTime():yyyy-MM-dd HH:mm}{(e.Roles is { Count: > 0 } rs ? $"  roles: {string.Join(", ", rs)}" : "")}");
+        Console.WriteLine($"  {e.Name,-20} {e.State,-10} since {e.ChangedOn.ToLocalTime():yyyy-MM-dd HH:mm}");
     }
 
     var machines = await api.MachinesAsync(cancel.Token);
@@ -490,10 +491,10 @@ async Task<int> MachinesAsync()
     foreach (var m in await api.MachinesAsync(cancel.Token))
     {
         var seen = m.Online ? "online" : m.LastSeenOn is { } on ? $"last seen {on.ToLocalTime():yyyy-MM-dd HH:mm}" : "never seen";
-        Console.WriteLine($"{m.Name,-16} {m.Id[..8]}  {seen,-28} {m.OperatingSystem}");
+        Console.WriteLine($"{m.Name,-16} {m.Id[..8]}  {seen,-28} {m.OperatingSystem}" + (m.Capabilities is { } c ? $"\n  {c.Summary()}" : ""));
         foreach (var e in m.Agents)
         {
-            Console.WriteLine($"  {m.Name}/{e.Name,-20} {e.State}{(e.Roles is { Count: > 0 } rs ? $"  roles: {string.Join(", ", rs)}" : "")}");
+            Console.WriteLine($"  {m.Name}/{e.Name,-20} {e.State}");
         }
     }
 
@@ -633,7 +634,7 @@ async Task<int> ConversationAsync(string agent, Guid id, bool json)
     return 0;
 }
 
-async Task<int> ListenAsync(string agent, bool json, bool ack, bool autoFetch, IReadOnlyList<string> roles)
+async Task<int> ListenAsync(string agent, bool json, bool ack, bool autoFetch)
 {
     using var api = await DaemonAsync2();
     await using var connection = new AgentConnection(api, agent, async e =>
@@ -668,7 +669,7 @@ async Task<int> ListenAsync(string agent, bool json, bool ack, bool autoFetch, I
         else if (e.Kind is LocalEventKinds.JobReady or LocalEventKinds.JobChanged && e.Job is { } job)
         {
             Console.WriteLine(json ? JsonSerializer.Serialize(e, WireProtocol.Json)
-                : e.Kind == LocalEventKinds.JobReady ? $"job ready: {job.Id.ToString()[..8]} {job.Title}" + (job.Role is { } r ? $" [role:{r}]" : "") + $" (job claim {job.Id.ToString()[..8]} --as <agent>)"
+                : e.Kind == LocalEventKinds.JobReady ? $"job ready: {job.Id.ToString()[..8]} {job.Title}" + (job.Requirements.Count > 0 ? $" [{string.Join(", ", job.Requirements)}]" : "") + $" (job claim {job.Id.ToString()[..8]} --as <agent>)"
                 : $"job {job.Id.ToString()[..8]} {job.Title}: " + (job.History.LastOrDefault() is { } h
                     ? $"{h.By} {h.What}" + (h.Text is { Length: > 0 } t && h.What != "posted" ? $": {t}" : "") : job.Column));
         }
@@ -692,7 +693,7 @@ async Task<int> ListenAsync(string agent, bool json, bool ack, bool autoFetch, I
             Console.Error.WriteLine(json ? JsonSerializer.Serialize(r, WireProtocol.Json)
                 : $"* {r.Receipt} by {r.From}: {r.MessageId.ToString()[..8]}{(r.Reason is null ? string.Empty : $" ({r.Reason})")}");
         }
-    }, onError: e => Console.Error.WriteLine($"* {e.Message}; retrying"), roles: roles.Count > 0 ? roles : null);
+    }, onError: e => Console.Error.WriteLine($"* {e.Message}; retrying"));
     await connection.Registered.WaitAsync(TimeSpan.FromSeconds(30), cancel.Token);
     Console.Error.WriteLine($"* listening as {agent}; Ctrl+C to stop");
     try
@@ -774,7 +775,7 @@ async Task<int> JobAsync(string[] rest)
     var positional = new List<string>();
     for (var i = 0; i < rest.Length; i++)
     {
-        if (rest[i] is "--as" or "--description" or "--role" or "--column" or "--note")
+        if (rest[i] is "--as" or "--description" or "--require" or "--column" or "--note")
         {
             i++;
         }
@@ -792,7 +793,8 @@ async Task<int> JobAsync(string[] rest)
             return;
         }
 
-        Console.WriteLine($"{j.Id.ToString()[..8]}  {j.Column,-8} {j.Title}" + (j.Role is { } role ? $"  [role:{role}]" : "") +
+        Console.WriteLine($"{j.Id.ToString()[..8]}  {j.Column,-8} {j.Title}" + (j.Requirements.Count > 0 ? $"  [{string.Join(", ", j.Requirements)}]" : "") +
+                          (j.Unmet.Count > 0 ? $"  (this machine lacks {string.Join(", ", j.Unmet)})" : "") +
                           $"\n    posted by {j.Poster} {j.PostedOn.ToLocalTime():yyyy-MM-dd HH:mm}" + (j.Claimant is { } who ? $", claimed by {who}" : "") +
                           (j.Result is { Length: > 0 } result ? $"\n    result: {result}" : ""));
         if (full)
@@ -826,7 +828,7 @@ async Task<int> JobAsync(string[] rest)
             return 0;
         case ["post", var title]:
             var description = Option(rest, "--description") is "-" ? await Console.In.ReadToEndAsync() : Option(rest, "--description");
-            Show(await api.PostJobAsync(new LocalJobPost(As(), title, description, Option(rest, "--role"), rest.Contains("--backlog")), cancel.Token));
+            Show(await api.PostJobAsync(new LocalJobPost(As(), title, description, Options(rest, "--require"), rest.Contains("--backlog")), cancel.Token));
             return 0;
         case [var verb and ("claim" or "release" or "cancel"), var id]:
             Show(await api.JobActionAsync(id, verb, new LocalJobAction(As(), Text: Option(rest, "--note")), cancel.Token));
@@ -963,7 +965,7 @@ async Task<int> AgentsAsync()
     using var api = await DaemonAsync2();
     foreach (var e in await api.AgentsAsync(cancel.Token))
     {
-        Console.WriteLine($"{e.Name,-20} {e.State,-10} since {e.ChangedOn.ToLocalTime():yyyy-MM-dd HH:mm}{(e.Roles is { Count: > 0 } rs ? $"  roles: {string.Join(", ", rs)}" : "")}");
+        Console.WriteLine($"{e.Name,-20} {e.State,-10} since {e.ChangedOn.ToLocalTime():yyyy-MM-dd HH:mm}");
     }
 
     return 0;
@@ -988,10 +990,20 @@ async Task<int> DiagnosticsAsync()
     return 0;
 }
 
-async Task<int> McpAsync(string agent, IReadOnlyList<string> roles)
+async Task<int> CapabilitiesAsync()
+{
+    using var api = await DaemonAsync2();
+    var c = await api.CapabilitiesAsync(cancel.Token);
+    Console.WriteLine(c.Summary);
+    Console.WriteLine($"  os={c.Capabilities.Os} os-version={c.Capabilities.OsVersion} arch={c.Capabilities.Arch} cores={c.Capabilities.Cores} " +
+                      $"memory={c.Capabilities.MemoryGb:0.#} gpus={c.Capabilities.Gpus.Count}");
+    return 0;
+}
+
+async Task<int> McpAsync(string agent)
 {
     using var api = await LocalApiClient.FindAsync(ClientConfig.HomeDirectory, cancel.Token);
-    await PoniExp.Mcp.McpServer.RunAsync(api, agent, cancel.Token, roles.Count > 0 ? roles : null);
+    await PoniExp.Mcp.McpServer.RunAsync(api, agent, cancel.Token);
     return 0;
 }
 

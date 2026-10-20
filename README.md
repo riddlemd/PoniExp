@@ -101,6 +101,7 @@ docker exec poniexp-server poniexp admin blobs [clear --for <name>]   # files on
 docker exec poniexp-server poniexp admin group set <name> <address>... # groups: groups | group remove <name>
 docker exec poniexp-server poniexp admin rooms [--collapsed]          # live rooms, or collapsed rooms' statistics
 docker exec poniexp-server poniexp admin jobs [--all]                 # the job board (finished jobs too with --all)
+docker exec poniexp-server poniexp admin job remove <id>              # take a job off the board
 docker exec poniexp-server poniexp admin traffic-log on        # record traffic (off by default; kept 30 days)
 docker exec poniexp-server poniexp admin traffic-log show --since 1h [--machine <name>]
 ```
@@ -143,14 +144,11 @@ sender gets a file receipt, `downloaded` or `download-failed` (with why). Call `
 the copy is deleted once every agent that received it has released it. Acknowledging doesn't
 release, and files need the router to be reachable (they don't wait in the outbox).
 
-**Roles and groups.** An agent declares roles when it starts (`mcp --agent claude --role
-reviewer`, `listen --role gpu`); other machines learn them from its daemon's signed announcements.
-Send to `role:reviewer` (any one holder, an online one first) or `role:reviewer/all` (each of
-them). The owner keeps groups on the router (`poniexp admin group set oncall wojtek/agent
-role:gpu/all`); `group:oncall` becomes one separate message per member.
+**Groups.** The owner keeps named lists of agents on the router (`poniexp admin group set oncall
+wojtek/agent ise/claude`); `group:oncall` becomes one separate message per member.
 
 **Rooms.** A room is a named conversation everyone in it sees. Any agent can open one and invite
-others: `room create launch --as ops --invite wojtek/agent --invite role:gpu/all`. Invitees get a
+others: `room create launch --as ops --invite wojtek/agent --invite group:oncall`. Invitees get a
 `room-invite` on their stream and accept with `room join launch --as <agent>` (or ignore it; it
 expires). Members say things with `room send` or `send --to room:launch`, read with `room read`
 (new ones also arrive on the agent's stream), invite more with `room invite`, and `room leave` when
@@ -161,8 +159,11 @@ Rooms have no receipts and no inbox, and don't carry files yet. MCP: `rooms`, `r
 `room_join`, `room_leave`, `room_invite`, `room_create`, `room`, `room_send`.
 
 **The job board.** An open board every approved machine shares, for work any agent can pick up:
-`job post "Rebuild the index" --as ops --description "..." [--role gpu] [--backlog]`. Agents that may
-claim it (holding its role, or all of them) get a `job-ready` event; one claims it when free
+`job post "Rebuild the index" --as ops --description "..." [--require <key op value>]... [--backlog]`.
+Requirements say which machines may claim it, from what each machine's daemon detects (see it with
+`capabilities`): `os=linux`, `arch=x64`, `cpu~ryzen`, `cores>=8`, `memory>=32`, `memory<=8` (to test
+on small machines), `gpu~rtx`, `gpu-memory>=16`, `gpus=0`, `tag=docker` (tags come from the daemon's
+`Daemon:CapabilityTags` setting). Agents on machines that qualify get a `job-ready` event; one claims it when free
 (`job claim <id> --as worker`), moves it to `running`, then `done` or `failed` with `--note <result>`,
 or releases it. A claim lasts while the claimant is connected; if it drops, the job is ready again.
 Anyone can move a job between `backlog` and `ready` or `job comment` on it; the poster can `job

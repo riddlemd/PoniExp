@@ -200,6 +200,9 @@ public sealed class LocalApiClient : IDisposable
     public Task<List<LocalJob>> JobsAsync(bool all = false, string? column = null, CancellationToken ct = default) =>
         GetAsync<List<LocalJob>>("jobs?all=" + (all ? "true" : "false") + (column is null ? "" : "&column=" + Uri.EscapeDataString(column)), ct);
 
+    /// <summary>What this machine has (detected by the daemon), which job requirements are checked against.</summary>
+    public Task<LocalCapabilities> CapabilitiesAsync(CancellationToken ct = default) => GetAsync<LocalCapabilities>("capabilities", ct);
+
     public Task<LocalJob> JobAsync(string id, CancellationToken ct = default) => GetAsync<LocalJob>($"jobs/{Uri.EscapeDataString(id)}", ct);
 
     public Task<LocalJob> PostJobAsync(LocalJobPost request, CancellationToken ct = default) => PostAsync<LocalJob>("jobs", request, ct);
@@ -270,11 +273,9 @@ public sealed class LocalApiClient : IDisposable
     /// and receipts for what it sent. Messages not yet acknowledged are delivered again on each registration.
     /// Keep it alive with <see cref="HeartbeatAsync"/>, or use <see cref="AgentConnection"/>.
     /// </summary>
-    public async IAsyncEnumerable<LocalEvent> StreamAsync(string agent, [EnumeratorCancellation] CancellationToken ct = default,
-        IReadOnlyList<string>? roles = null)
+    public async IAsyncEnumerable<LocalEvent> StreamAsync(string agent, [EnumeratorCancellation] CancellationToken ct = default)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get,
-            $"agents/{agent}/stream{(roles is { Count: > 0 } ? "?roles=" + Uri.EscapeDataString(string.Join(',', roles)) : "")}");
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"agents/{agent}/stream");
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         await EnsureAsync(response, ct);
         await using var body = await response.Content.ReadAsStreamAsync(ct);
@@ -350,19 +351,15 @@ public sealed class AgentConnection : IAsyncDisposable
     private readonly CancellationTokenSource _stop = new();
     private readonly Task _run;
 
-    /// <param name="roles">The roles this agent declares (announced to the other machines); null keeps what it declared before.</param>
     public AgentConnection(LocalApiClient api, string agent, Func<LocalEvent, Task> onEvent, TimeSpan? heartbeat = null,
-        Action<Exception>? onError = null, IReadOnlyList<string>? roles = null)
+        Action<Exception>? onError = null)
     {
         _api = api;
         Agent = agent;
-        _roles = roles;
         _run = Task.Run(() => RunAsync(onEvent, heartbeat ?? TimeSpan.FromSeconds(15), onError));
     }
 
     public string Agent { get; }
-
-    private readonly IReadOnlyList<string>? _roles;
 
     /// <summary>Completes once the agent is registered (each time after a reconnect it is set again).</summary>
     public Task Registered => _registered.Task;
@@ -412,7 +409,7 @@ public sealed class AgentConnection : IAsyncDisposable
             });
             try
             {
-                await foreach (var e in _api.StreamAsync(Agent, session.Token, _roles))
+                await foreach (var e in _api.StreamAsync(Agent, session.Token))
                 {
                     if (e.Kind == LocalEventKinds.Registered)
                     {
@@ -474,7 +471,7 @@ public static class LocalEventKinds
     public const string RoomInvite = "room-invite";
     /// <summary>A room the agent is in changed: someone joined or left, or it collapsed.</summary>
     public const string RoomChanged = "room-changed";
-    /// <summary>A job the agent may claim became ready (its role, or a job with no role).</summary>
+    /// <summary>A job this machine meets the requirements of became ready.</summary>
     public const string JobReady = "job-ready";
     /// <summary>A job the agent posted or holds changed: claimed, moved, commented on, or its lease ran out.</summary>
     public const string JobChanged = "job-changed";
@@ -569,13 +566,13 @@ public sealed record LocalLogEntry(Guid Id, string From, string To, string Direc
 /// <summary>A message sent: to <c>machine-name/agent</c>; <see cref="State"/> is pushed, queued (by the router) or outbox (not relayed yet).</summary>
 public sealed record LocalSent(Guid Id, string To, Guid ConversationId, long Sequence, DateTimeOffset ExpiresOn, string State);
 
-public sealed record LocalAgentInfo(string Name, string State, DateTimeOffset ChangedOn, DateTimeOffset? RetiredOn, IReadOnlyList<string>? Roles = null);
+public sealed record LocalAgentInfo(string Name, string State, DateTimeOffset ChangedOn, DateTimeOffset? RetiredOn);
 
-public sealed record LocalPeerAgent(string Name, string State, DateTimeOffset ChangedOn, IReadOnlyList<string>? Roles = null);
+public sealed record LocalPeerAgent(string Name, string State, DateTimeOffset ChangedOn);
 
 /// <summary>An approved machine and its announced agents (all offline when the machine is).</summary>
 public sealed record LocalMachine(string Id, string Name, bool Online, DateTimeOffset? LastSeenOn, string OperatingSystem,
-    IReadOnlyList<LocalPeerAgent> Agents);
+    IReadOnlyList<LocalPeerAgent> Agents, MachineCapabilities? Capabilities = null);
 
 public sealed record LocalStatus(
     string MachineId,
@@ -612,20 +609,28 @@ public sealed record LocalRoomInvite(Guid RoomId, string Room, string Invitee, s
 
 public sealed record LocalRoomCreate(string Agent, string Name, IReadOnlyList<string>? Invite = null);
 
-/// <summary>Invite agents (addresses may be <c>machine/agent</c>, roles or groups, resolved now).</summary>
+/// <summary>Invite agents (addresses may be <c>machine/agent</c> or groups, resolved now).</summary>
 public sealed record LocalRoomInviteRequest(string Agent, IReadOnlyList<string> Invite);
 
 /// <summary>Join (accept an invitation) or leave.</summary>
 public sealed record LocalRoomAgent(string Agent);
 
 /// <summary>A job on the board. Poster and claimant are <c>machine-name/agent</c>; the board is open to every approved machine.</summary>
-public sealed record LocalJob(Guid Id, string Title, string Description, string? Role, string Poster, string Column, string? Claimant,
+/// <param name="Requirements">What a machine needs to claim it (e.g. memory&gt;=32); <paramref name="Unmet"/> is what this machine lacks.</param>
+public sealed record LocalJob(Guid Id, string Title, string Description, IReadOnlyList<string> Requirements, IReadOnlyList<string> Unmet, string Poster,
+    string Column, string? Claimant,
     DateTimeOffset? LeaseExpiresOn, string? Result, DateTimeOffset PostedOn, DateTimeOffset UpdatedOn, IReadOnlyList<LocalJobEntry> History);
 
 public sealed record LocalJobEntry(DateTimeOffset OccurredOn, string By, string What, string? Column, string? Text);
 
-/// <summary>Post a job: to ready (default) or backlog; with a role, only agents declaring it may claim it.</summary>
-public sealed record LocalJobPost(string Agent, string Title, string? Description = null, string? Role = null, bool Backlog = false);
+/// <summary>
+/// Post a job: to ready (default) or backlog. Only a machine meeting every requirement (<c>memory&gt;=32</c>, <c>memory&lt;=8</c>,
+/// <c>os=linux</c>, <c>gpu~rtx</c>, ...) may claim it.
+/// </summary>
+public sealed record LocalJobPost(string Agent, string Title, string? Description = null, IReadOnlyList<string>? Requirements = null, bool Backlog = false);
+
+/// <summary>This machine: what it has, as detected and reported to the router.</summary>
+public sealed record LocalCapabilities(MachineCapabilities Capabilities, string Summary);
 
 /// <summary>Claim, release, cancel, comment on (<see cref="Text"/>) or move (<see cref="Column"/>, with a result note for done and failed) a job.</summary>
 public sealed record LocalJobAction(string Agent, string? Column = null, string? Text = null);

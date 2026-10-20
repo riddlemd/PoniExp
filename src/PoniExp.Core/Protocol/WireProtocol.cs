@@ -11,8 +11,8 @@ public static class WireProtocol
     /// </summary>
     /// 4: Hello returns the router's time and clock-skew tolerance; receipt and agent message bodies.
     /// 5: attachments (encrypted blobs) and file receipts.
-    /// 6: roles in announcements, groups, rooms (a signed membership log on the router, fanned-out room envelopes); endpoints are agents.
-    /// 7: the job board (signed job actions, open jobs on the router).
+    /// 6: groups, rooms (a signed membership log on the router, fanned-out room envelopes); endpoints are agents.
+    /// 7: the job board (signed job actions, open jobs on the router); no roles.
     public const int Version = 7;
 
     /// <summary>Enums travel as kebab-case names ("file-receipt"), on the wire and in files.</summary>

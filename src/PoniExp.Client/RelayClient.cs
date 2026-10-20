@@ -266,6 +266,11 @@ public sealed class RelayClient : IAsyncDisposable
     /// <summary>Signs a room event with this machine's key.</summary>
     public RoomEvent SignRoomEvent(RoomEvent e) => Signatures.SignRoomEvent(_keys, e);
 
+    /// <summary>Tells the router what this machine has (see <see cref="CapabilityDetector"/>).</summary>
+    public Task ReportCapabilitiesAsync(MachineCapabilities capabilities, CancellationToken cancellationToken = default) =>
+        IsConnected ? _connection.InvokeAsync(HubMethods.ReportCapabilities, capabilities, cancellationToken)
+            : throw new InvalidOperationException("not connected to the router");
+
     public JobAction SignJobAction(JobAction a) => Signatures.SignJobAction(_keys, a);
 
     public Task<Job> SubmitJobActionAsync(JobAction action, CancellationToken cancellationToken = default) =>

@@ -122,6 +122,18 @@ public sealed class AdminService(
 
     public IReadOnlyList<RoomSummary> Rooms() => rooms.Summaries();
 
+    /// <summary>Takes a job off the board, by id or id prefix (at least 4 characters).</summary>
+    public async Task<Job> RemoveJobAsync(string selector)
+    {
+        var matches = jobs.List(includeFinished: true).Where(j => j.Id.ToString() == selector || (selector.Length >= 4 && j.Id.ToString().StartsWith(selector, StringComparison.Ordinal))).ToList();
+        return matches switch
+        {
+            [var one] => await jobs.RemoveAsync(one.Id),
+            [] => throw new RouterException($"No job {selector}.", RouterErrorKind.NotFound),
+            _ => throw new RouterException($"'{selector}' matches {matches.Count} jobs; use more of its id."),
+        };
+    }
+
     /// <summary>The board, members shown as machine-name/agent.</summary>
     public IReadOnlyList<Job> Jobs(bool includeFinished) =>
         [.. jobs.List(includeFinished).Select(j => j with { Poster = rooms.Display(j.Poster), Claimant = j.Claimant is { } c ? rooms.Display(c) : null })];
@@ -136,8 +148,8 @@ public sealed class AdminService(
         })];
 
     /// <summary>
-    /// Sets a group (<c>poniexp admin group set</c>): members are <c>machine/agent</c> (an approved machine, by name)
-    /// or <c>role:x</c> / <c>role:x/all</c>. Groups don't nest. No members removes it.
+    /// Sets a group (<c>poniexp admin group set</c>): members are <c>machine/agent</c> (an approved machine, by name).
+    /// Groups don't nest. No members removes it.
     /// </summary>
     public GroupInfo SetGroup(string name, IReadOnlyList<string> members)
     {
@@ -153,27 +165,22 @@ public sealed class AdminService(
 
         foreach (var member in members)
         {
-            Indirect? indirect;
             try
             {
-                indirect = Address.ParseIndirect(member);
-                if (indirect is null)
+                if (Address.ParseIndirect(member) is not null)
                 {
-                    var address = Address.Parse(member);
-                    if (registry.List().All(m => m.Name != address.Machine || m.Status != MembershipStatus.Approved))
-                    {
-                        throw new RouterException($"'{member}': no approved machine '{address.Machine}'.");
-                    }
+                    throw new RouterException($"'{member}': groups don't nest; list its members.");
+                }
+
+                var address = Address.Parse(member);
+                if (address.Agent is null || registry.List().All(m => m.Name != address.Machine || m.Status != MembershipStatus.Approved))
+                {
+                    throw new RouterException($"'{member}': a member is machine/agent, on an approved machine.");
                 }
             }
             catch (FormatException e)
             {
                 throw new RouterException(e.Message);
-            }
-
-            if (indirect is { Kind: IndirectKind.Group })
-            {
-                throw new RouterException($"'{member}': groups don't nest; list its members (or use a role).");
             }
         }
 
@@ -195,7 +202,7 @@ public sealed class AdminService(
     public int ClearBlobsFor(string selector) => blobs.ClearFor(registry.Resolve(selector).Id);
 
     private AdminMachineView View(MachineRecord m) =>
-        new(m.Id, m.Name, m.Status, m.JoinCode, m.Description, m.RequestedOn, m.DecidedOn, m.LastSeenOn, presence.IsOnline(m.Id));
+        new(m.Id, m.Name, m.Status, m.JoinCode, m.Description, m.RequestedOn, m.DecidedOn, m.LastSeenOn, presence.IsOnline(m.Id), m.Capabilities);
 }
 
 public sealed record AdminMachineView(
@@ -207,7 +214,8 @@ public sealed record AdminMachineView(
     DateTimeOffset RequestedOn,
     DateTimeOffset? DecidedOn,
     DateTimeOffset? LastSeenOn,
-    bool Online);
+    bool Online,
+    MachineCapabilities? Capabilities = null);
 
 /// <summary>A router backup: its TLS certificate (PKCS#12, base64, with the private key) and the approved machines.</summary>
 public sealed record RouterBackup(string Format, int Version, DateTimeOffset CreatedOn, string? CertificateSha256, string? Certificate,

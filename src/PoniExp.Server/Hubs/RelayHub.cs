@@ -367,6 +367,21 @@ public sealed class RelayHub(
 
     // ---- the job board ----
 
+    /// <summary>The daemon reports what its machine has: shown to everyone, and what job requirements are checked against.</summary>
+    [HubMethodName(HubMethods.ReportCapabilities)]
+    public async Task ReportCapabilitiesAsync(MachineCapabilities capabilities)
+    {
+        var me = RequireMember();
+        if (capabilities is null || capabilities.Gpus is null || capabilities.Tags is null || capabilities.Gpus.Count > 16 || capabilities.Tags.Count > 32
+            || new[] { capabilities.Os, capabilities.OsVersion, capabilities.Arch, capabilities.Cpu ?? "" }.Concat(capabilities.Gpus.Select(g => g.Name))
+                .Concat(capabilities.Tags).Any(s => s is null || s.Length > 100))
+        {
+            throw Refuse("Capabilities: at most 16 GPUs and 32 tags, each text up to 100 characters.", me);
+        }
+
+        await registry.SetCapabilitiesAsync(me, capabilities with { DetectedOn = time.GetUtcNow() });
+    }
+
     [HubMethodName(HubMethods.SubmitJobAction)]
     public Task<Job> SubmitJobActionAsync(JobAction action)
     {
@@ -419,7 +434,7 @@ public sealed class RelayHub(
         return registry.List()
             .Where(m => m.Status == MembershipStatus.Approved)
             .Select(m => new MachineInfo(m.Id, m.Name, m.Description, m.PublicKey, m.EncryptionKey, m.EncryptionKeySignature,
-                presence.IsOnline(m.Id), m.LastSeenOn))
+                presence.IsOnline(m.Id), m.LastSeenOn, m.Capabilities))
             .ToList();
     }
 

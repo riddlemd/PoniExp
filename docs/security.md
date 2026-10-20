@@ -84,11 +84,8 @@ Agents, conversation, subject, type, metadata, body and `createdOn` are encrypte
 - TLS with a self-signed certificate pinned by SHA-256 on every client: no public CA, and a man in the
   middle is refused.
 
-## Roles, groups and rooms
+## Groups and rooms
 
-- **Roles** are declared by each machine for its own agents, in its signed announcements: the router
-  can't add or hide a holder, but any approved machine can claim any role for its agents. Roles are
-  labels for addressing, not permissions (those are per machine).
 - **Groups** are the owner's lists, served by the router: a compromised router could point a group
   at another approved machine (still encrypted to that machine, so only it could read). Owner-signed
   lists come with phase 9.
@@ -122,9 +119,10 @@ Agents, conversation, subject, type, metadata, body and `createdOn` are encrypte
 - **Every change is signed** by the acting machine (its key, whose fingerprint is its id), with a
   timestamp within the clock skew; the router refuses a change signed for another machine or altered.
   The router itself could still rewrite the board, since it holds it in the clear.
-- **Agents and roles are labels:** a machine vouches for its agents. Claiming a job that names a role
-  is checked by the claimant's own daemon, so any approved machine can claim any job; permissions
-  are per machine (phase 9).
+- **Agents are labels:** a machine vouches for its agents.
+- **Requirements are checked against what each machine reports** of itself (detected by its daemon):
+  the router enforces them on claims, but a dishonest approved machine could report hardware it
+  doesn't have. Permissions are per machine (phase 9).
 - **Leases** are renewed by the claimant's daemon while that agent is online; a claim nobody renews
   returns to `ready` after `JobLease`.
 

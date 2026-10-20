@@ -17,7 +17,7 @@ namespace PoniExp.Client;
 /// </summary>
 public sealed class ClientStore
 {
-    private const int SchemaVersion = 8;
+    private const int SchemaVersion = 9;
 
     private const string Schema = """
         PRAGMA journal_mode = WAL;
@@ -177,7 +177,7 @@ public sealed class ClientStore
             agent       TEXT NOT NULL,
             title       TEXT NOT NULL,
             description TEXT NOT NULL,
-            role        TEXT,
+            requirements TEXT,
             job_column  TEXT NOT NULL,
             open        INTEGER NOT NULL DEFAULT 1,
             posted_on   TEXT NOT NULL
@@ -222,14 +222,17 @@ public sealed class ClientStore
         }.ToString();
 
         using var connection = Open();
+        if (Query(connection, null, "PRAGMA user_version;", r => r.GetInt64(0)).Single() is > 0 and < 9)
+        {
+            Execute(connection, null, "DROP TABLE IF EXISTS posted_jobs;"); // schema 8 had roles; now requirements
+        }
+
         if (Query(connection, null, "PRAGMA user_version;", r => r.GetInt64(0)).Single() is > 0 and < 7)
         {
             Execute(connection, null, "DROP TABLE IF EXISTS rooms;"); // schema 6's admin snapshots; rooms are now a signed log
         }
 
         Execute(connection, null, Schema);
-        AddColumn(connection, "agents", "roles", "TEXT"); // schema 5
-        AddColumn(connection, "peer_agents", "roles", "TEXT");
         Execute(connection, null, $"PRAGMA user_version = {SchemaVersion};");
     }
 
@@ -245,10 +248,6 @@ public sealed class ClientStore
         }
     }
 
-    internal static IReadOnlyList<string> ReadRoles(SqliteDataReader r, int i) =>
-        r.IsDBNull(i) || r.GetString(i).Length == 0 ? [] : r.GetString(i).Split(',');
-
-    internal static string? RolesText(IReadOnlyList<string>? roles) => roles is null ? null : string.Join(',', roles.Distinct().Order());
 
     /// <summary>Runs <paramref name="work"/> in one IMMEDIATE transaction: all of it is stored, or none.</summary>
     public T Transact<T>(DateTimeOffset now, Func<StoreTransaction, T> work)
@@ -352,11 +351,11 @@ public sealed class ClientStore
             """, ReadMessage, ("$me", me), ("$agent", agent), ("$conversation", Id(conversationId)));
 
     public IReadOnlyList<LocalAgentRecord> GetAgents() =>
-        Query("SELECT name, state, registered_on, last_seen_on, changed_on, retired_on, roles FROM agents ORDER BY name;", ReadAgent);
+        Query("SELECT name, state, registered_on, last_seen_on, changed_on, retired_on FROM agents ORDER BY name;", ReadAgent);
 
     public IReadOnlyList<PeerAgent> GetPeerAgents() =>
-        Query("SELECT machine, agent, state, counter, changed_on, roles FROM peer_agents ORDER BY machine, agent;",
-            r => new PeerAgent(r.GetString(0), r.GetString(1), ParseState(r.GetString(2)), r.GetInt64(3), Parse(r.GetString(4)), ReadRoles(r, 5)));
+        Query("SELECT machine, agent, state, counter, changed_on FROM peer_agents ORDER BY machine, agent;",
+            r => new PeerAgent(r.GetString(0), r.GetString(1), ParseState(r.GetString(2)), r.GetInt64(3), Parse(r.GetString(4))));
 
     public IReadOnlyList<Diagnostic> GetDiagnostics(int limit = 50) =>
         Query("""
@@ -418,8 +417,9 @@ public sealed class ClientStore
 
     /// <summary>Jobs this machine's agents posted that haven't finished: re-posted if the router loses them.</summary>
     public IReadOnlyList<PostedJob> GetOpenPostedJobs() =>
-        Query("SELECT id, agent, title, description, role, job_column FROM posted_jobs WHERE open = 1 ORDER BY posted_on;", r =>
-            new PostedJob(Guid.Parse(r.GetString(0)), r.GetString(1), r.GetString(2), r.GetString(3), r.IsDBNull(4) ? null : r.GetString(4),
+        Query("SELECT id, agent, title, description, requirements, job_column FROM posted_jobs WHERE open = 1 ORDER BY posted_on;", r =>
+            new PostedJob(Guid.Parse(r.GetString(0)), r.GetString(1), r.GetString(2), r.GetString(3),
+                r.IsDBNull(4) ? [] : JsonSerializer.Deserialize<List<JobRequirement>>(r.GetString(4), WireProtocol.Json)!,
                 Enum.GetValues<JobColumn>().First(c => WireProtocol.NameOf(c) == r.GetString(5))));
 
     internal const string RoomColumns = "id, name, events, collapsed, reason, updated_on";
@@ -575,7 +575,7 @@ public sealed class ClientStore
 
     internal static LocalAgentRecord ReadAgent(SqliteDataReader r) =>
         new(r.GetString(0), ParseState(r.GetString(1)), Parse(r.GetString(2)), Parse(r.GetString(3)), Parse(r.GetString(4)),
-            r.IsDBNull(5) ? null : Parse(r.GetString(5)), ReadRoles(r, 6));
+            r.IsDBNull(5) ? null : Parse(r.GetString(5)));
 
     private List<T> Query<T>(string sql, Func<SqliteDataReader, T> read, params (string Name, object? Value)[] parameters)
     {
@@ -871,9 +871,9 @@ public sealed class StoreTransaction
 
     public void SavePostedJob(PostedJob job) =>
         Execute("""
-            INSERT INTO posted_jobs (id, agent, title, description, role, job_column, posted_on) VALUES ($id, $agent, $title, $description, $role, $column, $now)
+            INSERT INTO posted_jobs (id, agent, title, description, requirements, job_column, posted_on) VALUES ($id, $agent, $title, $description, $requirements, $column, $now)
             ON CONFLICT (id) DO NOTHING;
-            """, ("$id", ClientStore.Id(job.Id)), ("$agent", job.Agent), ("$title", job.Title), ("$description", job.Description), ("$role", job.Role),
+            """, ("$id", ClientStore.Id(job.Id)), ("$agent", job.Agent), ("$title", job.Title), ("$description", job.Description), ("$requirements", JsonSerializer.Serialize(job.Requirements, WireProtocol.Json)),
             ("$column", WireProtocol.NameOf(job.Column)), ("$now", ClientStore.Stamp(Now)));
 
     /// <summary>The job finished (or is gone): no re-posting it.</summary>
@@ -923,25 +923,24 @@ public sealed class StoreTransaction
 
     public LocalAgentRecord? GetAgent(string name) =>
         ClientStore.Query(_connection, _transaction,
-            "SELECT name, state, registered_on, last_seen_on, changed_on, retired_on, roles FROM agents WHERE name = $name;",
+            "SELECT name, state, registered_on, last_seen_on, changed_on, retired_on FROM agents WHERE name = $name;",
             ClientStore.ReadAgent, ("$name", name)).FirstOrDefault();
 
     public IReadOnlyList<LocalAgentRecord> GetAgents() =>
         ClientStore.Query(_connection, _transaction,
-            "SELECT name, state, registered_on, last_seen_on, changed_on, retired_on, roles FROM agents ORDER BY name;", ClientStore.ReadAgent);
+            "SELECT name, state, registered_on, last_seen_on, changed_on, retired_on FROM agents ORDER BY name;", ClientStore.ReadAgent);
 
     /// <summary>
-    /// Records an agent's state; registering (going online) brings a retired agent back. <paramref name="roles"/>,
-    /// if given, replaces the roles it declares (null leaves them).
+    /// Records an agent's state; registering (going online) brings a retired agent back.
     /// </summary>
-    public void SetAgentState(string name, AgentState state, IReadOnlyList<string>? roles = null)
+    public void SetAgentState(string name, AgentState state)
     {
         var stamp = ClientStore.Stamp(Now);
         Execute("""
-            INSERT INTO agents (name, state, registered_on, last_seen_on, changed_on, roles) VALUES ($name, $state, $now, $now, $now, $roles)
-            ON CONFLICT (name) DO UPDATE SET state = $state, last_seen_on = $now, changed_on = $now, roles = coalesce($roles, roles),
+            INSERT INTO agents (name, state, registered_on, last_seen_on, changed_on) VALUES ($name, $state, $now, $now, $now)
+            ON CONFLICT (name) DO UPDATE SET state = $state, last_seen_on = $now, changed_on = $now,
                 retired_on = CASE WHEN $state = 'online' THEN NULL ELSE retired_on END;
-            """, ("$name", name), ("$state", WireProtocol.NameOf(state)), ("$now", stamp), ("$roles", ClientStore.RolesText(roles)));
+            """, ("$name", name), ("$state", WireProtocol.NameOf(state)), ("$now", stamp));
     }
 
     /// <summary>Retires an agent: from now on its messages get a <c>rejected</c> receipt. False if it isn't registered.</summary>
@@ -969,12 +968,11 @@ public sealed class StoreTransaction
         foreach (var e in announcement.Agents)
         {
             Execute("""
-                INSERT INTO peer_agents (machine, agent, state, counter, changed_on, roles)
-                VALUES ($machine, $agent, $state, $counter, $changed, $roles)
+                INSERT INTO peer_agents (machine, agent, state, counter, changed_on)
+                VALUES ($machine, $agent, $state, $counter, $changed)
                 ON CONFLICT (machine, agent) DO NOTHING;
                 """, ("$machine", machine), ("$agent", e.Name), ("$state", WireProtocol.NameOf(e.State)), ("$counter", announcement.Counter),
-                ("$changed", ClientStore.Stamp(e.ChangedOn)),
-                ("$roles", ClientStore.RolesText(e.Roles?.Where(Limits.IsValidAgent).Take(Limits.MaxRoles).ToList())));
+                ("$changed", ClientStore.Stamp(e.ChangedOn)));
         }
 
         return true;
@@ -1094,11 +1092,10 @@ public sealed record MessageEvent(MessageDirection Direction, string Agent, stri
 
 /// <summary>An agent registered with this machine's daemon (the agent registry).</summary>
 public sealed record LocalAgentRecord(string Name, AgentState State, DateTimeOffset RegisteredOn, DateTimeOffset LastSeenOn,
-    DateTimeOffset ChangedOn, DateTimeOffset? RetiredOn, IReadOnlyList<string>? Roles = null);
+    DateTimeOffset ChangedOn, DateTimeOffset? RetiredOn);
 
 /// <summary>An agent another machine has announced.</summary>
-public sealed record PeerAgent(string Machine, string Agent, AgentState State, long Counter, DateTimeOffset ChangedOn,
-    IReadOnlyList<string>? Roles = null);
+public sealed record PeerAgent(string Machine, string Agent, AgentState State, long Counter, DateTimeOffset ChangedOn);
 
 /// <summary>
 /// One message's attachment. <see cref="LastEvent"/> is the file track's latest event (see <see cref="AttachmentEvents"/>);
@@ -1131,7 +1128,7 @@ public static class AttachmentEvents
 
 /// <summary>A conversation as one local agent sees it. <see cref="State"/> is open or finished.</summary>
 /// <summary>A job an agent here posted, as posted (for re-posting it under the same id).</summary>
-public sealed record PostedJob(Guid Id, string Agent, string Title, string Description, string? Role, JobColumn Column);
+public sealed record PostedJob(Guid Id, string Agent, string Title, string Description, IReadOnlyList<JobRequirement> Requirements, JobColumn Column);
 
 /// <summary>A room as this machine knows it: its membership log (checked), and whether it has collapsed.</summary>
 public sealed record RoomRecord(Guid Id, string Name, IReadOnlyList<RoomEvent> Events, bool Collapsed, string? CollapseReason, DateTimeOffset UpdatedOn);

@@ -173,7 +173,8 @@ public sealed record MachineInfo(
     string EncryptionKey,
     string EncryptionKeySignature,
     bool Online,
-    DateTimeOffset? LastSeenOn);
+    DateTimeOffset? LastSeenOn,
+    MachineCapabilities? Capabilities = null);
 
 public sealed record PresenceChange(string MachineId, string Name, bool Online, DateTimeOffset OccurredOn);
 
@@ -204,8 +205,8 @@ public enum AgentState
     TimedOut,
 }
 
-/// <summary>An agent as its daemon announces it, with the roles it declared (see docs/plan.md, Roles).</summary>
-public sealed record AnnouncedAgent(string Name, AgentState State, DateTimeOffset ChangedOn, IReadOnlyList<string>? Roles = null);
+/// <summary>An agent as its daemon announces it.</summary>
+public sealed record AnnouncedAgent(string Name, AgentState State, DateTimeOffset ChangedOn);
 
 /// <summary>
 /// The body of a <see cref="MessageType.Agent"/> message (JSON): the announcing daemon's complete list of
@@ -214,7 +215,7 @@ public sealed record AnnouncedAgent(string Name, AgentState State, DateTimeOffse
 /// </summary>
 public sealed record AgentAnnouncement(long Counter, IReadOnlyList<AnnouncedAgent> Agents);
 
-/// <summary>An owner-defined group: a named list of addresses (<c>machine/agent</c> or <c>role:...</c>), by machine name.</summary>
+/// <summary>An owner-defined group: a named list of addresses (<c>machine/agent</c>), by machine name.</summary>
 public sealed record GroupInfo(string Name, IReadOnlyList<string> Members);
 
 /// <summary>How a room envelope is addressed: <c>room:&lt;id&gt;</c> in <see cref="Envelope.ToMachine"/>, signed like every header field.</summary>

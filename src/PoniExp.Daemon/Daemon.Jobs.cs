@@ -15,9 +15,31 @@ public sealed partial class Daemon
     private readonly ConcurrentDictionary<Guid, string> _heldJobs = new();
     private DateTimeOffset _lastLeaseRenewal;
 
-    internal async Task<LocalJob> PostJobAsync(string agent, string title, string? description, string? role, bool backlog, CancellationToken cancellationToken)
+    /// <summary>What this machine has, detected once and again on each connect (job requirements are checked against it).</summary>
+    internal MachineCapabilities Capabilities => _capabilities ??= CapabilityDetector.Detect(_options.CurrentValue.CapabilityTags, Now);
+
+    private MachineCapabilities? _capabilities;
+
+    private async Task ReportCapabilitiesAsync()
     {
-        var posted = new PostedJob(Guid.NewGuid(), agent, title, description ?? "", role, backlog ? JobColumn.Backlog : JobColumn.Ready);
+        _capabilities = CapabilityDetector.Detect(_options.CurrentValue.CapabilityTags, Now);
+        await _relay.ReportCapabilitiesAsync(_capabilities);
+    }
+
+    internal async Task<LocalJob> PostJobAsync(string agent, string title, string? description, IReadOnlyList<string>? requirements, bool backlog,
+        CancellationToken cancellationToken)
+    {
+        List<JobRequirement> parsed;
+        try
+        {
+            parsed = [.. (requirements ?? []).Select(JobRequirement.Parse)];
+        }
+        catch (FormatException e)
+        {
+            throw new ArgumentException(e.Message);
+        }
+
+        var posted = new PostedJob(Guid.NewGuid(), agent, title, description ?? "", parsed, backlog ? JobColumn.Backlog : JobColumn.Ready);
         var job = await SubmitJobAsync(PostOf(posted), cancellationToken);
         Store.Transact(Now, tx => tx.SavePostedJob(posted));
         return ToLocalJob(job);
@@ -26,9 +48,9 @@ public sealed partial class Daemon
     internal async Task<LocalJob> ClaimJobAsync(string agent, string id, CancellationToken cancellationToken)
     {
         var job = await RequireJobAsync(id, cancellationToken);
-        if (job.Role is { } role && !RolesOf(agent).Contains(role))
+        if (JobRequirement.Unmet(job.Requirements, Capabilities) is { Count: > 0 } unmet)
         {
-            throw new InvalidOperationException($"{agent} doesn't declare the role '{role}' this job asks for (declare it with --role {role})");
+            throw new InvalidOperationException($"this machine doesn't meet {string.Join(", ", unmet)} ({Capabilities.Summary()})");
         }
 
         var claimed = await SubmitJobAsync(Action(agent, job.Id, JobActionKind.Claim), cancellationToken);
@@ -101,14 +123,11 @@ public sealed partial class Daemon
 
         var local = ToLocalJob(job);
         var last = job.History.LastOrDefault();
-        if (change.BecameReady)
+        if (change.BecameReady && local.Unmet.Count == 0) // only machines that may claim it hear of it
         {
             foreach (var session in _sessions.All)
             {
-                if (job.Role is null || RolesOf(session.Name).Contains(job.Role))
-                {
-                    session.Push(new LocalEvent(LocalEventKinds.JobReady, Job: local));
-                }
+                session.Push(new LocalEvent(LocalEventKinds.JobReady, Job: local));
             }
         }
 
@@ -169,10 +188,9 @@ public sealed partial class Daemon
 
     // ---- helpers ----
 
-    private IReadOnlyList<string> RolesOf(string agent) => Store.GetAgents().FirstOrDefault(a => a.Name == agent)?.Roles ?? [];
 
     private JobAction PostOf(PostedJob posted) =>
-        new(Guid.NewGuid(), posted.Id, JobActionKind.Post, Me(posted.Agent), posted.Column, posted.Title, posted.Description, posted.Role, Now, "", "");
+        new(Guid.NewGuid(), posted.Id, JobActionKind.Post, Me(posted.Agent), posted.Column, posted.Title, posted.Description, posted.Requirements, Now, "", "");
 
     private JobAction Action(string agent, Guid job, JobActionKind kind, JobColumn? column = null, string? text = null) =>
         new(Guid.NewGuid(), job, kind, Me(agent), column, null, text, null, Now, "", "");
@@ -198,7 +216,8 @@ public sealed partial class Daemon
     }
 
     private LocalJob ToLocalJob(Job j) =>
-        new(j.Id, j.Title, j.Description, j.Role, Display(j.Poster), WireProtocol.NameOf(j.Column), j.Claimant is { } c ? Display(c) : null, j.LeaseExpiresOn,
+        new(j.Id, j.Title, j.Description, [.. j.Requirements.Select(r => r.ToString())],
+            [.. JobRequirement.Unmet(j.Requirements, Capabilities).Select(r => r.ToString())], Display(j.Poster), WireProtocol.NameOf(j.Column), j.Claimant is { } c ? Display(c) : null, j.LeaseExpiresOn,
             j.Result, j.PostedOn, j.UpdatedOn,
             [.. j.History.Select(h => new LocalJobEntry(h.OccurredOn, h.Actor == JobRules.Router ? JobRules.Router : Display(h.Actor), h.What,
                 h.Column is { } col ? WireProtocol.NameOf(col) : null, h.Text))]);

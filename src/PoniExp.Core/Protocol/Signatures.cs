@@ -113,7 +113,7 @@ public static class Signatures
             a.Column is { } c ? WireProtocol.NameOf(c) : "",
             a.Title ?? "",
             a.Text ?? "",
-            a.Role ?? "",
+            string.Join("\n", (a.Requirements ?? []).Select(r => r.ToString())),
             Stamp(a.OccurredOn),
             a.ActorKey,
         ]);
