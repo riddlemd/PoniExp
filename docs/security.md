@@ -110,6 +110,27 @@ Agents, conversation, subject, type, metadata, body and `createdOn` are encrypte
     sizes per machine, each message's time and size) for `RoomStatsRetention`; each member machine keeps
     its own log and messages under its usual retention.
 
+## The owner and approvals
+
+- **The owner key** is an ssh-ed25519 key held by the owner's SSH agent (Bitwarden); PoniExp never
+  holds the private key. The router stores the public key; **each machine pins it** (compare the
+  fingerprint, or pinned without asking when that machine's SSH agent holds the key). A router that
+  swaps the key can't move the desk on machines that pinned the real one.
+- **The desk** (`here`) is a claim signed by the owner key: this machine, from, until (at most 7
+  days), as an SSH signature in the `poniexp` namespace, so it can't be mistaken for an SSH login.
+  Daemons accept only a newer claim than the last one they took. The desk machine may end its own
+  desk without a signature; daemons accept the router's unsigned "away" because it can only stop
+  approvals, never grant one.
+- **Requests and answers** are messages between daemons, end-to-end encrypted and signed like any
+  other. A daemon accepts an answer only from the machine the current desk claim names, for a request
+  it sent there. The router sees that approval traffic flows, not what is asked.
+- **What an approval proves:** that someone at the desk machine said yes. A process on the desk
+  machine could answer too (local processes are trusted); the Bitwarden prompt guards making a machine
+  the desk, not each answer.
+- **"Always allow" rules** live on the asking machine and match an agent, a tool and (for a command)
+  the exact command. Agent names are labels, so a rule for one agent can be used by any process on
+  that machine that claims its name.
+
 ## The job board
 
 - **Not end-to-end encrypted, by design.** The board is an open forum for every approved machine:

@@ -39,6 +39,18 @@ public static class AdminEndpoints
                 e.MessageId, e.Size, e.Sequence, e.Address, e.Detail)).ToList());
         });
         admin.MapGet("/groups", (AdminService service) => Results.Ok(service.Groups()));
+        admin.MapGet("/owner", (AdminService service) => Results.Ok(service.Owner()));
+        admin.MapPut("/owner", (AdminOwnerKey body, AdminService service) =>
+        {
+            try
+            {
+                return Results.Ok(service.SetOwner(body.Key));
+            }
+            catch (FormatException e)
+            {
+                return Results.Problem(e.Message, statusCode: StatusCodes.Status400BadRequest);
+            }
+        });
         admin.MapGet("/rooms", (AdminService service) => Results.Ok(service.Rooms()));
         admin.MapGet("/jobs", (AdminService service, bool? all) => Results.Ok(service.Jobs(all == true)));
         admin.MapPost("/jobs/{selector}/remove", async (string selector, AdminService service) =>
@@ -115,3 +127,5 @@ public sealed record TrafficLogStatus(bool Enabled);
 /// <summary>A traffic log row with machine names (removed machines show their short id).</summary>
 public sealed record AdminTrafficEntry(DateTimeOffset OccurredOn, string Event, string? From, string? To, Guid? MessageId, int? Size, long? Sequence,
     string? Address, string? Detail);
+
+public sealed record AdminOwnerKey(string Key);

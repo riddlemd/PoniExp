@@ -30,6 +30,10 @@ public enum MessageType
     Receipt,
     FileReceipt,
     Agent,
+    /// <summary>An agent asks the owner's approval (to the desk machine's daemon; see docs/plan.md, Phase 9).</summary>
+    ApprovalRequest,
+    ApprovalAnswer,
+    ApprovalWithdrawn,
 }
 
 /// <summary>The outcome of the work a message asked for, carried on replies. Anything but Failed is the success path.</summary>

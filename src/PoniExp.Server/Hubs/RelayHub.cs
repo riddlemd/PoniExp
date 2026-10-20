@@ -22,6 +22,7 @@ public sealed class RelayHub(
     PoniExp.Server.Blobs.BlobRegistry blobs,
     PoniExp.Server.Rooms.RoomRegistry rooms,
     PoniExp.Server.Jobs.JobBoard jobs,
+    PoniExp.Server.Owner.OwnerDesk desk,
     TimeProvider time,
     IOptionsSnapshot<RouterOptions> options,
     ILogger<RelayHub> logger) : Hub
@@ -113,7 +114,12 @@ public sealed class RelayHub(
             }
         }
 
-        // Room state first: a queued room message is judged against the members as they are when it was sent.
+        // The desk and room state first: queued approvals and room messages are judged against them.
+        if (desk.Latest is { } here)
+        {
+            await Clients.Caller.SendAsync(HubMethods.HereChanged, here);
+        }
+
         foreach (var room in rooms.Mine(id, []))
         {
             await Clients.Caller.SendAsync(HubMethods.RoomChanged, room);
@@ -364,6 +370,41 @@ public sealed class RelayHub(
     /// <summary>Live rooms this machine is involved in, and what became of the ones it knows that aren't.</summary>
     [HubMethodName(HubMethods.GetMyRooms)]
     public IReadOnlyList<RoomState> GetMyRooms(IReadOnlyList<Guid> known) => rooms.Mine(RequireMember(), known ?? []);
+
+    // ---- the owner and the approval desk ----
+
+    /// <summary>The owner's ssh-ed25519 public key line, or null if the router has none yet.</summary>
+    [HubMethodName(HubMethods.GetOwner)]
+    public string? GetOwner()
+    {
+        RequireMember();
+        return desk.Owner?.ToString();
+    }
+
+    [HubMethodName(HubMethods.GetHere)]
+    public HereClaim? GetHere()
+    {
+        RequireMember();
+        return desk.Latest;
+    }
+
+    [HubMethodName(HubMethods.SetHere)]
+    public Task<HereClaim> SetHereAsync(HereClaim claim)
+    {
+        var me = RequireMember();
+        return Room(() => desk.SetHereAsync(me, claim), me);
+    }
+
+    [HubMethodName(HubMethods.LeaveDesk)]
+    public Task LeaveDeskAsync()
+    {
+        var me = RequireMember();
+        return Room(async () =>
+        {
+            await desk.LeaveAsync(me);
+            return true;
+        }, me);
+    }
 
     // ---- the job board ----
 

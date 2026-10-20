@@ -110,6 +110,11 @@ public sealed class RelayClient : IAsyncDisposable
             JobChanged?.Invoke(change);
             return Task.CompletedTask;
         }));
+        _connection.On<HereClaim>(HubMethods.HereChanged, claim => Post(() =>
+        {
+            HereChanged?.Invoke(claim); // on the worker, so before any approval message the router sends after it
+            return Task.CompletedTask;
+        }));
         _connection.On<RoomState>(HubMethods.RoomChanged, room => Post(() =>
         {
             RoomChanged?.Invoke(room); // on the worker, so before any room message the router sends after it
@@ -157,6 +162,9 @@ public sealed class RelayClient : IAsyncDisposable
 
     /// <summary>A room this machine is involved in changed or collapsed (the log is unchecked: the caller replays it).</summary>
     public event Action<RoomState>? RoomChanged;
+
+    /// <summary>The router passed on a desk claim (the daemon checks it against its pinned owner key).</summary>
+    public event Action<HereClaim>? HereChanged;
 
     /// <summary>True when (re)connected and authenticated; false (with the error) when the link drops.</summary>
     public event Action<bool, Exception?>? ConnectionChanged;
@@ -321,6 +329,37 @@ public sealed class RelayClient : IAsyncDisposable
         try
         {
             return await _connection.InvokeAsync<T>(method, argument, cancellationToken);
+        }
+        catch (HubException e)
+        {
+            throw new InvalidOperationException(ReasonOf(e), e);
+        }
+    }
+
+    // ---- the owner and the desk ----
+
+    /// <summary>The router's owner key line, or null if it has none.</summary>
+    public async Task<string?> GetOwnerAsync(CancellationToken cancellationToken = default) =>
+        IsConnected ? await _connection.InvokeAsync<string?>(HubMethods.GetOwner, cancellationToken)
+            : throw new InvalidOperationException("not connected to the router");
+
+    public async Task<HereClaim?> GetHereAsync(CancellationToken cancellationToken = default) =>
+        IsConnected ? await _connection.InvokeAsync<HereClaim?>(HubMethods.GetHere, cancellationToken)
+            : throw new InvalidOperationException("not connected to the router");
+
+    public Task<HereClaim> SetHereAsync(HereClaim claim, CancellationToken cancellationToken = default) =>
+        InvokeRoomAsync<HereClaim>(HubMethods.SetHere, claim, cancellationToken);
+
+    public async Task LeaveDeskAsync(CancellationToken cancellationToken = default)
+    {
+        if (!IsConnected)
+        {
+            throw new InvalidOperationException("not connected to the router");
+        }
+
+        try
+        {
+            await _connection.InvokeAsync(HubMethods.LeaveDesk, cancellationToken);
         }
         catch (HubException e)
         {

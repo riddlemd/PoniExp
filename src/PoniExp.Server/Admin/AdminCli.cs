@@ -114,6 +114,14 @@ public static class AdminCli
                         string.Join("\n", r.Members.Select(m => $"    {m.Member,-30} {m.JoinedOn.ToLocalTime():yyyy-MM-dd HH:mm} to {m.LeftOn?.ToLocalTime():yyyy-MM-dd HH:mm}")) + "\n" +
                         string.Join("\n", r.Machines.Select(m => $"    from {m.Machine,-25} {Count(m.Messages, "message")}, {m.Bytes} bytes")))));
                     return 0;
+                case ["owner"]:
+                    var owner = await http.GetFromJsonAsync<AdminOwnerView>("admin/owner", Json);
+                    output.WriteLine(owner?.Key is null ? "no owner key (poniexp admin owner set \"<ssh public key>\")" : ShowOwner(owner));
+                    return 0;
+                case ["owner", "set", .. var keyParts] when keyParts.Count > 0:
+                    var setOwner = await ReadAsync<AdminOwnerView>(await http.PutAsJsonAsync("admin/owner", new AdminOwnerKey(string.Join(" ", keyParts)), Json), output);
+                    output.WriteLine(setOwner is null ? "" : ShowOwner(setOwner));
+                    return setOwner is null ? 1 : 0;
                 case ["groups"]:
                     var groups = await http.GetFromJsonAsync<List<GroupInfo>>("admin/groups", Json) ?? [];
                     output.WriteLine(groups.Count == 0 ? "no groups" : string.Join("\n", groups.Select(g => $"{g.Name,-20} {string.Join(" ", g.Members)}")));
@@ -198,6 +206,7 @@ public static class AdminCli
                     output.WriteLine("usage: poniexp admin [list | approve <id|name> | reject <id|name> | remove <id|name> | clear-pending | certificate\n" +
                                      "                      | backup <path|-> | restore <path|-> | blobs [clear --for <machine>]\n" +
                                      "                      | rooms [--collapsed [--since <time>]] | jobs [--all] | job remove <id>\n" +
+        "         | owner | owner set <ssh public key>\n" +
                                      "                      | groups | group set <name> <machine/agent>... | group remove <name>\n" +
                                      "                      | traffic-log [on | off | status | show [--since 2h|date] [--machine name] [--limit n] [--json]]] [--url URL]");
                     return 2;
@@ -223,6 +232,9 @@ public static class AdminCli
             _ => throw new ArgumentException($"'{text}' isn't a duration like 30m, 2h or 3d"),
         };
     }
+
+    private static string ShowOwner(AdminOwnerView o) =>
+        $"owner {o.Fingerprint} {o.Key}\ndesk  {(o.Desk is null ? "none (away)" : $"{o.Desk} until {o.DeskUntil:u}")}";
 
     private static async Task<T?> ReadAsync<T>(HttpResponseMessage response, TextWriter output) where T : class
     {

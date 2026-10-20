@@ -2,4 +2,8 @@
   <PropertyGroup>
     <RootNamespace>PoniExp.Core</RootNamespace>
   </PropertyGroup>
+  <ItemGroup>
+    <!-- Ed25519, for verifying the owner's SSH signatures (.NET has no Ed25519). -->
+    <PackageReference Include="BouncyCastle.Cryptography" />
+  </ItemGroup>
 </Project>

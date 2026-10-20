@@ -183,6 +183,39 @@ public static class LocalApiEndpoints
 
         app.MapGet("/capabilities", (Daemon d) => Results.Ok(new LocalCapabilities(d.Capabilities, d.Capabilities.Summary())));
 
+        // ---- the owner, the desk and approvals ----
+
+        app.MapGet("/owner", (Daemon d, CancellationToken ct) => Handle(async () => Results.Ok(await d.OwnerAsync(ct))));
+        app.MapPost("/owner/pin", (Daemon d, LocalOwnerPin request, CancellationToken ct) => Handle(async () => Results.Ok(await d.PinOwnerAsync(request.Key, ct))));
+        app.MapPost("/here", (Daemon d, HereClaim claim, CancellationToken ct) => Handle(async () => Results.Ok(await d.HereAsync(claim, ct))));
+        app.MapPost("/away", (Daemon d, LocalAway request, CancellationToken ct) => Handle(async () => Results.Ok(await d.AwayAsync(request.Signed, ct))));
+        app.MapPost("/approvals", (Daemon d, LocalApprovalRequest request) => Handle(async () =>
+        {
+            RequireAgent(request.Agent);
+            return Results.Ok(await d.RequestApprovalAsync(request.Agent, request.Summary, request.Details, request.Tool, request.Command, request.Id));
+        }));
+        app.MapGet("/approvals", (Daemon d) => Results.Ok(d.Approvals()));
+        app.MapGet("/approvals/rules", (Daemon d) => Results.Ok(d.ApprovalRules()));
+        app.MapDelete("/approvals/rules/{id}", (Daemon d, string id) => Handle(() =>
+        {
+            d.RemoveApprovalRule(id);
+            return Task.FromResult(Results.NoContent());
+        }));
+        app.MapGet("/approvals/{id:guid}", (Daemon d, Guid id, int? wait, CancellationToken ct) => Handle(async () =>
+            Results.Ok(await d.WaitApprovalAsync(id, TimeSpan.FromSeconds(Math.Clamp(wait ?? 0, 0, 50)), ct))));
+        app.MapDelete("/approvals/{id:guid}", (Daemon d, Guid id) => Handle(async () =>
+        {
+            await d.WithdrawApprovalAsync(id);
+            return Results.NoContent();
+        }));
+        app.MapGet("/desk", (Daemon d) => Results.Ok(d.DeskApprovals()));
+        app.MapPost("/desk/{id}/{verb}", (Daemon d, string id, string verb, LocalAnswer request) => Handle(async () => verb switch
+        {
+            "approve" => Results.Ok(await d.AnswerAsync(id, true, request.Always, request.Reason)),
+            "deny" => Results.Ok(await d.AnswerAsync(id, false, false, request.Reason)),
+            _ => throw new KeyNotFoundException($"no such action '{verb}' (approve or deny)"),
+        }));
+
         app.MapGet("/jobs/{id}", (Daemon d, string id, CancellationToken ct) => Handle(async () => Results.Ok(await d.JobAsync(id, ct))));
 
         app.MapPost("/jobs", (Daemon d, LocalJobPost request, CancellationToken ct) => Handle(async () =>

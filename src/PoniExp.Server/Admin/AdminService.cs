@@ -18,6 +18,7 @@ public sealed class AdminService(
     Blobs.BlobRegistry blobs,
     Rooms.RoomRegistry rooms,
     Jobs.JobBoard jobs,
+    Owner.OwnerDesk desk,
     IHubContext<RelayHub> hub,
     IOptionsMonitor<RouterOptions> options,
     TimeProvider time,
@@ -70,7 +71,7 @@ public sealed class AdminService(
         return new RouterBackup(BackupFormat, 1, time.GetUtcNow(), certificate.Sha256,
             File.Exists(pfx) ? Convert.ToBase64String(File.ReadAllBytes(pfx)) : null,
             [.. registry.List().Where(m => m.Status == MembershipStatus.Approved)],
-            [.. jobs.List(includeFinished: false)]);
+            [.. jobs.List(includeFinished: false)], desk.Owner?.ToString());
     }
 
     /// <summary>
@@ -101,6 +102,10 @@ public sealed class AdminService(
         var machines = backup.Machines.Where(m => m.Status == MembershipStatus.Approved && KeyFingerprint.MachineIdOf(m.PublicKey) == m.Id).ToList();
         await registry.RestoreAsync(machines);
         var restoredJobs = jobs.Restore(backup.Jobs ?? []);
+        if (backup.OwnerKey is { } ownerKey)
+        {
+            desk.SetOwner(ownerKey);
+        }
         logger.LogInformation("Restored {Count} machines from a backup of {On}; certificate {Changed}", machines.Count, backup.CreatedOn,
             certificateChanged ? "changed (restart to serve it)" : "unchanged");
         return new RestoreResult(machines.Count, certificateChanged, backup.CertificateSha256, restoredJobs);
@@ -121,6 +126,17 @@ public sealed class AdminService(
     public IReadOnlyList<GroupInfo> Groups() => store.LoadGroups();
 
     public IReadOnlyList<RoomSummary> Rooms() => rooms.Summaries();
+
+    /// <summary>The owner key and the desk, for <c>poniexp admin owner</c>.</summary>
+    public AdminOwnerView Owner() =>
+        new(desk.Owner?.ToString(), desk.Owner?.Fingerprint, desk.Desk is { } d ? registry.Get(d)?.Name ?? d : null, desk.Desk is null ? null : desk.Latest?.ExpiresOn);
+
+    /// <exception cref="FormatException">Not an ssh-ed25519 public key line.</exception>
+    public AdminOwnerView SetOwner(string line)
+    {
+        desk.SetOwner(line);
+        return Owner();
+    }
 
     /// <summary>Takes a job off the board, by id or id prefix (at least 4 characters).</summary>
     public async Task<Job> RemoveJobAsync(string selector)
@@ -219,9 +235,11 @@ public sealed record AdminMachineView(
 
 /// <summary>A router backup: its TLS certificate (PKCS#12, base64, with the private key) and the approved machines.</summary>
 public sealed record RouterBackup(string Format, int Version, DateTimeOffset CreatedOn, string? CertificateSha256, string? Certificate,
-    IReadOnlyList<MachineRecord> Machines, IReadOnlyList<Job>? Jobs = null);
+    IReadOnlyList<MachineRecord> Machines, IReadOnlyList<Job>? Jobs = null, string? OwnerKey = null);
 
 public sealed record RestoreResult(int Machines, bool CertificateChanged, string? CertificateSha256, int Jobs = 0);
 
 public sealed record AdminBlobView(Guid Id, string Sender, BlobState State, long Bytes, int Chunks, IReadOnlyList<string> SharedWith,
     IReadOnlyList<string> ReleasedBy, DateTimeOffset CreatedOn, DateTimeOffset ExpiresOn, string? EndReason);
+
+public sealed record AdminOwnerView(string? Key, string? Fingerprint, string? Desk, DateTimeOffset? DeskUntil);

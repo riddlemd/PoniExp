@@ -202,6 +202,39 @@ public sealed class PoniExpTools(McpAgent me)
     public async Task<string> RoomLeaveAsync([Description("The room's name or id.")] string room, CancellationToken cancellationToken = default) =>
         Json(await me.Api.LeaveRoomAsync(room, me.Agent, cancellationToken));
 
+    [McpServerTool(Name = "request_approval"), Description(
+        "Ask the owner's permission before doing something, and wait for the answer. It goes to wherever the owner is working (their " +
+        "desk); with no desk it waits until there is one. Returns state 'approved' or 'denied' (with the owner's reason).")]
+    public async Task<string> RequestApprovalAsync(
+        [Description("What you want to do, in one or two sentences.")] string summary,
+        [Description("Detail the owner may want: what, why, what it touches (optional).")] string? details = null,
+        [Description("The exact shell command, when it's about running one (optional; 'always allow' then covers only that command).")] string? command = null,
+        CancellationToken cancellationToken = default) =>
+        Json(await me.Api.AskAsync(new LocalApprovalRequest(me.Agent, summary, details, command is null ? null : "shell", command), cancellationToken));
+
+    /// <summary>
+    /// Claude Code's permission prompt tool (<c>claude --permission-prompt-tool mcp__poniexp__approve</c>): its permission prompts go to
+    /// the owner's desk. Returns the payload Claude Code expects: allow with the input unchanged, or deny with the reason.
+    /// </summary>
+    [McpServerTool(Name = "approve"), Description(
+        "Permission prompts for Claude Code (run it with --permission-prompt-tool mcp__poniexp__approve); not for calling directly.")]
+    public async Task<string> ApproveAsync(
+        [Description("The tool asking for permission.")] string tool_name,
+        [Description("The tool's input.")] JsonElement input,
+        [Description("The tool call's id.")] string? tool_use_id = null,
+        CancellationToken cancellationToken = default)
+    {
+        var command = input.ValueKind == JsonValueKind.Object && input.TryGetProperty("command", out var c) && c.ValueKind == JsonValueKind.String ? c.GetString() : null;
+        var compact = input.GetRawText();
+        var summary = $"{tool_name}: {command ?? (compact.Length > 300 ? compact[..300] + "..." : compact)}";
+        var details = JsonSerializer.Serialize(input, new JsonSerializerOptions { WriteIndented = true });
+        var answer = await me.Api.AskAsync(new LocalApprovalRequest(me.Agent, summary.Length > 1900 ? summary[..1900] + "..." : summary, details, tool_name, command),
+            cancellationToken);
+        return answer.State == ApprovalRecord.Approved
+            ? JsonSerializer.Serialize(new { behavior = "allow", updatedInput = input })
+            : JsonSerializer.Serialize(new { behavior = "deny", message = answer.Reason is { } why ? $"The owner denied it: {why}" : "The owner denied it." });
+    }
+
     [McpServerTool(Name = "machines", ReadOnly = true), Description("The other machines, whether they're online, their agents and the agents' states.")]
     public async Task<string> MachinesAsync(CancellationToken cancellationToken = default) => Json(await me.Api.MachinesAsync(cancellationToken));
 

@@ -17,7 +17,7 @@ namespace PoniExp.Client;
 /// </summary>
 public sealed class ClientStore
 {
-    private const int SchemaVersion = 9;
+    private const int SchemaVersion = 10;
 
     private const string Schema = """
         PRAGMA journal_mode = WAL;
@@ -181,6 +181,24 @@ public sealed class ClientStore
             job_column  TEXT NOT NULL,
             open        INTEGER NOT NULL DEFAULT 1,
             posted_on   TEXT NOT NULL
+        ) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS settings (
+            name  TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        ) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS approvals (
+            id         TEXT PRIMARY KEY,
+            direction  TEXT NOT NULL,
+            state      TEXT NOT NULL,
+            record     TEXT NOT NULL,
+            updated_on TEXT NOT NULL
+        ) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS approval_rules (
+            id         TEXT PRIMARY KEY,
+            agent      TEXT NOT NULL,
+            tool       TEXT,
+            subject    TEXT,
+            created_on TEXT NOT NULL
         ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS diagnostics (
             occurred_on  TEXT NOT NULL,
@@ -421,6 +439,26 @@ public sealed class ClientStore
             new PostedJob(Guid.Parse(r.GetString(0)), r.GetString(1), r.GetString(2), r.GetString(3),
                 r.IsDBNull(4) ? [] : JsonSerializer.Deserialize<List<JobRequirement>>(r.GetString(4), WireProtocol.Json)!,
                 Enum.GetValues<JobColumn>().First(c => WireProtocol.NameOf(c) == r.GetString(5))));
+
+    // ---- the owner, the desk and approvals ----
+
+    public string? GetSetting(string name) => Query("SELECT value FROM settings WHERE name = $name;", r => r.GetString(0), ("$name", name)).FirstOrDefault();
+
+    public ApprovalRecord? GetApproval(Guid id) =>
+        Query("SELECT record FROM approvals WHERE id = $id;", r => JsonSerializer.Deserialize<ApprovalRecord>(r.GetString(0), WireProtocol.Json)!, ("$id", Id(id)))
+            .FirstOrDefault();
+
+    /// <summary>Approvals in <paramref name="direction"/> ("in": asked of this desk; "out": asked by agents here), newest first.</summary>
+    public IReadOnlyList<ApprovalRecord> GetApprovals(string? direction = null, string? state = null, int limit = 200) =>
+        Query("""
+            SELECT record FROM approvals WHERE ($direction IS NULL OR direction = $direction) AND ($state IS NULL OR state = $state)
+            ORDER BY updated_on DESC LIMIT $limit;
+            """, r => JsonSerializer.Deserialize<ApprovalRecord>(r.GetString(0), WireProtocol.Json)!, ("$direction", direction), ("$state", state), ("$limit", limit));
+
+    public IReadOnlyList<ApprovalRule> GetApprovalRules() =>
+        Query("SELECT id, agent, tool, subject, created_on FROM approval_rules ORDER BY created_on;", r =>
+            new ApprovalRule(Guid.Parse(r.GetString(0)), r.GetString(1), r.IsDBNull(2) ? null : r.GetString(2), r.IsDBNull(3) ? null : r.GetString(3),
+                ClientStore.Parse(r.GetString(4))));
 
     internal const string RoomColumns = "id, name, events, collapsed, reason, updated_on";
 
@@ -869,6 +907,49 @@ public sealed class StoreTransaction
             ON CONFLICT (id) DO UPDATE SET events = $events, updated_on = $now;
             """, ("$id", ClientStore.Id(id)), ("$name", name), ("$events", JsonSerializer.Serialize(events, WireProtocol.Json)), ("$now", ClientStore.Stamp(Now)));
 
+    public void SetSetting(string name, string? value)
+    {
+        if (value is null)
+        {
+            Execute("DELETE FROM settings WHERE name = $name;", ("$name", name));
+        }
+        else
+        {
+            Execute("INSERT INTO settings (name, value) VALUES ($name, $value) ON CONFLICT (name) DO UPDATE SET value = $value;", ("$name", name), ("$value", value));
+        }
+    }
+
+    public string? GetSetting(string name) =>
+        ClientStore.Query(_connection, _transaction, "SELECT value FROM settings WHERE name = $name;", r => r.GetString(0), ("$name", name)).FirstOrDefault();
+
+    public ApprovalRecord? GetApproval(Guid id) =>
+        ClientStore.Query(_connection, _transaction, "SELECT record FROM approvals WHERE id = $id;",
+            r => JsonSerializer.Deserialize<ApprovalRecord>(r.GetString(0), WireProtocol.Json)!, ("$id", ClientStore.Id(id))).FirstOrDefault();
+
+    public IReadOnlyList<ApprovalRecord> GetApprovals(string direction, string state) =>
+        ClientStore.Query(_connection, _transaction, "SELECT record FROM approvals WHERE direction = $direction AND state = $state;",
+            r => JsonSerializer.Deserialize<ApprovalRecord>(r.GetString(0), WireProtocol.Json)!, ("$direction", direction), ("$state", state));
+
+    public IReadOnlyList<ApprovalRule> GetApprovalRules() =>
+        ClientStore.Query(_connection, _transaction, "SELECT id, agent, tool, subject, created_on FROM approval_rules;", r =>
+            new ApprovalRule(Guid.Parse(r.GetString(0)), r.GetString(1), r.IsDBNull(2) ? null : r.GetString(2), r.IsDBNull(3) ? null : r.GetString(3),
+                ClientStore.Parse(r.GetString(4))));
+
+    public void SaveApproval(ApprovalRecord approval) =>
+        Execute("""
+            INSERT INTO approvals (id, direction, state, record, updated_on) VALUES ($id, $direction, $state, $record, $now)
+            ON CONFLICT (id) DO UPDATE SET state = $state, record = $record, updated_on = $now;
+            """, ("$id", ClientStore.Id(approval.Id)), ("$direction", approval.Direction), ("$state", approval.State),
+            ("$record", JsonSerializer.Serialize(approval, WireProtocol.Json)), ("$now", ClientStore.Stamp(Now)));
+
+    public void SaveApprovalRule(ApprovalRule rule) =>
+        Execute("""
+            INSERT INTO approval_rules (id, agent, tool, subject, created_on) VALUES ($id, $agent, $tool, $subject, $created)
+            ON CONFLICT (id) DO NOTHING;
+            """, ("$id", ClientStore.Id(rule.Id)), ("$agent", rule.Agent), ("$tool", rule.Tool), ("$subject", rule.Subject), ("$created", ClientStore.Stamp(rule.CreatedOn)));
+
+    public bool RemoveApprovalRule(Guid id) => Execute("DELETE FROM approval_rules WHERE id = $id;", ("$id", ClientStore.Id(id))) > 0;
+
     public void SavePostedJob(PostedJob job) =>
         Execute("""
             INSERT INTO posted_jobs (id, agent, title, description, requirements, job_column, posted_on) VALUES ($id, $agent, $title, $description, $requirements, $column, $now)
@@ -1128,6 +1209,33 @@ public static class AttachmentEvents
 
 /// <summary>A conversation as one local agent sees it. <see cref="State"/> is open or finished.</summary>
 /// <summary>A job an agent here posted, as posted (for re-posting it under the same id).</summary>
+/// <summary>
+/// An approval as this machine knows it. "out": one of this machine's agents asked (<see cref="SentTo"/> is the desk it
+/// went to, which may be this machine). "in": another machine's agent asked this desk. States: pending, approved, denied,
+/// withdrawn (the agent gave up), moved (the desk moved on before an answer; the request went to the new desk).
+/// </summary>
+public sealed record ApprovalRecord(Guid Id, string Direction, string Machine, string Agent, string Summary, string? Details, string? Tool,
+    string? Command, DateTimeOffset RequestedOn, string State, string? SentTo = null, bool Always = false, string? Reason = null,
+    DateTimeOffset? AnsweredOn = null, string? AnsweredBy = null)
+{
+    public const string In = "in";
+    public const string Out = "out";
+    public const string Pending = "pending";
+    public const string Approved = "approved";
+    public const string Denied = "denied";
+    public const string Withdrawn = "withdrawn";
+    public const string Moved = "moved";
+
+    /// <summary>What an "always allow" rule matches besides agent and tool: the command, or for a tool-less request its summary.</summary>
+    public string? Subject => Command ?? (Tool is null ? Summary : null);
+}
+
+/// <summary>"Always allow": <see cref="Agent"/> may use <see cref="Tool"/> (for <see cref="Subject"/>, if set) without asking.</summary>
+public sealed record ApprovalRule(Guid Id, string Agent, string? Tool, string? Subject, DateTimeOffset CreatedOn)
+{
+    public bool Matches(string agent, string? tool, string? subject) => Agent == agent && Tool == tool && (Subject is null || Subject == subject);
+}
+
 public sealed record PostedJob(Guid Id, string Agent, string Title, string Description, IReadOnlyList<JobRequirement> Requirements, JobColumn Column);
 
 /// <summary>A room as this machine knows it: its membership log (checked), and whether it has collapsed.</summary>

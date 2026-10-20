@@ -69,6 +69,7 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
                 Background(SyncRoomsAsync);
                 Background(SyncJobsAsync);
                 Background(ReportCapabilitiesAsync);
+                Background(SyncDeskAsync);
             }
             else
             {
@@ -76,6 +77,7 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
             }
         };
         relay.RoomChanged += ApplyRoom;
+        relay.HereChanged += OnHereChanged;
         relay.JobChanged += OnJobChanged;
         relay.MessageRejected += (envelope, why) => Diagnose("warning", why.Contains("signature", StringComparison.Ordinal) ? "signature" : "delivery",
             $"refused a message: {why}", envelope?.FromMachine, envelope?.Id);
@@ -142,6 +144,7 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
         Store.Transact(Now, tx => tx.ExpireIncoming(skew));
         await _relay.FlushOutboxAsync(cancellationToken);
         await RenewJobLeasesAsync(cancellationToken);
+        await CheckDeskExpiryAsync();
         var retention = _retention.CurrentValue;
         if (Now - _lastRetention >= retention.Interval)
         {
@@ -230,6 +233,10 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
 
             case MessageType.FileReceipt: // automatic: applied, never answered
                 OnFileReceipt(tx, envelope, content);
+                break;
+
+            case MessageType.ApprovalRequest or MessageType.ApprovalAnswer or MessageType.ApprovalWithdrawn: // automatic: applied, never answered
+                OnApprovalMessage(tx, envelope, content);
                 break;
 
             case MessageType.Agent: // automatic: applied, never answered

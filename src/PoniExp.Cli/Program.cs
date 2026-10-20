@@ -72,6 +72,15 @@ const string Usage = """
       room read <room> --as <agent> [--since <time>] [--json]
       room send <room> --as <agent> [--reply <id>] <body|->   (or: send --to room:<name>)
                                            rooms: named conversations everyone in sees; invitees accept, members leave
+      owner                                the owner key (router's and pinned here) and the approval desk
+      owner pin                            pin the router's owner key here (shows its fingerprint to compare)
+      here [--hours <n>]                   make this machine your approval desk (your SSH agent signs: one prompt)
+      away                                 end the desk (no prompt from the desk machine itself)
+      approvals [--mine]                   what waits on this desk (--mine: what agents here asked)
+      approve <id> [--always]              approve (--always: that agent may do it again without asking)
+      deny <id> [--reason <text>]
+      approvals rules | approvals rules remove <id>
+                                           the "always allow" rules on this machine
       agent list | agent retire <name>
                                            the agent registry; a retired agent's messages are rejected
       diagnostics                          recent connection, signature and delivery problems
@@ -120,6 +129,15 @@ try
         ["diagnostics"] => await DiagnosticsAsync(),
         ["mcp", .. var rest] => await McpAsync(Option(rest, "--agent") ?? throw new ArgumentException("mcp needs --agent <name>")),
         ["capabilities"] => await CapabilitiesAsync(),
+        ["owner"] => await OwnerAsync(),
+        ["owner", "pin"] => await PinOwnerAsync(),
+        ["here", .. var rest] => await HereAsync(Option(rest, "--hours") is { } h ? TimeSpan.FromHours(double.Parse(h, CultureInfo.InvariantCulture)) : null),
+        ["away"] => await AwayAsync(),
+        ["approvals", "rules"] => await RulesAsync(),
+        ["approvals", "rules", "remove", var rule] => await RemoveRuleAsync(rule),
+        ["approvals", .. var rest] => await ApprovalsAsync(rest.Contains("--mine")),
+        ["approve", var id, .. var rest] => await AnswerAsync(id, true, rest.Contains("--always"), null),
+        ["deny", var id, .. var rest] => await AnswerAsync(id, false, false, Option(rest, "--reason")),
         ["service", "install", .. var rest] => await ServiceInstallAsync(rest.Contains("--system") ? ServiceMode.System : ServiceMode.User, rest.Contains("--dry-run")),
         ["service", "uninstall", .. var rest] => await ServiceUninstallAsync(rest.Contains("--system") ? ServiceMode.System : ServiceMode.User, rest.Contains("--dry-run")),
         ["service", "status"] => await ServiceStatusAsync(),
@@ -134,7 +152,7 @@ catch (OptionsValidationException e)
 {
     return Fail($"error: bad settings in {ClientConfig.SettingsPath}: {string.Join(" ", e.Failures)}");
 }
-catch (Exception e) when (e is InvalidOperationException or ArgumentException or FormatException or HttpRequestException or LocalApiException
+catch (Exception e) when (e is PoniExp.Core.Crypto.OwnerKeyUnavailableException or InvalidOperationException or ArgumentException or FormatException or HttpRequestException or LocalApiException
                                or KeyNotFoundException or Microsoft.AspNetCore.SignalR.HubException or System.Net.WebSockets.WebSocketException
                                or IOException)
 {
@@ -842,6 +860,192 @@ async Task<int> JobAsync(string[] rest)
         default:
             return Fail(Usage);
     }
+}
+
+// ---- the owner, the desk and approvals ----
+
+static void ShowOwner(LocalOwner o) => Console.WriteLine(
+    $"router's owner key  {(o.RouterKey is null ? "none (poniexp admin owner set)" : $"{o.RouterFingerprint}  {o.RouterKey.Split(' ', 3).ElementAtOrDefault(2)}")}\n" +
+    $"pinned here         {(o.PinnedKey is null ? "none (poniexp-client owner pin)" : $"{o.PinnedFingerprint}{(o.RouterKey is not null && o.RouterFingerprint != o.PinnedFingerprint ? "  DIFFERS FROM THE ROUTER'S" : "")}")}\n" +
+    $"desk                {(o.DeskMachine is null ? "none" : $"{o.DeskName}{(o.IsDesk ? " (this machine)" : "")} until {o.DeskUntil?.ToLocalTime():yyyy-MM-dd HH:mm}")}");
+
+async Task<int> OwnerAsync()
+{
+    using var api = await DaemonAsync2();
+    ShowOwner(await api.OwnerAsync(cancel.Token));
+    return 0;
+}
+
+/// <summary>The SSH agent here holds the owner's key, or null (no agent, or not that key).</summary>
+async Task<PoniExp.Core.Crypto.OwnerKey?> AgentHoldsAsync(string line)
+{
+    var wanted = PoniExp.Core.Crypto.OwnerKey.Parse(line);
+    try
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancel.Token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(20));
+        return (await new PoniExp.Core.Crypto.SshAgent().KeysAsync(timeout.Token)).FirstOrDefault(k => k.SameKeyAs(wanted));
+    }
+    catch (PoniExp.Core.Crypto.OwnerKeyUnavailableException)
+    {
+        return null;
+    }
+}
+
+async Task<int> PinOwnerAsync()
+{
+    using var api = await DaemonAsync2();
+    var owner = await api.OwnerAsync(cancel.Token);
+    if (owner.RouterKey is null)
+    {
+        return Fail("the router has no owner key yet: docker exec poniexp-server poniexp admin owner set \"<your ssh public key>\"");
+    }
+
+    var key = PoniExp.Core.Crypto.OwnerKey.Parse(owner.RouterKey);
+    if (await AgentHoldsAsync(owner.RouterKey) is not null)
+    {
+        Console.WriteLine($"Your SSH agent holds this key ({key.Fingerprint} {key.Comment}): pinning it.");
+    }
+    else
+    {
+        Console.WriteLine($"The router says the owner key is:\n  {key.Fingerprint}  {key.Comment}\n" +
+                          "Compare it with `ssh-add -l` on a machine whose SSH agent holds your key (or Bitwarden's SSH key item).");
+        Console.Write("Pin it on this machine? [y/N] ");
+        if (Console.ReadLine()?.Trim().ToLowerInvariant() is not ("y" or "yes"))
+        {
+            return Fail("not pinned");
+        }
+    }
+
+    ShowOwner(await api.PinOwnerAsync(owner.RouterKey, cancel.Token));
+    return 0;
+}
+
+async Task<PoniExp.Core.Protocol.HereClaim> SignClaimAsync(PoniExp.Core.Crypto.OwnerKey key, string? machine, DateTimeOffset issued, DateTimeOffset expires)
+{
+    Console.WriteLine("Approve the signing request in your SSH agent (e.g. Bitwarden)...");
+    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancel.Token);
+    timeout.CancelAfter(TimeSpan.FromMinutes(2));
+    var payload = PoniExp.Core.Protocol.HereClaim.Payload(machine, issued, expires);
+    return new PoniExp.Core.Protocol.HereClaim(machine, issued, expires, await new PoniExp.Core.Crypto.SshAgent().SignAsync(key, payload, timeout.Token));
+}
+
+async Task<int> HereAsync(TimeSpan? lifetime)
+{
+    using var api = await DaemonAsync2();
+    var owner = await api.OwnerAsync(cancel.Token);
+    if (owner.PinnedKey is null)
+    {
+        if (owner.RouterKey is null || await AgentHoldsAsync(owner.RouterKey) is null)
+        {
+            return Fail("no owner key is pinned here: poniexp-client owner pin");
+        }
+
+        owner = await api.PinOwnerAsync(owner.RouterKey, cancel.Token); // the SSH agent here holds it: nothing to compare
+        Console.WriteLine($"Pinned the owner key {owner.PinnedFingerprint} (your SSH agent holds it).");
+    }
+
+    if (await AgentHoldsAsync(owner.PinnedKey!) is not { } key)
+    {
+        return Fail($"the SSH agent here doesn't hold the owner key {owner.PinnedFingerprint} (is Bitwarden unlocked, with its SSH agent on?)");
+    }
+
+    var span = lifetime ?? owner.HereLifetime;
+    if (span <= TimeSpan.Zero || span > PoniExp.Core.Protocol.HereClaim.MaxLifetime)
+    {
+        return Fail("a desk lasts at most 7 days");
+    }
+
+    var now = DateTimeOffset.UtcNow;
+    try
+    {
+        var claim = await SignClaimAsync(key, owner.MachineId, now, now + span);
+        ShowOwner(await api.HereAsync(claim, cancel.Token));
+        return 0;
+    }
+    catch (PoniExp.Core.Crypto.OwnerKeyUnavailableException e)
+    {
+        return Fail($"not signed: {e.Message}");
+    }
+}
+
+async Task<int> AwayAsync()
+{
+    using var api = await DaemonAsync2();
+    var owner = await api.OwnerAsync(cancel.Token);
+    if (owner.IsDesk)
+    {
+        ShowOwner(await api.AwayAsync(null, cancel.Token));
+        return 0;
+    }
+
+    if (owner.DeskMachine is null)
+    {
+        Console.WriteLine("there's no desk");
+        return 0;
+    }
+
+    if (owner.PinnedKey is null || await AgentHoldsAsync(owner.PinnedKey) is not { } key)
+    {
+        return Fail($"the desk is {owner.DeskName}: run `away` there, or here with your SSH agent holding the owner key");
+    }
+
+    var now = DateTimeOffset.UtcNow;
+    ShowOwner(await api.AwayAsync(await SignClaimAsync(key, null, now, now), cancel.Token));
+    return 0;
+}
+
+static void ShowApproval(LocalApproval a) => Console.WriteLine(
+    $"{a.Id.ToString()[..8]}  {a.From}  {a.RequestedOn.ToLocalTime():MM-dd HH:mm}  {a.State}{(a.Always ? " (always)" : "")}{(a.AnsweredBy is { } by ? $" by {by}" : "")}" +
+    $"{(a.Reason is { } why ? $" ({why})" : "")}\n    {a.Summary}" + (a.Command is { } c && !a.Summary.Contains(c, StringComparison.Ordinal) ? $"\n    $ {c}" : "") +
+    (a.Details is { Length: > 0 } d && d != a.Command ? $"\n    {d.ReplaceLineEndings("\n    ")}" : ""));
+
+async Task<int> ApprovalsAsync(bool mine)
+{
+    using var api = await DaemonAsync2();
+    if (mine)
+    {
+        var asked = await api.ApprovalsAsync(cancel.Token);
+        Console.WriteLine(asked.Count == 0 ? "no approvals asked from here" : "");
+        asked.ForEach(ShowApproval);
+        return 0;
+    }
+
+    var owner = await api.OwnerAsync(cancel.Token);
+    if (!owner.IsDesk)
+    {
+        Console.WriteLine($"this machine isn't the desk ({(owner.DeskName is { } d ? $"the desk is {d}" : "there's none: poniexp-client here")})");
+        return 0;
+    }
+
+    var waiting = await api.DeskAsync(cancel.Token);
+    Console.WriteLine(waiting.Count == 0 ? "nothing waits" : $"{waiting.Count} waiting (approve <id> [--always] | deny <id> [--reason <text>]):");
+    waiting.ForEach(ShowApproval);
+    return 0;
+}
+
+async Task<int> AnswerAsync(string id, bool approve, bool always, string? reason)
+{
+    using var api = await DaemonAsync2();
+    ShowApproval(await api.AnswerAsync(id, approve, always, reason, cancel.Token));
+    return 0;
+}
+
+async Task<int> RulesAsync()
+{
+    using var api = await DaemonAsync2();
+    var rules = await api.ApprovalRulesAsync(cancel.Token);
+    Console.WriteLine(rules.Count == 0 ? "no always-allow rules" : string.Join("\n", rules.Select(r =>
+        $"{r.Id.ToString()[..8]}  {r.Agent}  {r.Tool ?? "(request)"}  {r.Subject ?? "(anything)"}  since {r.CreatedOn.ToLocalTime():yyyy-MM-dd}")));
+    return 0;
+}
+
+async Task<int> RemoveRuleAsync(string id)
+{
+    using var api = await DaemonAsync2();
+    await api.RemoveApprovalRuleAsync(id, cancel.Token);
+    Console.WriteLine("removed");
+    return 0;
 }
 
 async Task<int> RoomAsync(string[] rest)

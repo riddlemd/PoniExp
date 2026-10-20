@@ -211,6 +211,74 @@ public sealed class LocalApiClient : IDisposable
     public Task<LocalJob> JobActionAsync(string id, string verb, LocalJobAction request, CancellationToken ct = default) =>
         PostAsync<LocalJob>($"jobs/{Uri.EscapeDataString(id)}/{verb}", request, ct);
 
+    // ---- the owner, the desk and approvals ----
+
+    public Task<LocalOwner> OwnerAsync(CancellationToken ct = default) => GetAsync<LocalOwner>("owner", ct);
+
+    /// <summary>Pins the owner key (the line the router has; the caller has shown its fingerprint and had a yes).</summary>
+    public Task<LocalOwner> PinOwnerAsync(string key, CancellationToken ct = default) => PostAsync<LocalOwner>("owner/pin", new LocalOwnerPin(key), ct);
+
+    /// <summary>Makes this machine the desk with an owner-signed claim (the caller had the SSH agent sign it).</summary>
+    public Task<LocalOwner> HereAsync(HereClaim claim, CancellationToken ct = default) => PostAsync<LocalOwner>("here", claim, ct);
+
+    /// <summary>Ends the desk: from the desk machine itself no signature is needed; elsewhere an owner-signed away claim.</summary>
+    public Task<LocalOwner> AwayAsync(HereClaim? signed = null, CancellationToken ct = default) => PostAsync<LocalOwner>("away", new LocalAway(signed), ct);
+
+    /// <summary>Asks the owner. Returns at once (pending, or approved by a rule); then <see cref="WaitApprovalAsync"/>.</summary>
+    public Task<LocalApproval> RequestApprovalAsync(LocalApprovalRequest request, CancellationToken ct = default) =>
+        PostAsync<LocalApproval>("approvals", request, ct);
+
+    /// <summary>The approval, once answered or after <paramref name="wait"/> (at most 50 seconds), whichever is first.</summary>
+    public Task<LocalApproval> WaitApprovalAsync(Guid id, TimeSpan wait, CancellationToken ct = default) =>
+        GetAsync<LocalApproval>($"approvals/{id}?wait={(int)Math.Clamp(wait.TotalSeconds, 0, 50)}", ct);
+
+    /// <summary>Asks and waits for the answer (withdrawn if <paramref name="ct"/> is cancelled first).</summary>
+    public async Task<LocalApproval> AskAsync(LocalApprovalRequest request, CancellationToken ct = default)
+    {
+        request = request with { Id = request.Id ?? Guid.NewGuid() };
+        try
+        {
+            var approval = await RequestApprovalAsync(request, ct);
+            while (approval.State == ApprovalRecord.Pending)
+            {
+                approval = await WaitApprovalAsync(approval.Id, TimeSpan.FromSeconds(50), ct);
+            }
+
+            return approval;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            await WithdrawApprovalAsync(request.Id.Value, CancellationToken.None);
+            throw;
+        }
+    }
+
+    public async Task WithdrawApprovalAsync(Guid id, CancellationToken ct = default)
+    {
+        using var timeout = WithTimeout(ct);
+        using var response = await _http.DeleteAsync($"approvals/{id}", timeout.Token);
+        await EnsureAsync(response, timeout.Token);
+    }
+
+    /// <summary>Approvals this machine's agents asked for, newest first.</summary>
+    public Task<List<LocalApproval>> ApprovalsAsync(CancellationToken ct = default) => GetAsync<List<LocalApproval>>("approvals", ct);
+
+    /// <summary>What waits on this desk (empty unless this machine is the desk).</summary>
+    public Task<List<LocalApproval>> DeskAsync(CancellationToken ct = default) => GetAsync<List<LocalApproval>>("desk", ct);
+
+    /// <summary>Approves (<paramref name="always"/>: and makes an "always allow" rule) or denies, by id or id prefix.</summary>
+    public Task<LocalApproval> AnswerAsync(string id, bool approve, bool always = false, string? reason = null, CancellationToken ct = default) =>
+        PostAsync<LocalApproval>($"desk/{Uri.EscapeDataString(id)}/{(approve ? "approve" : "deny")}", new LocalAnswer(always, reason), ct);
+
+    public Task<List<ApprovalRule>> ApprovalRulesAsync(CancellationToken ct = default) => GetAsync<List<ApprovalRule>>("approvals/rules", ct);
+
+    public async Task RemoveApprovalRuleAsync(string id, CancellationToken ct = default)
+    {
+        using var timeout = WithTimeout(ct);
+        using var response = await _http.DeleteAsync($"approvals/rules/{Uri.EscapeDataString(id)}", timeout.Token);
+        await EnsureAsync(response, timeout.Token);
+    }
+
     /// <summary>Rooms with an agent of this machine in them or invited (or just <paramref name="agent"/>'s), collapsed ones last.</summary>
     public Task<List<LocalRoom>> RoomsAsync(string? agent = null, CancellationToken ct = default) =>
         GetAsync<List<LocalRoom>>("rooms" + (agent is null ? "" : "?agent=" + Uri.EscapeDataString(agent)), ct);
@@ -637,3 +705,24 @@ public sealed record LocalJobAction(string Agent, string? Column = null, string?
 
 public sealed record LocalRoomSend(string Agent, string Body, Guid? ReplyTo = null, string? Subject = null, string? ContentType = null,
     IReadOnlyDictionary<string, string>? Metadata = null);
+
+/// <summary>
+/// The owner as this machine sees it: the router's key, the key pinned here (only that one's signatures count), and
+/// the desk. <see cref="HereLifetime"/> is how long a <c>here</c> lasts (Daemon:HereLifetime).
+/// </summary>
+public sealed record LocalOwner(string MachineId, string? RouterKey, string? RouterFingerprint, string? PinnedKey, string? PinnedFingerprint,
+    string? DeskMachine, string? DeskName, DateTimeOffset? DeskUntil, bool IsDesk, TimeSpan HereLifetime);
+
+public sealed record LocalOwnerPin(string Key);
+
+public sealed record LocalAway(HereClaim? Signed);
+
+/// <summary>An agent asks: <see cref="Tool"/> and <see cref="Command"/> (a shell command) when it's about running one.</summary>
+/// <remarks><see cref="Id"/>: chosen by the asker, so it can withdraw even if it gives up before the answer to the ask arrives; asking again with it is a no-op.</remarks>
+public sealed record LocalApprovalRequest(string Agent, string Summary, string? Details = null, string? Tool = null, string? Command = null, Guid? Id = null);
+
+/// <summary>An approval: <see cref="From"/> is "machine-name/agent". <see cref="AnsweredBy"/>: "rule", or the desk machine's name.</summary>
+public sealed record LocalApproval(Guid Id, string Direction, string From, string Summary, string? Details, string? Tool, string? Command, string State,
+    bool Always, string? Reason, DateTimeOffset RequestedOn, DateTimeOffset? AnsweredOn, string? AnsweredBy, string? Desk);
+
+public sealed record LocalAnswer(bool Always = false, string? Reason = null);

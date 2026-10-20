@@ -34,6 +34,13 @@ public static class HubMethods
     /// <summary>A daemon reports what its machine has (after each authentication).</summary>
     public const string ReportCapabilities = nameof(ReportCapabilities);
 
+    // the owner and the approval desk
+    public const string GetOwner = nameof(GetOwner);
+    public const string GetHere = nameof(GetHere);
+    public const string SetHere = nameof(SetHere);
+    /// <summary>The desk machine ends its own desk (no owner signature needed).</summary>
+    public const string LeaveDesk = nameof(LeaveDesk);
+
     // files (the chunks themselves go over HTTP, under BlobsPath, with a ticket)
     public const string BlobsPath = "/blobs";
     public const string BeginUpload = nameof(BeginUpload);
@@ -53,4 +60,6 @@ public static class HubMethods
     public const string RoomChanged = nameof(RoomChanged);
     /// <summary>A job changed (a <see cref="JobChange"/>), to every approved machine.</summary>
     public const string JobChanged = nameof(JobChanged);
+    /// <summary>The desk changed (a <see cref="HereClaim"/>, or null when it ended), to every approved machine.</summary>
+    public const string HereChanged = nameof(HereChanged);
 }

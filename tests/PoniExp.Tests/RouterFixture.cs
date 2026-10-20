@@ -40,6 +40,8 @@ public sealed class RouterFixture : IAsyncDisposable
 
     public PoniExp.Server.Jobs.JobBoard Jobs => App.Services.GetRequiredService<PoniExp.Server.Jobs.JobBoard>();
 
+    public PoniExp.Server.Owner.OwnerDesk Desk => App.Services.GetRequiredService<PoniExp.Server.Owner.OwnerDesk>();
+
     public PoniExp.Server.Rooms.RoomRegistry Rooms => App.Services.GetRequiredService<PoniExp.Server.Rooms.RoomRegistry>();
 
     public PoniExp.Server.Hubs.PresenceTracker Presence => App.Services.GetRequiredService<PoniExp.Server.Hubs.PresenceTracker>();
@@ -126,6 +128,14 @@ public sealed class RouterFixture : IAsyncDisposable
     }
 
     public static async Task Eventually(Func<bool> condition) => await EventuallyAsync(() => Task.FromResult(condition()));
+
+    /// <summary>Waits until <paramref name="value"/> gives something other than null.</summary>
+    public static async Task<T> EventuallyValueAsync<T>(Func<Task<T?>> value) where T : class
+    {
+        T? found = null;
+        await EventuallyAsync(async () => (found = await value()) is not null);
+        return found!;
+    }
 
     public static async Task EventuallyAsync(Func<Task<bool>> condition)
     {

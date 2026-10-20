@@ -656,7 +656,7 @@ an agent that matches picks it up when it has capacity and moves it through the 
 - finished jobs are dropped after `JobRetention`;
 - a backup restores the live jobs, and a poster's daemon re-posts its open jobs to an empty router.
 
-## Phase 9: Approvals and the owner (workshop)
+## Phase 9: Approvals and the owner (workshop, done)
 
 The point of this phase: an agent that needs a human's yes reaches you wherever you are. Allow by
 default: there are no machine-to-machine rules to configure; approvals are the permission system.
@@ -708,6 +708,19 @@ default: there are no machine-to-machine rules to configure; approvals are the p
 
 Live: `here` on this machine with the real Bitwarden prompt; a request from a second machine
 approved here.
+
+**As built:**
+- Core: `OwnerKey` (ssh-ed25519 lines, SHA-256 fingerprints, SSHSIG preimages; verified with
+  BouncyCastle and checked against a signature made by OpenSSH's `ssh-keygen -Y sign`), `SshAgent`
+  (the agent protocol over the Windows pipe or `SSH_AUTH_SOCK`), `HereClaim`, the approval bodies;
+  protocol 8.
+- Router: `OwnerDesk` keeps the owner key and the newest claim in `router_state`; hub methods
+  `GetOwner`, `GetHere`, `SetHere`, `LeaveDesk`; `HereChanged` pushed to every machine, and to a
+  connecting machine before its queue. `admin owner [set <key>]`; the owner key is in backups.
+- Client schema 10: `settings` (the pin, the desk), `approvals`, `approval_rules`.
+- The CLI does the signing (the SSH agent is the user's, which a service may not reach); the daemon
+  checks claims against its pin. An asker picks its request id, so it can withdraw even before its
+  request is stored.
 
 ## Phase 10: Tray app (workshop)
 

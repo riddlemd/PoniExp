@@ -69,6 +69,7 @@ public static class RouterHost
         builder.Services.AddSingleton<AdminService>();
         builder.Services.AddSingleton<Rooms.RoomRegistry>();
         builder.Services.AddSingleton<Jobs.JobBoard>();
+        builder.Services.AddSingleton<Owner.OwnerDesk>();
         builder.Services.AddSignalR(signalR =>
             {
                 signalR.MaximumReceiveMessageSize = Limits.MaxContentBytes * 2 + 64 * 1024;

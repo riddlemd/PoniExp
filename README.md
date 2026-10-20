@@ -64,7 +64,7 @@ after 24 hours. Files: 2 GB per file, 10 GB per sender, 5 GB waiting per recipie
 (`PoniExp__Blobs__*`, with `Overrides__<machine>__PerRecipientBytes` per machine). An offline
 machine's queued messages are capped at 100 MB. Every limit is a `PoniExp__*` setting.
 
-**Backups.** The TLS certificate, the approved machines and the job board's unfinished jobs are
+**Backups.** The TLS certificate, the approved machines, the owner key and the job board's unfinished jobs are
 worth keeping (queued messages are short-lived; posters' daemons also re-post their open jobs to a
 router that lost them). The file holds the certificate's private key: keep it somewhere safe, such as a
 Bitwarden attachment.
@@ -101,6 +101,7 @@ docker exec poniexp-server poniexp admin blobs [clear --for <name>]   # files on
 docker exec poniexp-server poniexp admin group set <name> <address>... # groups: groups | group remove <name>
 docker exec poniexp-server poniexp admin rooms [--collapsed]          # live rooms, or collapsed rooms' statistics
 docker exec poniexp-server poniexp admin jobs [--all]                 # the job board (finished jobs too with --all)
+docker exec poniexp-server poniexp admin owner [set "<ssh public key>"]  # the owner key and the approval desk
 docker exec poniexp-server poniexp admin job remove <id>              # take a job off the board
 docker exec poniexp-server poniexp admin traffic-log on        # record traffic (off by default; kept 30 days)
 docker exec poniexp-server poniexp admin traffic-log show --since 1h [--machine <name>]
@@ -170,6 +171,24 @@ Anyone can move a job between `backlog` and `ready` or `job comment` on it; the 
 cancel` it. See it with `job list [--all]` and `job show <id>`. The board isn't end-to-end
 encrypted: the router can read it, so keep secrets in messages. MCP: `jobs`, `job`, `job_post`,
 `job_claim`, `job_move`, `job_release`, `job_comment`, `job_cancel`.
+
+**Approvals.** Agents ask your permission through PoniExp, and the question reaches whichever machine
+you're working at: your *desk*.
+
+- **Once:** put your SSH public key on the router: `docker exec poniexp-server poniexp admin owner set
+  "$(ssh-add -L | grep 'agent-relay owner')"`. It's the Bitwarden SSH key; PoniExp never holds the
+  private key. Each machine pins it on first use (`owner pin` asks you to compare the fingerprint,
+  unless that machine's SSH agent holds the key).
+- **Where you sit down:** `poniexp-client here` (one Bitwarden prompt; lasts `Daemon:HereLifetime`,
+  12 hours by default, or `--hours <n>`). `away` ends it. Requests made while there's no desk wait.
+- **Answering:** `approvals` lists what waits, `approve <id> [--always]` or `deny <id> [--reason
+  <text>]`. `--always` lets that agent do the same again without asking (for a command, that exact
+  command); `approvals rules` lists those rules on the asking machine, `approvals rules remove <id>`.
+- **Agents:** the MCP tool `request_approval` asks and waits. Claude Code can send its own permission
+  prompts: `claude --permission-prompt-tool mcp__poniexp__approve` (with the PoniExp MCP server
+  configured).
+
+The router sees only who the desk is; what's asked and answered is end-to-end encrypted.
 
 **Retrying safely.** To retry a request, send it again with the first message's id as its
 `operationId` (`--operation` on the command line). The other machine doesn't do it twice: its
