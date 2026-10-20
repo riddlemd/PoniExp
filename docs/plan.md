@@ -779,15 +779,50 @@ needs `Router:AdminPort`; refuses `--url` and file paths), owner handovers and g
 `router_key`), follow handovers, check group signatures, and keep join requests as `join` approvals
 (their id is the machine id). The CLI signs; `approve`/`deny` of a join runs `admin approve`/`remove`.
 
-## Phase 11: Key rotation and revocation
+## Phase 11: Key rotation, revocation and signed-only changes (workshop)
 
-- Identity key rotation, with the new key signed by the old one.
-- Encryption key rotation. Old encryption private keys are kept, protected, for as long as
-  envelopes encrypted to them are retained in the client log (90 days by default).
-- A `machine_ids` table in the client database: this machine's past and present ids, so messages
-  from before a rotation are still recognised as its own.
-- Revocation signed by the owner, for a lost or stolen machine.
-- What happens to messages, files and jobs waiting for a revoked machine.
+- **Only owner-signed changes,** once the router has an owner key. Admin commands that only read
+  (`list`, `groups`, `rooms`, `jobs`, `blobs`, `owner`, `certificate`, `traffic-log` status,
+  `backup`) run at once. Anything that changes something runs only signed: from `poniexp-client admin`
+  (phase 10), or from `docker exec` through the desk:
+  - `docker exec -it poniexp-server poniexp admin <change>` prints the command and a short code and
+    waits; the router puts it on the desk as a card with the same code; `approve <id>` there signs
+    exactly that command (one prompt) and the router runs it, the output going back to the waiting
+    `docker exec`. `deny`, or `Router:AdminApprovalTimeout` (5 minutes), cancels it. No desk: it says
+    so and waits.
+  - Recovery: with no owner key everything runs unsigned (a new router, a restore);
+    `owner set --lost-key <key>` replaces a lost key unsigned, and machines don't follow it (re-pin
+    each with `owner pin`).
+- **Encryption key rotation:** `poniexp-client keys rotate`, and automatically every
+  `Daemon:EncryptionKeyLifetime` (90 days). The new key is signed by the identity key with its issue
+  time; the router passes it on; machines take only a newer one than they have (no rollback to an old
+  key). The old private keys stay in the secret store for `Retention:Envelopes` (90 days), so older
+  envelopes still open, then are deleted. The machine id doesn't change.
+- **No identity key rotation.** A machine whose identity key may have leaked is revoked and rejoins:
+  `poniexp-client keys reset` makes new keys (the old home's data kept aside), and asks to join under
+  the same name; the desk card says it replaces the revoked machine.
+- **Revocation** (`admin revoke <machine>`, owner-signed): the router keeps the signed revocations,
+  refuses the key for good (a removed machine may ask again; a revoked one can't), and sends the list
+  to every machine; daemons refuse the key themselves, even if a router lists it as approved again.
+  What waits on it: queued messages to it dropped, undelivered ones from it refused; blobs shared only
+  with it deleted, it's taken off others; jobs it claimed go back to ready, jobs it posted stay marked
+  "poster revoked"; it leaves rooms; if it's the desk, the desk ends; its pending approvals are
+  dropped. Group members on a revoked or removed machine are skipped (the signed list stays; `groups`
+  marks them gone).
+- What a stolen machine already received stays readable to whoever has it; revocation stops what's new.
+
+**Done when:** tests show:
+- a change via `docker exec` waits for the desk, runs once approved there, is cancelled by deny or
+  the timeout; a read runs at once; with no owner key everything runs; `--lost-key` works and isn't
+  followed;
+- a rotated encryption key is used by senders, old envelopes still open, an older key served by the
+  router is refused, old keys go after retention, automatic rotation happens;
+- `keys reset` rejoins under the same name;
+- a revoked machine is refused by the router and by daemons even when relisted, with each side effect
+  above; group members on it are skipped.
+
+Live: a `docker exec` change approved on the desk with the real Bitwarden prompt; a key rotation; a
+revocation.
 
 ## Phase 12: Web interface (workshop)
 
