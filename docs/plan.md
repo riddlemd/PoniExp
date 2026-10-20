@@ -723,10 +723,53 @@ approved here.
   checks claims against its pin. An asker picks its request id, so it can withdraw even before its
   request is stored.
 
-## Phase 10: Owner admin from anywhere
+## Phase 10: Owner admin from anywhere (workshop)
 
-Admin commands (approve a machine, change rules, clear a backlog) signed with the owner key and sent
-from any machine, instead of `docker exec` on Wojtek.
+Every `poniexp admin` command, run from any approved machine as `poniexp-client admin <command>`,
+signed with the owner key: one SSH-agent (Bitwarden) prompt per command. `docker exec` keeps working
+(bootstrap and recovery), and setting the first owner key needs it (nothing can sign before there's
+a key).
+
+- **The router's own keys:** an identity key and an encryption key, like a machine's (P-256), kept in
+  its data directory (owner-only) and in backups. Machines learn them in `Hello` and pin them on first
+  connect (behind the TLS pin); a different key later is refused.
+- **A command:** id, the router's id, the arguments, optional input (for `restore -`), the time; the
+  owner's SSH signature over all of it (namespace `poniexp`). The CLI has the SSH agent sign it, the
+  daemon seals it to the router's encryption key (ephemeral ECDH + HKDF + AES-256-GCM) and sends it.
+- **The router** opens it, checks the owner signature, that it names this router, that its time is
+  within the clock skew and after the router started, and that its id is new; runs it exactly as
+  `docker exec` would (the same admin code, output captured); and returns the exit code and output
+  sealed to the asking machine's encryption key and signed by the router's identity key. Each command
+  is logged with the asking machine and the owner key's fingerprint.
+- **Every command works remotely,** `backup`, `restore` and `owner set` included. A backup (with the
+  TLS private key) arrives sealed to the asking machine, whose CLI writes it where told. A restore
+  that changes the certificate still needs a router restart.
+- **Changing the owner key remotely** is a handover signed by the current key. The router keeps the
+  signed handovers and sends them to every machine; daemons follow a chain that starts at their pin,
+  so they re-pin without asking. A key set with `docker exec` over an existing one isn't followed:
+  machines keep their pin and show that it differs.
+- **Owner-signed groups:** a group set with `poniexp-client admin group set` carries the signed
+  command; daemons with a pinned owner key use only groups whose signature checks against it (an
+  unsigned group, set with `docker exec`, is ignored with a diagnostic there).
+- **Join requests on the desk:** the router sends the desk machine the machines waiting to join (name,
+  join code, notes, address), whenever that changes and when the desk moves or reconnects. They show
+  in `approvals` beside agents' requests; `approve <id>` there signs and runs `admin approve`, `deny`
+  runs `admin remove`. Answered elsewhere, they leave the desk.
+
+**Done when:** tests show:
+- a signed command runs and returns what `docker exec` would; an unsigned, wrongly signed, stale,
+  replayed or other-router command is refused;
+- the response is sealed to the asking machine and signed by the router; a machine refuses a router
+  key that differs from its pin;
+- backup and restore round-trip remotely;
+- a remote `owner set` moves every machine's pin, offline ones when they reconnect; a `docker exec`
+  one doesn't;
+- a signed group is used; an unsigned one is ignored where an owner key is pinned;
+- a join request reaches the desk, approving it there admits the machine, and one approved elsewhere
+  leaves the desk.
+
+Live: `admin list` and `admin approve` from this machine with the real Bitwarden prompt; a join
+request approved from the desk.
 
 ## Phase 11: Key rotation and revocation
 
