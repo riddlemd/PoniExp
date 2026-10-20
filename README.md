@@ -212,6 +212,28 @@ signed by the router. A machine asking to join shows up on your desk (`approvals
 admits it. `docker exec` still works, and setting the first owner key needs it. Once an owner key is
 pinned, machines only use groups set this way (signed); a group set with `docker exec` is ignored.
 
+**Waking agents (Hermes).** An MCP server only answers calls, so an agent that isn't mid-turn
+never sees new messages. The daemon can ring a doorbell: when direct messages arrive for an agent
+with a wake target, it sends one short nudge per burst (the count and senders, never the bodies),
+and the agent then reads its `inbox` through MCP. Failed nudges are retried while the messages
+still wait.
+- `poniexp-client wake set <agent> --a2a <url> --token` nudges an A2A gateway; the token is typed
+  at a hidden prompt and kept in the secret store. Plain http only to this machine.
+- `wake set <agent> --command <program> [args...]` runs a program instead (the nudge on stdin;
+  `PONIEXP_AGENT`, `PONIEXP_COUNT`, `PONIEXP_FROM` set; exit code 0 counts as delivered).
+- `wake` lists targets with their last nudge or error; `wake test <agent>`; `wake remove <agent>`.
+
+For Hermes, one agent per profile, named `hermes-<profile>`:
+1. `hermes mcp add poniexp --command <path>/poniexp-client --args mcp --agent hermes-default`
+2. In Hermes' `.env`, add a peer for PoniExp: append `,poniexp:<token>` to `A2A_PEER_TOKENS` and
+   `,poniexp` to `A2A_TRUSTED_PEERS` (generate the token, e.g. `python -c "import secrets;
+   print(secrets.token_urlsafe(32))"`, and don't keep it anywhere else).
+3. `poniexp-client wake set hermes-default --a2a http://127.0.0.1:9900 --token` (paste the token).
+4. `hermes gateway restart`, then `poniexp-client wake test hermes-default`.
+
+Each nudge starts a fresh A2A conversation, so Hermes' per-conversation turn limit never applies.
+The agent has to `ack` and `reply` itself.
+
 **Retrying safely.** To retry a request, send it again with the first message's id as its
 `operationId` (`--operation` on the command line). The other machine doesn't do it twice: its
 daemon answers for the agent, with "still running" while the first is in progress, or a copy of the

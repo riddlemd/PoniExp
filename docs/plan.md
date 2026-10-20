@@ -835,7 +835,7 @@ revocation.
   the router's machine list and incoming envelopes. `JobRules.MachineRevoked`; `PosterRevoked` lets
   anyone cancel. A desk naming a machine that isn't approved is ignored.
 
-## Phase 12: Waking agents (Hermes through MCP)
+## Phase 12: Waking agents (Hermes through MCP) (done)
 
 **Decided (owner, October 2026):** Hermes uses PoniExp through MCP like every other agent; there is
 no Hermes-shaped bridge. The deep dive into Hermes' A2A adapter (kept below) showed a bridge would
@@ -850,7 +850,7 @@ gets a general **wake hook**: a doorbell, not a bridge.
   - `A2aUrl`: an A2A gateway (Hermes). http only on a loopback address, https otherwise.
   - `Command` and `Arguments`: a program to run (e.g. something that wakes a Claude Code session).
 - **The token** for an A2A gateway (one of Hermes' `A2A_PEER_TOKENS`) is kept in the machine's secret
-  store (`wake-token:<agent>`), never in settings.json.
+  store (`wake-token-<agent>`), never in settings.json.
 - **When:** a direct message for an agent with a wake target (rooms and jobs don't wake; the agent
   reads them when it's awake anyway). After `Delay`, one nudge covers every message in the agent's
   inbox not yet nudged about. A nudge is sent whether the agent shows as online or not: an MCP

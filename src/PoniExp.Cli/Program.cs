@@ -74,6 +74,12 @@ const string Usage = """
                                            rooms: named conversations everyone in sees; invitees accept, members leave
       admin <command> [args]               a router admin command from here, signed with your owner key (one prompt):
                                            any `poniexp admin` command (list, approve <code>, group set ..., backup <file>, ...)
+      wake                                 wake targets: agents that only use MCP (e.g. Hermes) get a nudge when messages arrive
+      wake set <agent> --a2a <url> [--token]
+                                           nudge an A2A gateway (Hermes); --token asks for its peer token (kept in the secret store)
+      wake set <agent> --command <program> [args...]
+                                           run a program (the nudge on stdin; PONIEXP_AGENT, PONIEXP_COUNT, PONIEXP_FROM)
+      wake test <agent> | wake remove <agent>
       keys                                 this machine's encryption key: issued, next rotation
       keys rotate                          a new encryption key now (also automatic: Daemon:EncryptionKeyLifetime, 90 days)
       keys reset                           new keys for a revoked machine (daemon stopped): the old data is kept aside; then join again
@@ -135,6 +141,10 @@ try
         ["mcp", .. var rest] => await McpAsync(Option(rest, "--agent") ?? throw new ArgumentException("mcp needs --agent <name>")),
         ["capabilities"] => await CapabilitiesAsync(),
         ["admin", .. var adminArgs] when adminArgs.Length > 0 => await RemoteAdminAsync(adminArgs),
+        ["wake"] => await WakeListAsync(),
+        ["wake", "set", var wakeAgent, .. var wakeRest] => await WakeSetAsync(wakeAgent, wakeRest),
+        ["wake", "test", var wakeAgent] => await WakeTestAsync(wakeAgent),
+        ["wake", "remove", var wakeAgent] => await WakeRemoveAsync(wakeAgent),
         ["keys"] => await KeysAsync(false),
         ["keys", "rotate"] => await KeysAsync(true),
         ["keys", "reset"] => await KeysResetAsync(),
@@ -203,7 +213,7 @@ async Task<int> DaemonAsync(bool windowsService)
 
     using var keys = KeyRing.LoadOrCreate(home);
     var context = new DaemonContext(keys, home, config.ToOptions(), new ClientStore(ClientConfig.DatabasePath), LocalAddress.ForHome(home),
-        k => KeyRing.SaveEncryption(home, k));
+        k => KeyRing.SaveEncryption(home, k), SecretStores.ForHome(home));
     await using var app = DaemonHost.Build(context, windowsService: windowsService);
     await DaemonHost.StartAsync(app, context, cancel.Token);
     Console.Error.WriteLine($"* daemon for {keys.MachineId[..8]} ({home}) listening on {context.Address}; Ctrl+C to stop");
@@ -914,6 +924,116 @@ async Task<PoniExp.Core.Protocol.AdminCommand?> OfferSelfApprovalAsync(string? r
     timeout.CancelAfter(TimeSpan.FromMinutes(2));
     var signature = await new PoniExp.Core.Crypto.SshAgent().SignAsync(key, PoniExp.Core.Protocol.AdminCommand.Payload(id, routerId, args, null, issued), timeout.Token);
     return new PoniExp.Core.Protocol.AdminCommand(id, routerId, args, null, issued, signature);
+}
+
+// ---- wake (phase 12) ----
+
+async Task<int> WakeListAsync()
+{
+    using var api = await DaemonAsync2();
+    var targets = await api.WakeTargetsAsync(cancel.Token);
+    if (targets.Count == 0)
+    {
+        Console.WriteLine("no wake targets (wake set <agent> --a2a <url> | --command <program>)");
+    }
+
+    foreach (var t in targets)
+    {
+        PrintWake(t);
+    }
+
+    return 0;
+}
+
+async Task<int> WakeSetAsync(string agent, string[] rest)
+{
+    LocalWakeSet request;
+    if (Option(rest, "--a2a") is { } url)
+    {
+        string? token = null;
+        if (rest.Contains("--token"))
+        {
+            token = ReadHidden($"Peer token for {url} (one of its A2A_PEER_TOKENS; not shown): ");
+            if (string.IsNullOrWhiteSpace(token))
+            {
+                Console.Error.WriteLine("no token given");
+                return 2;
+            }
+        }
+
+        request = new LocalWakeSet(url, null, null, token?.Trim());
+    }
+    else if (Array.IndexOf(rest, "--command") is var at and >= 0 && at + 1 < rest.Length)
+    {
+        request = new LocalWakeSet(null, rest[at + 1], [.. rest.Skip(at + 2)], null);
+    }
+    else
+    {
+        Console.Error.WriteLine("wake set <agent> --a2a <url> [--token] | --command <program> [args...]");
+        return 2;
+    }
+
+    using var api = await DaemonAsync2();
+    PrintWake(await api.SetWakeAsync(agent, request, cancel.Token));
+    Console.WriteLine($"Try it: poniexp-client wake test {agent}");
+    return 0;
+}
+
+async Task<int> WakeTestAsync(string agent)
+{
+    using var api = await DaemonAsync2();
+    PrintWake(await api.TestWakeAsync(agent, cancel.Token));
+    Console.WriteLine("nudge delivered");
+    return 0;
+}
+
+async Task<int> WakeRemoveAsync(string agent)
+{
+    using var api = await DaemonAsync2();
+    await api.RemoveWakeAsync(agent, cancel.Token);
+    Console.WriteLine($"{agent} is no longer woken");
+    return 0;
+}
+
+static void PrintWake(LocalWakeTarget t)
+{
+    var token = t.Kind == "a2a" ? (t.HasToken ? ", with a token" : ", no token") : "";
+    Console.WriteLine($"{t.Agent,-16} {t.Kind,-8} {t.Target}{token}");
+    Console.WriteLine($"{"",-16} {t.Waiting} waiting; last nudge {(t.LastNudge is { } n ? n.ToLocalTime().ToString("MM-dd HH:mm:ss", CultureInfo.InvariantCulture) : "never")}"
+        + (t.LastError is { } e ? $"; last failure {t.LastFailure!.Value.ToLocalTime():MM-dd HH:mm:ss}: {e}" : ""));
+}
+
+/// <summary>A secret typed at the console without echo; from stdin as one line when it's redirected.</summary>
+static string? ReadHidden(string prompt)
+{
+    Console.Error.Write(prompt);
+    if (Console.IsInputRedirected)
+    {
+        return Console.ReadLine();
+    }
+
+    var text = new System.Text.StringBuilder();
+    while (true)
+    {
+        var key = Console.ReadKey(intercept: true);
+        if (key.Key == ConsoleKey.Enter)
+        {
+            Console.Error.WriteLine();
+            return text.ToString();
+        }
+
+        if (key.Key == ConsoleKey.Backspace)
+        {
+            if (text.Length > 0)
+            {
+                text.Length--;
+            }
+        }
+        else if (!char.IsControl(key.KeyChar))
+        {
+            text.Append(key.KeyChar);
+        }
+    }
 }
 
 // ---- keys ----

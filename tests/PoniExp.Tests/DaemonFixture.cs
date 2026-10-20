@@ -73,7 +73,7 @@ public sealed class DaemonFixture : IAsyncDisposable
         {
             RouterUrl = _router.Url,
             ReconnectDelays = [TimeSpan.FromMilliseconds(100)],
-        }, new ClientStore(_router.StorePath(Keys)), LocalAddress.ForHome(Home));
+        }, new ClientStore(_router.StorePath(Keys)), LocalAddress.ForHome(Home), Secrets: PoniExp.Secrets.SecretStores.ForHome(Home));
         _app = DaemonHost.Build(context, ["--Logging:LogLevel:Default=None"], c => c.AddInMemoryCollection(_settings));
         await DaemonHost.StartAsync(_app, context);
         await RouterFixture.Eventually(() => Daemon.Relay.IsConnected);

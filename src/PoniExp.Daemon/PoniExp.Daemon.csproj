@@ -10,6 +10,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../PoniExp.Client/PoniExp.Client.csproj" />
+    <ProjectReference Include="../PoniExp.Secrets/PoniExp.Secrets.csproj" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="PoniExp.Tests" />

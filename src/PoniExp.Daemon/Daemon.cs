@@ -11,7 +11,7 @@ namespace PoniExp.Daemon;
 /// <summary>What a daemon runs on: this machine's keys, its home directory, how to reach the router, and its database.</summary>
 /// <param name="SaveKeys">Stores the keys after an encryption key rotation (the secret store; null in tests: kept in memory).</param>
 public sealed record DaemonContext(MachineKeys Keys, string Home, RelayClientOptions Relay, ClientStore Store, LocalAddress Address,
-    Action<MachineKeys>? SaveKeys = null);
+    Action<MachineKeys>? SaveKeys = null, PoniExp.Secrets.ISecretStore? Secrets = null);
 
 /// <summary>
 /// The machine's daemon: its only connection to the router. It routes incoming messages to local
@@ -30,13 +30,17 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
     private readonly IOptionsMonitor<DaemonOptions> _options;
     private readonly IOptionsMonitor<MessagingOptions> _messaging;
     private readonly IOptionsMonitor<RetentionOptions> _retention;
+    private readonly IOptionsMonitor<WakeOptions> _wake;
+    private readonly CancellationToken _stopping;
     private DateTimeOffset _lastRetention = DateTimeOffset.MinValue;
     private readonly TimeProvider _time;
     private readonly ILogger<Daemon> _logger;
 
     public Daemon(DaemonContext context, RelayClient relay, AgentSessions sessions, IOptionsMonitor<DaemonOptions> options,
-        IOptionsMonitor<MessagingOptions> messaging, IOptionsMonitor<RetentionOptions> retention, TimeProvider time, ILogger<Daemon> logger, IHostApplicationLifetime lifetime)
+        IOptionsMonitor<MessagingOptions> messaging, IOptionsMonitor<RetentionOptions> retention, IOptionsMonitor<WakeOptions> wake, TimeProvider time, ILogger<Daemon> logger, IHostApplicationLifetime lifetime)
     {
+        _wake = wake;
+        _stopping = lifetime.ApplicationStopping;
         // End the agents' streams first, so the server isn't left waiting for them to drain.
         lifetime.ApplicationStopping.Register(() =>
         {
@@ -96,6 +100,8 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
 
     public ClientStore Store => _context.Store;
 
+    internal PoniExp.Secrets.ISecretStore? Secrets => _context.Secrets;
+
     public AgentSessions Sessions => _sessions;
 
     public DaemonContext Context => _context;
@@ -153,6 +159,7 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
         await RenewJobLeasesAsync(cancellationToken);
         await CheckDeskExpiryAsync();
         await RotateIfDueAsync(cancellationToken);
+        WakeSweep();
         var retention = _retention.CurrentValue;
         if (Now - _lastRetention >= retention.Interval)
         {
@@ -331,6 +338,8 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
             {
                 Deliver(session, Store.FindIncoming(MachineId, content.ToAgent, message.Envelope.Id)!, content);
             }
+
+            WakeOnMessage(content.ToAgent);
         }
         else if (content.Type == MessageType.FileReceipt && Parse<FileReceiptBody>(content.Body) is { } fileReceipt && content.ReplyTo is { } carried
                  && _sessions.Get(content.ToAgent) is { } owner)

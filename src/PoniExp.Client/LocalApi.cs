@@ -270,6 +270,19 @@ public sealed class LocalApiClient : IDisposable
     public Task<LocalApproval> AnswerAsync(string id, bool approve, bool always = false, string? reason = null, CancellationToken ct = default) =>
         PostAsync<LocalApproval>($"desk/{Uri.EscapeDataString(id)}/{(approve ? "approve" : "deny")}", new LocalAnswer(always, reason), ct);
 
+    /// <summary>The wake targets (phase 12), with their last nudge and error.</summary>
+    public Task<List<LocalWakeTarget>> WakeTargetsAsync(CancellationToken ct = default) => GetAsync<List<LocalWakeTarget>>("wake", ct);
+
+    /// <summary>Sets an agent's wake target (exactly one of an A2A URL or a command); the token goes to the daemon's secret store.</summary>
+    public Task<LocalWakeTarget> SetWakeAsync(string agent, LocalWakeSet request, CancellationToken ct = default) =>
+        PostAsync<LocalWakeTarget>($"wake/{Uri.EscapeDataString(agent)}", request, ct);
+
+    public Task<LocalOk> RemoveWakeAsync(string agent, CancellationToken ct = default) => PostAsync<LocalOk>($"wake/{Uri.EscapeDataString(agent)}/remove", new { }, ct);
+
+    /// <summary>Sends a test nudge now; fails with the reason if it couldn't be delivered.</summary>
+    public Task<LocalWakeTarget> TestWakeAsync(string agent, CancellationToken ct = default) =>
+        PostAsync<LocalWakeTarget>($"wake/{Uri.EscapeDataString(agent)}/test", new { }, ct);
+
     /// <summary>The router's id and owner key, as of the daemon's last connect (known before this machine is approved).</summary>
     public Task<LocalRouter> RouterAsync(CancellationToken ct = default) => GetAsync<LocalRouter>("router", ct);
 
@@ -745,3 +758,8 @@ public sealed record LocalAnswer(bool Always = false, string? Reason = null);
 public sealed record LocalKeys(string MachineId, DateTimeOffset IssuedOn, DateTimeOffset DueOn, IReadOnlyList<DateTimeOffset> Retired);
 
 public sealed record LocalRouter(string? RouterId, string? OwnerKey);
+
+public sealed record LocalWakeTarget(string Agent, string Kind, string Target, bool HasToken, int Waiting, DateTimeOffset? LastNudge,
+    DateTimeOffset? LastFailure, string? LastError);
+
+public sealed record LocalWakeSet(string? A2aUrl, string? Command, List<string>? Arguments, string? Token);

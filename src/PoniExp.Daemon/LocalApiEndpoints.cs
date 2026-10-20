@@ -311,6 +311,16 @@ public static class LocalApiEndpoints
         app.MapGet("/diagnostics", (Daemon d) => Results.Ok(d.Store.GetDiagnostics()));
 
         // Joining goes through the daemon: in system mode only it holds the keys.
+        app.MapGet("/wake", (Daemon d) => Results.Ok(d.WakeTargets()));
+        app.MapPost("/wake/{agent}", (Daemon d, string agent, LocalWakeSet request) => Handle(async () =>
+            Results.Ok(await d.SetWakeTargetAsync(agent, new WakeTarget { A2aUrl = request.A2aUrl, Command = request.Command, Arguments = request.Arguments ?? [] },
+                request.Token))));
+        app.MapPost("/wake/{agent}/remove", (Daemon d, string agent) => Handle(async () =>
+        {
+            await d.SetWakeTargetAsync(agent, null, null);
+            return Results.Ok(new LocalOk(true));
+        }));
+        app.MapPost("/wake/{agent}/test", (Daemon d, string agent) => Handle(async () => Results.Ok(await d.TestWakeAsync(agent))));
         app.MapGet("/router", (Daemon d) => Results.Ok(new LocalRouter(d.Relay.RouterId, d.Relay.RouterOwnerKey)));
         app.MapPost("/join/approve", (Daemon d, AdminCommand command, CancellationToken ct) => Handle(async () =>
         {
