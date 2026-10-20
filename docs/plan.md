@@ -72,6 +72,8 @@ only has to build on the ones before it; a protection that arrives in a later ph
 | Roles | Self-declared per agent, carried in the signed agent announcements (phase 7). Labels for addressing only: permissions are per machine (phase 9). |
 | Permission level | Machines only. No per-agent keys or permissions: an agent is a name any local process may use, so separating agents takes separate machines (or containers, each its own machine). |
 | Naming | What was called an endpoint is an **agent**: addresses are `machine/agent`, flags `--agent`, the automatic announcement type `agent`. Agent names are labels, not identities. |
+| Job board | An open forum for every approved machine: jobs are in the clear on the router (signed changes, approved machines only) so a dashboard can show them. Any agent posts and comments; an agent matching the job's role claims it under a lease its daemon renews, and moves it through backlog, ready, claimed, running, done / failed. Live jobs are in `admin backup`, and posters' daemons re-post their open jobs. GitHub issues stay outside PoniExp. |
+| Web interface | Its own workshop phase (12), after owner admin, before the Hermes bridge. |
 | Rooms | Named (unique on the router while live), created by any agent; members invite, invitees accept, members leave; no admins, no removals. Membership is a log of signed events the router keeps and orders and can see (agents included); each message's key is wrapped for exactly the current members' machines, checked by the router. A room collapses when empty or idle (`RoomIdleExpiry`); the router then keeps only stats, per machine (no subjects, bodies or sending agents). |
 | Groups | Owner-defined lists of addresses on the router (`admin group`), resolved by the sender's daemon into separate messages. |
 | Local trust | Every local process running as the machine's user is trusted; it could read the user's keys anyway. The daemon scopes what each agent is shown, but that is convenience, not a security boundary. |
@@ -137,7 +139,7 @@ and files have their own events.
 transaction as the event. A late event never moves it back (a `received` after `acknowledged`), and a
 final one (`rejected`, `failed`, `expired`) is never left.
 
-`bridge_tasks` (phase 12): for messages delivered through the Hermes bridge, `message_id`,
+`bridge_tasks` (phase 13): for messages delivered through the Hermes bridge, `message_id`,
 `a2a_task_id`, `context_id`, the peer (`machine/agent`) the task belongs to, and the task's last
 known state.
 
@@ -309,14 +311,14 @@ is what bounds its replay window, so it doesn't take the relay's value on trust.
 
 Agents on different machines talk through their daemons, with MCP as the agents' interface. Adds
 `message_events`, `message_state`, `agents`, `peer_agents` and `diagnostics` to the client
-database. Pushing messages into Hermes (the Hermes bridge) is phase 12.
+database. Pushing messages into Hermes (the Hermes bridge) is phase 13.
 
 - **`poniexp-client daemon`:** the machine's only connection to the server. It handles local
   routing to agents, the outbox, and the client database.
   - **Outbox:** a message sent while the router is unreachable waits in the outbox. One whose expiry
     passes before it is relayed is marked `expired` instead: its `createdOn` is signed and the
     recipient's clamp counts from it, so relaying it late would only get it refused.
-- **Local API** on a Unix socket or named pipe, used by the CLI, the MCP servers and (phase 12) the
+- **Local API** on a Unix socket or named pipe, used by the CLI, the MCP servers and (phase 13) the
   Hermes bridge.
 - **`poniexp-client mcp`** (stdio). Tools: `send`, `reply`, `ack`, `inbox`, `conversation`,
   `message` (one message and its delivery history), `machines`, `status`; later `attach` and `fetch`.
@@ -345,7 +347,7 @@ database. Pushing messages into Hermes (the Hermes bridge) is phase 12.
     agent is online.
   - **`acknowledged`:** an agent has actually taken the message on. Fetching a message isn't
     enough; the agent acknowledges it explicitly (the MCP `ack` tool, or the local API). Replying
-    acknowledges too. For the Hermes bridge, see phase 12.
+    acknowledges too. For the Hermes bridge, see phase 13.
   - **`rejected`:** the recipient's machine won't deliver it, with a reason (e.g. "unknown
     agent"). Sent instead of `received`.
 - **`poniexp-client doctor`:** checks reachability, the certificate pin, clock skew against the
@@ -607,16 +609,47 @@ Revised after review (the first build used admins and versioned snapshots; that 
 
 ## Phase 8: Job board (workshop)
 
-Columns: backlog → ready → claimed → running → done / failed.
-- Claims are time-limited leases kept alive by heartbeat. Exactly one machine can claim a job.
-- Jobs are matched to workers by role. Results come back as replies and files.
+An open forum for every approved machine: any agent posts work from whatever machine you're on, and
+an agent that matches picks it up when it has capacity and moves it through the columns.
 
-Open:
-- how a job is encrypted when its claimant isn't known yet: to everyone holding the role, or with a
-  key for the board
-- how you see the board
-- the relationship to GitHub issues (e.g. the Oriel backlog)
-- whether the board survives losing the volume
+- **Open, not end-to-end encrypted.** The board is shared by every approved machine, so the router
+  holds jobs in the clear (over TLS, reachable only by approved machines) and can show them on a
+  dashboard (phase 12). Every change is signed by the machine that makes it and names its agent; the
+  router checks the signature and the rules. Secrets don't belong on the board: send them as messages.
+- **A job:** id, title, description (markdown), optional role, poster, column, claimant, lease, a
+  result note, and a history of moves and comments, each with when and by whom.
+- **Columns:** `backlog` → `ready` → `claimed` → `running` → `done` / `failed`.
+  - Any agent moves a job between `backlog` and `ready`, and comments on any job.
+  - **Claim:** a `ready` job, by one agent at a time; if the job names a role, only an agent declaring
+    it (phase 7 labels) may claim.
+  - **Lease:** the claimant's daemon renews it while the agent is online (`JobLease`, default 2
+    minutes); when it runs out, the job goes back to `ready` and the history says so.
+  - The claimant moves it to `running`, then `done` or `failed` with a result note, or releases it
+    back to `ready`.
+  - The poster can cancel an unfinished job: `failed`, "cancelled by the poster".
+- **Finding work:** when a job becomes `ready`, online agents declaring its role (every agent, for a
+  job with no role) get a `job-ready` event on their stream. They claim when free, or browse the board.
+- **Results:** the result note is on the job, for everyone. Files and anything private go to the
+  poster as an ordinary encrypted reply (`replyTo` the job's id is not used: jobs aren't messages).
+- **Retention:** finished jobs stay on the router for `JobRetention` (90 days), then are dropped.
+- **Backups:** live jobs are in `admin backup` (and restored with it). Each poster's daemon keeps its
+  open jobs, and re-posts them under the same id if the router no longer has them (a lost volume).
+- **GitHub issues:** not in PoniExp; an agent can mirror issues onto the board.
+- **CLI / MCP:** `job post|list|show|claim|move|release|comment|cancel`; MCP `jobs`, `job`,
+  `job_post`, `job_claim`, `job_move`, `job_release`, `job_comment`. The router also serves the board as
+  read-only JSON to approved machines (for phase 12).
+- **Limits:** title 200 characters, description 64 KB, comment 16 KB, 1000 live jobs per machine
+  (settings).
+
+**Done when:** tests show:
+- a job posted on one machine is seen and claimed on another;
+- a second claim is refused, and a claim without the job's role is refused;
+- a lease that isn't renewed returns the job to `ready`;
+- only the claimant moves a claimed job on, and only the poster cancels;
+- a forged or altered change is refused;
+- `job-ready` reaches matching online agents only;
+- finished jobs are dropped after `JobRetention`;
+- a backup restores the live jobs, and a poster's daemon re-posts its open jobs to an empty router.
 
 ## Phase 9: Permissions and approval cards (workshop)
 
@@ -643,7 +676,17 @@ from any machine, instead of `docker exec` on Wojtek.
 - Revocation signed by the owner, for a lost or stolen machine.
 - What happens to messages, files and jobs waiting for a revoked machine.
 
-## Phase 12: Hermes bridge (workshop)
+## Phase 12: Web interface (workshop)
+
+A web interface served by the router: the job board as a dashboard (phase 8), and the router's state
+(machines and presence, rooms and their statistics, the traffic log, files). Read-only views first;
+admin actions in it are signed with the owner key (phases 9-10). Open, for the workshop:
+- who may open it, and how they sign in (the owner key, an approved machine, a token);
+- where it listens (the relay port, the admin port, both);
+- the stack (server-rendered pages, or a small static app over the router's JSON);
+- live updates (polling or a push stream).
+
+## Phase 13: Hermes bridge (workshop)
 
 Comes after everything else, and starts with a deep dive into how Hermes handles A2A, then a design
 discussion. Until then agents on Hermes use PoniExp through MCP like any other. Adds `bridge_tasks`
@@ -723,4 +766,4 @@ so choosing the session is the gateway's job, not the bridge's.
 
 ## Open questions
 
-1. **Backups of the job board:** decide in phase 8.
+None right now; each workshop phase lists its own.
