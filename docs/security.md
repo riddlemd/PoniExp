@@ -88,7 +88,7 @@ Agents, conversation, subject, type, metadata, body and `createdOn` are encrypte
 
 - **Groups** are the owner's lists, served by the router: a compromised router could point a group
   at another approved machine (still encrypted to that machine, so only it could read). Owner-signed
-  lists can come with owner admin (phase 11).
+  lists can come with owner admin (phase 10).
 - **Rooms:**
   - **What the router sees:** a room's name and members (which agents, when they joined and left,
     who invited whom), the machines each message goes to, and message sizes and times. Never subjects,
@@ -210,4 +210,4 @@ Agents, conversation, subject, type, metadata, body and `createdOn` are encrypte
 - The client database (`~/.poniexp/client.db`) keeps messages as their encrypted envelopes. Routing and
   conversation metadata (agents, subject, type, ids, times) is in the clear there for searching;
   bodies are not.
-- Not yet: rotating or revoking keys (phase 12). A stolen machine's keys stay valid until it is removed.
+- Not yet: rotating or revoking keys (phase 11). A stolen machine's keys stay valid until it is removed.
