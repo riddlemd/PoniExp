@@ -1219,6 +1219,7 @@ public sealed record ApprovalRecord(Guid Id, string Direction, string Machine, s
     DateTimeOffset? AnsweredOn = null, string? AnsweredBy = null)
 {
     public const string In = "in";
+    public const string Join = "join";
     public const string Out = "out";
     public const string Pending = "pending";
     public const string Approved = "approved";

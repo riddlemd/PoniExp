@@ -72,6 +72,8 @@ const string Usage = """
       room read <room> --as <agent> [--since <time>] [--json]
       room send <room> --as <agent> [--reply <id>] <body|->   (or: send --to room:<name>)
                                            rooms: named conversations everyone in sees; invitees accept, members leave
+      admin <command> [args]               a router admin command from here, signed with your owner key (one prompt):
+                                           any `poniexp admin` command (list, approve <code>, group set ..., backup <file>, ...)
       owner                                the owner key (router's and pinned here) and the approval desk
       owner pin                            pin the router's owner key here (shows its fingerprint to compare)
       here [--hours <n>]                   make this machine your approval desk (your SSH agent signs: one prompt)
@@ -129,6 +131,7 @@ try
         ["diagnostics"] => await DiagnosticsAsync(),
         ["mcp", .. var rest] => await McpAsync(Option(rest, "--agent") ?? throw new ArgumentException("mcp needs --agent <name>")),
         ["capabilities"] => await CapabilitiesAsync(),
+        ["admin", .. var adminArgs] when adminArgs.Length > 0 => await RemoteAdminAsync(adminArgs),
         ["owner"] => await OwnerAsync(),
         ["owner", "pin"] => await PinOwnerAsync(),
         ["here", .. var rest] => await HereAsync(Option(rest, "--hours") is { } h ? TimeSpan.FromHours(double.Parse(h, CultureInfo.InvariantCulture)) : null),
@@ -997,7 +1000,7 @@ async Task<int> AwayAsync()
 
 static void ShowApproval(LocalApproval a) => Console.WriteLine(
     $"{a.Id.ToString()[..8]}  {a.From}  {a.RequestedOn.ToLocalTime():MM-dd HH:mm}  {a.State}{(a.Always ? " (always)" : "")}{(a.AnsweredBy is { } by ? $" by {by}" : "")}" +
-    $"{(a.Reason is { } why ? $" ({why})" : "")}\n    {a.Summary}" + (a.Command is { } c && !a.Summary.Contains(c, StringComparison.Ordinal) ? $"\n    $ {c}" : "") +
+    $"{(a.Reason is { } why ? $" ({why})" : "")}\n    {a.Summary}" + (a.Command is { } c && a.Direction != "join" && !a.Summary.Contains(c, StringComparison.Ordinal) ? $"\n    $ {c}" : "") +
     (a.Details is { Length: > 0 } d && d != a.Command ? $"\n    {d.ReplaceLineEndings("\n    ")}" : ""));
 
 async Task<int> ApprovalsAsync(bool mine)
@@ -1024,9 +1027,84 @@ async Task<int> ApprovalsAsync(bool mine)
     return 0;
 }
 
+/// <summary>
+/// `admin ...`: the command, signed by the owner key through the SSH agent, run on the router; `backup <file>` and
+/// `restore <file>` read and write the file here.
+/// </summary>
+async Task<int> RemoteAdminAsync(string[] args)
+{
+    using var api = await DaemonAsync2();
+    return await RunSignedAdminAsync(api, args);
+}
+
+async Task<int> RunSignedAdminAsync(LocalApiClient api, string[] args)
+{
+    var owner = await api.OwnerAsync(cancel.Token);
+    if (owner.RouterId is null)
+    {
+        return Fail("the daemon isn't connected to the router");
+    }
+
+    if (owner.PinnedKey is null || await AgentHoldsAsync(owner.PinnedKey) is not { } key)
+    {
+        return Fail(owner.PinnedKey is null ? "no owner key is pinned here: poniexp-client owner pin"
+            : $"the SSH agent here doesn't hold the owner key {owner.PinnedFingerprint} (is Bitwarden unlocked, with its SSH agent on?)");
+    }
+
+    string? input = null;
+    string? backupTo = null;
+    var sent = args.ToList();
+    if (args is ["backup", var to] && to != "-")
+    {
+        (sent[1], backupTo) = ("-", to);
+    }
+    else if (args is ["restore", var from])
+    {
+        input = from == "-" ? await Console.In.ReadToEndAsync() : await File.ReadAllTextAsync(from);
+        sent[1] = "-";
+    }
+
+    var id = Guid.NewGuid();
+    var issued = DateTimeOffset.UtcNow;
+    Console.Error.WriteLine("Approve the signing request in your SSH agent (e.g. Bitwarden)...");
+    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancel.Token);
+    timeout.CancelAfter(TimeSpan.FromMinutes(2));
+    var payload = PoniExp.Core.Protocol.AdminCommand.Payload(id, owner.RouterId, sent, input, issued);
+    string signature;
+    try
+    {
+        signature = await new PoniExp.Core.Crypto.SshAgent().SignAsync(key, payload, timeout.Token);
+    }
+    catch (PoniExp.Core.Crypto.OwnerKeyUnavailableException e)
+    {
+        return Fail($"not signed: {e.Message}");
+    }
+
+    var result = await api.AdminAsync(new PoniExp.Core.Protocol.AdminCommand(id, owner.RouterId, sent, input, issued, signature), cancel.Token);
+    if (backupTo is not null && result.ExitCode == 0)
+    {
+        PoniExp.Core.Crypto.PrivateFiles.WriteAllText(backupTo, result.Output);
+        Console.WriteLine($"backup written to {backupTo} (it holds the router's TLS and signing private keys: keep it safe)");
+    }
+    else
+    {
+        Console.Write(result.Output);
+    }
+
+    return result.ExitCode;
+}
+
 async Task<int> AnswerAsync(string id, bool approve, bool always, string? reason)
 {
     using var api = await DaemonAsync2();
+    var join = (await api.DeskAsync(cancel.Token)).Where(a => a.Direction == "join" && (a.Id.ToString() == id || (id.Length >= 4 && a.Id.ToString().StartsWith(id, StringComparison.Ordinal))))
+        .ToList();
+    if (join is [var machine])
+    {
+        Console.WriteLine($"{(approve ? "Approving" : "Removing")} {machine.From}, join code {machine.Command}:");
+        return await RunSignedAdminAsync(api, [approve ? "approve" : "remove", machine.Id.ToString("N")]); // a join's id is the machine's id
+    }
+
     ShowApproval(await api.AnswerAsync(id, approve, always, reason, cancel.Token));
     return 0;
 }

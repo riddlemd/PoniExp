@@ -19,8 +19,15 @@ public sealed partial class Daemon
             if (Address.ParseIndirect(text) is { } group)
             {
                 groups ??= await _relay.GetGroupsAsync(cancellationToken);
-                resolved.AddRange(groups.FirstOrDefault(g => g.Name == group.Name)?.Members
-                                  ?? throw new KeyNotFoundException($"no group '{group.Name}' (the owner sets groups: poniexp admin group set)"));
+                var found = groups.FirstOrDefault(g => g.Name == group.Name)
+                            ?? throw new KeyNotFoundException($"no group '{group.Name}' (the owner sets groups: poniexp-client admin group set)");
+                if (GroupProblem(found) is { } problem)
+                {
+                    Diagnose("warning", "owner", problem);
+                    throw new InvalidOperationException(problem);
+                }
+
+                resolved.AddRange(found.Members);
             }
             else
             {

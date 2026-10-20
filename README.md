@@ -190,6 +190,14 @@ you're working at: your *desk*.
 
 The router sees only who the desk is; what's asked and answered is end-to-end encrypted.
 
+**Admin from any machine.** `poniexp-client admin <command>` runs any `poniexp admin` command from
+wherever you are (`admin list`, `admin approve <id>`, `admin group set oncall wojtek/agent`,
+`admin backup ~/poniexp-backup.json`, ...), signed with your owner key: one Bitwarden prompt per
+command. It's sealed to the router's own key and the result comes back sealed to your machine and
+signed by the router. A machine asking to join shows up on your desk (`approvals`); `approve <id>`
+admits it. `docker exec` still works, and setting the first owner key needs it. Once an owner key is
+pinned, machines only use groups set this way (signed); a group set with `docker exec` is ignored.
+
 **Retrying safely.** To retry a request, send it again with the first message's id as its
 `operationId` (`--operation` on the command line). The other machine doesn't do it twice: its
 daemon answers for the agent, with "still running" while the first is in progress, or a copy of the

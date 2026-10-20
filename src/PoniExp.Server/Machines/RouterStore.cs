@@ -172,8 +172,12 @@ public sealed class RouterStore
             groups.Add(new GroupInfo(r.GetString(0), JsonSerializer.Deserialize<List<string>>(r.GetString(1), Json) ?? []));
         }
 
-        return groups;
+        // Each with the owner-signed command that set it, if it was set that way (phase 10).
+        return [.. groups.Select(g => GetState(GroupSignatureState(g.Name)) is { Length: > 0 } json
+            ? g with { Signed = JsonSerializer.Deserialize<AdminCommand>(json, WireProtocol.Json) } : g)];
     }
+
+    internal static string GroupSignatureState(string group) => $"group_signed:{group}";
 
     /// <summary>Sets a group's members; none deletes it.</summary>
     public void SaveGroup(string name, IReadOnlyList<string> members)

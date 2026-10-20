@@ -19,6 +19,7 @@ public sealed class AdminService(
     Rooms.RoomRegistry rooms,
     Jobs.JobBoard jobs,
     Owner.OwnerDesk desk,
+    Owner.RouterKeys routerKeys,
     IHubContext<RelayHub> hub,
     IOptionsMonitor<RouterOptions> options,
     TimeProvider time,
@@ -33,6 +34,7 @@ public sealed class AdminService(
         var record = await registry.ApproveAsync(selector);
         logger.LogInformation("Approved {Name} ({Id})", record.Name, record.Id[..8]);
         await hub.Clients.Group(RelayHub.KeyGroup(record.Id)).SendAsync(HubMethods.MembershipChanged, record.Status);
+        await desk.PushPendingJoinsAsync();
         return View(record);
     }
 
@@ -43,6 +45,7 @@ public sealed class AdminService(
         await hub.Clients.Group(RelayHub.KeyGroup(record.Id)).SendAsync(HubMethods.MembershipChanged, record.Status);
         presence.Disconnect(record.Id);
         await queue.DropForAsync(record.Id);
+        await desk.PushPendingJoinsAsync();
         return View(record);
     }
 
@@ -55,14 +58,29 @@ public sealed class AdminService(
         await queue.DropForAsync(record.Id);
         blobs.Forget(record.Id);
         await rooms.MachineRemovedAsync(record.Id);
+        await desk.PushPendingJoinsAsync();
         return View(record) with { Status = MembershipStatus.Unknown };
     }
 
     /// <summary>Forgets every pending join request and tells the waiting clients (<c>poniexp admin clear-pending</c>).</summary>
-    public async Task<IReadOnlyList<AdminMachineView>> ClearPendingAsync() => await ForgetAsync(await registry.ClearPendingAsync(), "Cleared");
+    public async Task<IReadOnlyList<AdminMachineView>> ClearPendingAsync()
+    {
+        var cleared = await ForgetAsync(await registry.ClearPendingAsync(), "Cleared");
+        await desk.PushPendingJoinsAsync();
+        return cleared;
+    }
 
     /// <summary>Forgets join requests that waited longer than <see cref="RouterOptions.JoinRequestExpiry"/>.</summary>
-    public async Task<IReadOnlyList<AdminMachineView>> ExpirePendingAsync() => await ForgetAsync(await registry.ExpirePendingAsync(), "Expired");
+    public async Task<IReadOnlyList<AdminMachineView>> ExpirePendingAsync()
+    {
+        var expired = await ForgetAsync(await registry.ExpirePendingAsync(), "Expired");
+        if (expired.Count > 0)
+        {
+            await desk.PushPendingJoinsAsync();
+        }
+
+        return expired;
+    }
 
     /// <summary>The certificate (with its private key) and the approved machines: what can't be rebuilt without every client.</summary>
     public RouterBackup Backup(RouterCertificateInfo certificate)
@@ -71,7 +89,7 @@ public sealed class AdminService(
         return new RouterBackup(BackupFormat, 1, time.GetUtcNow(), certificate.Sha256,
             File.Exists(pfx) ? Convert.ToBase64String(File.ReadAllBytes(pfx)) : null,
             [.. registry.List().Where(m => m.Status == MembershipStatus.Approved)],
-            [.. jobs.List(includeFinished: false)], desk.Owner?.ToString());
+            [.. jobs.List(includeFinished: false)], desk.Owner?.ToString(), routerKeys.Export(), [.. desk.Handovers]);
     }
 
     /// <summary>
@@ -106,9 +124,15 @@ public sealed class AdminService(
         {
             desk.SetOwner(ownerKey);
         }
+
+        var keysChanged = backup.RouterKeys is { } keys && routerKeys.Restore(options.CurrentValue.DataDirectory, keys);
+        if (backup.OwnerHandovers is { Count: > 0 } handovers)
+        {
+            desk.RestoreHandovers(handovers);
+        }
         logger.LogInformation("Restored {Count} machines from a backup of {On}; certificate {Changed}", machines.Count, backup.CreatedOn,
             certificateChanged ? "changed (restart to serve it)" : "unchanged");
-        return new RestoreResult(machines.Count, certificateChanged, backup.CertificateSha256, restoredJobs);
+        return new RestoreResult(machines.Count, certificateChanged, backup.CertificateSha256, restoredJobs, keysChanged);
     }
 
     private async Task<IReadOnlyList<AdminMachineView>> ForgetAsync(IReadOnlyList<MachineRecord> forgotten, string verb)
@@ -123,7 +147,10 @@ public sealed class AdminService(
         return [.. forgotten.Select(m => View(m) with { Status = MembershipStatus.Unknown })];
     }
 
+    /// <summary>The groups, each with the owner-signed command that set it, if it was set that way.</summary>
     public IReadOnlyList<GroupInfo> Groups() => store.LoadGroups();
+
+    internal static string GroupSignatureState(string group) => RouterStore.GroupSignatureState(group);
 
     public IReadOnlyList<RoomSummary> Rooms() => rooms.Summaries();
 
@@ -202,6 +229,7 @@ public sealed class AdminService(
 
         var group = new GroupInfo(name, [.. members.Distinct()]);
         store.SaveGroup(name, group.Members);
+        store.SetState(GroupSignatureState(name), ""); // a remote, signed set puts its signature back after this
         logger.LogInformation("Group {Name}: {Members}", name, group.Members.Count == 0 ? "removed" : string.Join(", ", group.Members));
         return group;
     }
@@ -235,9 +263,10 @@ public sealed record AdminMachineView(
 
 /// <summary>A router backup: its TLS certificate (PKCS#12, base64, with the private key) and the approved machines.</summary>
 public sealed record RouterBackup(string Format, int Version, DateTimeOffset CreatedOn, string? CertificateSha256, string? Certificate,
-    IReadOnlyList<MachineRecord> Machines, IReadOnlyList<Job>? Jobs = null, string? OwnerKey = null);
+    IReadOnlyList<MachineRecord> Machines, IReadOnlyList<Job>? Jobs = null, string? OwnerKey = null, Owner.RouterKeyFile? RouterKeys = null,
+    IReadOnlyList<AdminCommand>? OwnerHandovers = null);
 
-public sealed record RestoreResult(int Machines, bool CertificateChanged, string? CertificateSha256, int Jobs = 0);
+public sealed record RestoreResult(int Machines, bool CertificateChanged, string? CertificateSha256, int Jobs = 0, bool RouterKeysChanged = false);
 
 public sealed record AdminBlobView(Guid Id, string Sender, BlobState State, long Bytes, int Chunks, IReadOnlyList<string> SharedWith,
     IReadOnlyList<string> ReleasedBy, DateTimeOffset CreatedOn, DateTimeOffset ExpiresOn, string? EndReason);

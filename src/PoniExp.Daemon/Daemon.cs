@@ -78,6 +78,8 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
         };
         relay.RoomChanged += ApplyRoom;
         relay.HereChanged += OnHereChanged;
+        relay.OwnerChanged += FollowHandovers;
+        relay.PendingJoinsChanged += OnPendingJoins;
         relay.JobChanged += OnJobChanged;
         relay.MessageRejected += (envelope, why) => Diagnose("warning", why.Contains("signature", StringComparison.Ordinal) ? "signature" : "delivery",
             $"refused a message: {why}", envelope?.FromMachine, envelope?.Id);

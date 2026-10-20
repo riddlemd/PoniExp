@@ -44,6 +44,14 @@ public sealed class TestOwner : IOwnerSigner
 
     public Task<IReadOnlyList<OwnerKey>> KeysAsync(CancellationToken ct) => Task.FromResult<IReadOnlyList<OwnerKey>>([Key]);
 
+    /// <summary>An admin command for <paramref name="routerId"/>, signed by this owner.</summary>
+    public AdminCommand Admin(string routerId, string[] args, string? input = null, DateTimeOffset? issued = null)
+    {
+        var id = Guid.NewGuid();
+        var on = issued ?? DateTimeOffset.UtcNow;
+        return new AdminCommand(id, routerId, args, input, on, SignAsync(Key, AdminCommand.Payload(id, routerId, args, input, on), default).Result);
+    }
+
     public HereClaim Here(string? machine, DateTimeOffset issued, DateTimeOffset expires)
     {
         var payload = HereClaim.Payload(machine, issued, expires);

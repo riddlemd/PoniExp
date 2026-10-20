@@ -159,7 +159,9 @@ public sealed record Delivery(Envelope Envelope, DateTimeOffset RelayedOn);
 /// The router's answer to Hello: its protocol version, its clock and how far it lets clocks differ, so a
 /// client can tell when its own clock is off (<c>poniexp-client doctor</c>).
 /// </summary>
-public sealed record HelloResult(int ProtocolVersion, DateTimeOffset ServerTime, TimeSpan ClockSkew);
+/// <summary>The router's own keys come with it (phase 10): machines pin them on first connect.</summary>
+public sealed record HelloResult(int ProtocolVersion, DateTimeOffset ServerTime, TimeSpan ClockSkew, string RouterKey, string RouterEncryptionKey,
+    string RouterEncryptionKeySignature);
 
 public sealed record AuthResult(MembershipStatus Status, string MachineId, string? Name);
 
@@ -220,7 +222,8 @@ public sealed record AnnouncedAgent(string Name, AgentState State, DateTimeOffse
 public sealed record AgentAnnouncement(long Counter, IReadOnlyList<AnnouncedAgent> Agents);
 
 /// <summary>An owner-defined group: a named list of addresses (<c>machine/agent</c>), by machine name.</summary>
-public sealed record GroupInfo(string Name, IReadOnlyList<string> Members);
+/// <summary>An owner group. <see cref="Signed"/>: the owner-signed <c>group set</c> that made it (null if set with docker exec).</summary>
+public sealed record GroupInfo(string Name, IReadOnlyList<string> Members, AdminCommand? Signed = null);
 
 /// <summary>How a room envelope is addressed: <c>room:&lt;id&gt;</c> in <see cref="Envelope.ToMachine"/>, signed like every header field.</summary>
 public static class RoomAddress

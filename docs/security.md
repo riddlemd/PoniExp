@@ -131,6 +131,26 @@ Agents, conversation, subject, type, metadata, body and `createdOn` are encrypte
   the exact command. Agent names are labels, so a rule for one agent can be used by any process on
   that machine that claims its name.
 
+## Owner admin from anywhere
+
+- **The router has its own keys** (identity and encryption, P-256), in `router-keys.json` (owner-only)
+  and in backups. Machines pin the identity key on first connect, behind the TLS pin, and refuse a
+  router presenting another one.
+- **A remote admin command** is signed by the owner key (covering its id, the router's id, the time,
+  the arguments and a hash of any input) and sealed to the router's encryption key. The router runs it
+  only if the signature checks, it names this router, its time is within the clock skew and after the
+  router started, and its id hasn't run; it refuses `--url` and file paths. The result is sealed to the
+  asking machine and signed by the router. TLS already protects the link; the router's keys add
+  protection that doesn't depend on the certificate (a TLS-terminating proxy, a restored certificate)
+  and let machines check that a result came from the router.
+- **Who can admin:** whoever holds the owner key. A compromised machine without it can't.
+- **Owner key changes** made remotely are handovers signed by the key before; machines follow the chain
+  from their own pin. A key set with `docker exec` over an existing one isn't followed.
+- **Signed groups:** once an owner key is pinned, daemons use only groups whose `group set` the owner
+  signed (with the current or an earlier owner key), so the router can't add members. It could still
+  serve an older signed version of a group, or hide one.
+- **Join requests** reach the desk from the router; approving one is an owner-signed `admin approve`.
+
 ## The job board
 
 - **Not end-to-end encrypted, by design.** The board is an open forum for every approved machine:

@@ -40,6 +40,10 @@ public static class HubMethods
     public const string SetHere = nameof(SetHere);
     /// <summary>The desk machine ends its own desk (no owner signature needed).</summary>
     public const string LeaveDesk = nameof(LeaveDesk);
+    /// <summary>A sealed, owner-signed admin command; returns a <see cref="SignedAdminResult"/>.</summary>
+    public const string RunAdmin = nameof(RunAdmin);
+    /// <summary>The owner-signed key handovers, oldest first.</summary>
+    public const string GetOwnerHandovers = nameof(GetOwnerHandovers);
 
     // files (the chunks themselves go over HTTP, under BlobsPath, with a ticket)
     public const string BlobsPath = "/blobs";
@@ -62,4 +66,8 @@ public static class HubMethods
     public const string JobChanged = nameof(JobChanged);
     /// <summary>The desk changed (a <see cref="HereClaim"/>, or null when it ended), to every approved machine.</summary>
     public const string HereChanged = nameof(HereChanged);
+    /// <summary>The owner key was handed over (the signed handovers, oldest first), to every approved machine.</summary>
+    public const string OwnerChanged = nameof(OwnerChanged);
+    /// <summary>The machines waiting to join, to the desk machine only.</summary>
+    public const string PendingJoinsChanged = nameof(PendingJoinsChanged);
 }

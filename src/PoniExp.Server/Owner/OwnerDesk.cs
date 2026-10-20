@@ -17,6 +17,7 @@ public sealed class OwnerDesk(RouterStore store, MachineRegistry machines, IHubC
 {
     private const string OwnerState = "owner_key";
     private const string HereState = "here";
+    private const string HandoverState = "owner_handovers";
     private readonly Lock _lock = new();
 
     public OwnerKey? Owner => store.GetState(OwnerState) is { } line ? OwnerKey.Parse(line) : null;
@@ -39,6 +40,43 @@ public sealed class OwnerDesk(RouterStore store, MachineRegistry machines, IHubC
         logger.LogInformation("Owner key set: {Fingerprint} {Comment}", key.Fingerprint, key.Comment);
         return key;
     }
+
+    /// <summary>Owner key changes signed by the key before, oldest first: daemons follow them from their pin.</summary>
+    public IReadOnlyList<AdminCommand> Handovers =>
+        store.GetState(HandoverState) is { Length: > 0 } json ? JsonSerializer.Deserialize<List<AdminCommand>>(json, WireProtocol.Json)! : [];
+
+    public async Task AddHandoverAsync(AdminCommand handover)
+    {
+        List<AdminCommand> all;
+        lock (_lock)
+        {
+            all = [.. Handovers.TakeLast(31), handover];
+            store.SetState(HandoverState, JsonSerializer.Serialize(all, WireProtocol.Json));
+        }
+
+        await hub.Clients.Group(RelayHub.MembersGroup).SendAsync(HubMethods.OwnerChanged, all);
+    }
+
+    public void RestoreHandovers(IReadOnlyList<AdminCommand> handovers)
+    {
+        lock (_lock)
+        {
+            store.SetState(HandoverState, JsonSerializer.Serialize(handovers.TakeLast(32).ToList(), WireProtocol.Json));
+        }
+    }
+
+    /// <summary>Tells the desk machine (if any, and online) who's waiting to join.</summary>
+    public async Task PushPendingJoinsAsync()
+    {
+        if (Desk is { } desk)
+        {
+            await hub.Clients.Group(RelayHub.MachineGroup(desk)).SendAsync(HubMethods.PendingJoinsChanged, PendingJoins());
+        }
+    }
+
+    public IReadOnlyList<PendingJoin> PendingJoins() =>
+        [.. machines.List().Where(m => m.Status == MembershipStatus.Pending).OrderBy(m => m.RequestedOn)
+            .Select(m => new PendingJoin(m.Id, m.Name, m.JoinCode, m.Description.OperatingSystem, m.Description.HostName, m.Description.Notes, m.RequestedOn))];
 
     /// <summary>Takes a new owner-signed desk claim and sends it to every machine.</summary>
     public async Task<HereClaim> SetHereAsync(string from, HereClaim claim)
@@ -73,6 +111,7 @@ public sealed class OwnerDesk(RouterStore store, MachineRegistry machines, IHubC
         logger.LogInformation("Desk {Desk} (signed by the owner, sent by {From})", claim.MachineId is { } d ? machines.Get(d)?.Name ?? d[..8] : "away",
             machines.Get(from)?.Name ?? from[..8]);
         await hub.Clients.Group(RelayHub.MembersGroup).SendAsync(HubMethods.HereChanged, claim);
+        await PushPendingJoinsAsync();
         return claim;
     }
 

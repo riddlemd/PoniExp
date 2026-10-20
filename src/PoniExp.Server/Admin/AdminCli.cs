@@ -14,7 +14,8 @@ public static class AdminCli
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } };
 
-    public static async Task<int> RunAsync(string[] args, TextWriter output)
+    /// <param name="input">What <c>restore -</c> reads (default: stdin); a remote command carries it.</param>
+    public static async Task<int> RunAsync(string[] args, TextWriter output, string? input = null)
     {
         var url = Environment.GetEnvironmentVariable("PONIEXP_ADMIN_URL") ?? "http://127.0.0.1:5081";
         var rest = new List<string>();
@@ -186,7 +187,7 @@ public static class AdminCli
 
                     return 0;
                 case ["restore", var path]:
-                    var body = path == "-" ? await Console.In.ReadToEndAsync() : await File.ReadAllTextAsync(path);
+                    var body = path == "-" ? input ?? await Console.In.ReadToEndAsync() : await File.ReadAllTextAsync(path);
                     var restored = await ReadAsync<RestoreResult>(await http.PostAsync("admin/restore",
                         new StringContent(body, System.Text.Encoding.UTF8, "application/json")), output);
                     if (restored is null)
@@ -196,7 +197,8 @@ public static class AdminCli
 
                     output.WriteLine($"restored {restored.Machines} approved machine(s) and {Count(restored.Jobs, "live job")}" + (restored.CertificateChanged
                         ? $"; the certificate ({restored.CertificateSha256?[..16]}...) is served after a restart: docker restart poniexp-server"
-                        : "; the certificate is the one already in use"));
+                        : "; the certificate is the one already in use") + (restored.RouterKeysChanged
+                        ? "; the router's keys differ from the ones in use and are used after a restart (machines that pinned the current ones will refuse them)" : ""));
                     return 0;
                 case ["certificate"]:
                     var certificate = await http.GetFromJsonAsync<RouterCertificateInfo>("admin/certificate", Json);

@@ -209,6 +209,7 @@ public static class LocalApiEndpoints
             return Results.NoContent();
         }));
         app.MapGet("/desk", (Daemon d) => Results.Ok(d.DeskApprovals()));
+        app.MapPost("/admin", (Daemon d, AdminCommand command, CancellationToken ct) => Handle(async () => Results.Ok(await d.RunAdminAsync(command, ct))));
         app.MapPost("/desk/{id}/{verb}", (Daemon d, string id, string verb, LocalAnswer request) => Handle(async () => verb switch
         {
             "approve" => Results.Ok(await d.AnswerAsync(id, true, request.Always, request.Reason)),

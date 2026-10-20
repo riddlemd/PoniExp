@@ -270,6 +270,9 @@ public sealed class LocalApiClient : IDisposable
     public Task<LocalApproval> AnswerAsync(string id, bool approve, bool always = false, string? reason = null, CancellationToken ct = default) =>
         PostAsync<LocalApproval>($"desk/{Uri.EscapeDataString(id)}/{(approve ? "approve" : "deny")}", new LocalAnswer(always, reason), ct);
 
+    /// <summary>Runs an owner-signed admin command on the router (the caller had the SSH agent sign it).</summary>
+    public Task<AdminResult> AdminAsync(AdminCommand command, CancellationToken ct = default) => PostAsync<AdminResult>("admin", command, ct);
+
     public Task<List<ApprovalRule>> ApprovalRulesAsync(CancellationToken ct = default) => GetAsync<List<ApprovalRule>>("approvals/rules", ct);
 
     public async Task RemoveApprovalRuleAsync(string id, CancellationToken ct = default)
@@ -710,7 +713,7 @@ public sealed record LocalRoomSend(string Agent, string Body, Guid? ReplyTo = nu
 /// The owner as this machine sees it: the router's key, the key pinned here (only that one's signatures count), and
 /// the desk. <see cref="HereLifetime"/> is how long a <c>here</c> lasts (Daemon:HereLifetime).
 /// </summary>
-public sealed record LocalOwner(string MachineId, string? RouterKey, string? RouterFingerprint, string? PinnedKey, string? PinnedFingerprint,
+public sealed record LocalOwner(string MachineId, string? RouterId, string? RouterKey, string? RouterFingerprint, string? PinnedKey, string? PinnedFingerprint,
     string? DeskMachine, string? DeskName, DateTimeOffset? DeskUntil, bool IsDesk, TimeSpan HereLifetime);
 
 public sealed record LocalOwnerPin(string Key);
@@ -722,6 +725,7 @@ public sealed record LocalAway(HereClaim? Signed);
 public sealed record LocalApprovalRequest(string Agent, string Summary, string? Details = null, string? Tool = null, string? Command = null, Guid? Id = null);
 
 /// <summary>An approval: <see cref="From"/> is "machine-name/agent". <see cref="AnsweredBy"/>: "rule", or the desk machine's name.</summary>
+/// <summary>An approval. Direction "join": a machine asking to join (<see cref="Command"/> is its join code), answered with admin approve.</summary>
 public sealed record LocalApproval(Guid Id, string Direction, string From, string Summary, string? Details, string? Tool, string? Command, string State,
     bool Always, string? Reason, DateTimeOffset RequestedOn, DateTimeOffset? AnsweredOn, string? AnsweredBy, string? Desk);
 

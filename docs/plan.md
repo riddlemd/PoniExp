@@ -723,7 +723,7 @@ approved here.
   checks claims against its pin. An asker picks its request id, so it can withdraw even before its
   request is stored.
 
-## Phase 10: Owner admin from anywhere (workshop)
+## Phase 10: Owner admin from anywhere (workshop, done)
 
 Every `poniexp admin` command, run from any approved machine as `poniexp-client admin <command>`,
 signed with the owner key: one SSH-agent (Bitwarden) prompt per command. `docker exec` keeps working
@@ -770,6 +770,14 @@ a key).
 
 Live: `admin list` and `admin approve` from this machine with the real Bitwarden prompt; a join
 request approved from the desk.
+
+**As built:** protocol 9. Core `SealedBox` (one reader, bound to a purpose), `AdminCommand`,
+`SignedAdminResult`, `PendingJoin`; the router's keys in `HelloResult`. Router `RouterKeys`
+(`router-keys.json`), `RemoteAdmin` (runs `AdminCli` against its own admin listener, so remote admin
+needs `Router:AdminPort`; refuses `--url` and file paths), owner handovers and group signatures in
+`router_state`, the keys and handovers in backups. Daemons pin the router key (client setting
+`router_key`), follow handovers, check group signatures, and keep join requests as `join` approvals
+(their id is the machine id). The CLI signs; `approve`/`deny` of a join runs `admin approve`/`remove`.
 
 ## Phase 11: Key rotation and revocation
 

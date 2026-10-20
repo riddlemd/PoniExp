@@ -14,7 +14,8 @@ public static class WireProtocol
     /// 6: groups, rooms (a signed membership log on the router, fanned-out room envelopes); endpoints are agents.
     /// 7: the job board (signed job actions, open jobs on the router); no roles.
     /// 8: approvals (approval-request/-answer/-withdrawn), the owner key and the desk (here).
-    public const int Version = 8;
+    /// 9: owner admin from anywhere (the router's keys in Hello, RunAdmin, owner handovers, signed groups, joins on the desk).
+    public const int Version = 9;
 
     /// <summary>Enums travel as kebab-case names ("file-receipt"), on the wire and in files.</summary>
     public static JsonSerializerOptions Configure(JsonSerializerOptions options)

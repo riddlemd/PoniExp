@@ -115,6 +115,16 @@ public sealed class RelayClient : IAsyncDisposable
             HereChanged?.Invoke(claim); // on the worker, so before any approval message the router sends after it
             return Task.CompletedTask;
         }));
+        _connection.On<List<AdminCommand>>(HubMethods.OwnerChanged, handovers => Post(() =>
+        {
+            OwnerChanged?.Invoke(handovers);
+            return Task.CompletedTask;
+        }));
+        _connection.On<List<PendingJoin>>(HubMethods.PendingJoinsChanged, joins => Post(() =>
+        {
+            PendingJoinsChanged?.Invoke(joins);
+            return Task.CompletedTask;
+        }));
         _connection.On<RoomState>(HubMethods.RoomChanged, room => Post(() =>
         {
             RoomChanged?.Invoke(room); // on the worker, so before any room message the router sends after it
@@ -166,6 +176,12 @@ public sealed class RelayClient : IAsyncDisposable
     /// <summary>The router passed on a desk claim (the daemon checks it against its pinned owner key).</summary>
     public event Action<HereClaim>? HereChanged;
 
+    /// <summary>The owner key was handed over: the signed handovers, oldest first.</summary>
+    public event Action<IReadOnlyList<AdminCommand>>? OwnerChanged;
+
+    /// <summary>Who's waiting to join (sent to the desk machine).</summary>
+    public event Action<IReadOnlyList<PendingJoin>>? PendingJoinsChanged;
+
     /// <summary>True when (re)connected and authenticated; false (with the error) when the link drops.</summary>
     public event Action<bool, Exception?>? ConnectionChanged;
 
@@ -186,6 +202,64 @@ public sealed class RelayClient : IAsyncDisposable
 
     /// <summary>The router's clock minus this machine's, as of the last Hello (null before the first).</summary>
     public TimeSpan? ClockOffset { get; private set; }
+
+    /// <summary>The router's identity key's fingerprint (its id), as pinned on first connect.</summary>
+    public string? RouterId { get; private set; }
+
+    private string? _routerKey;
+    private string? _routerEncryptionKey;
+
+    public const string RouterKeySetting = "router_key";
+
+    /// <summary>The router's keys are pinned on first connect (behind the TLS pin); different ones later are refused.</summary>
+    private void PinRouter(HelloResult hello)
+    {
+        if (!PublicKeys.IsValid(hello.RouterKey) || !PublicKeys.VerifyEncryptionKey(hello.RouterKey, hello.RouterEncryptionKey, hello.RouterEncryptionKeySignature))
+        {
+            throw new InvalidOperationException("the router's encryption key isn't signed by its identity key");
+        }
+
+        var pinned = _store.GetSetting(RouterKeySetting);
+        if (pinned is null)
+        {
+            _store.Transact(_time.GetUtcNow(), tx => tx.SetSetting(RouterKeySetting, hello.RouterKey));
+        }
+        else if (pinned != hello.RouterKey)
+        {
+            throw new InvalidOperationException($"the router's key changed (pinned {KeyFingerprint.MachineIdOf(pinned)[..8]}, now " +
+                                                $"{KeyFingerprint.MachineIdOf(hello.RouterKey)[..8]}); if that's expected, restore the router's backup or re-run init");
+        }
+
+        (_routerKey, _routerEncryptionKey, RouterId) = (hello.RouterKey, hello.RouterEncryptionKey, KeyFingerprint.MachineIdOf(hello.RouterKey));
+    }
+
+    /// <summary>
+    /// Runs an owner-signed admin command: sealed to the router's encryption key; the result comes back sealed to this
+    /// machine and signed by the router's identity key, both checked here.
+    /// </summary>
+    public async Task<AdminResult> RunAdminAsync(AdminCommand command, CancellationToken cancellationToken = default)
+    {
+        if (_routerKey is null || _routerEncryptionKey is null || RouterId is null)
+        {
+            throw new InvalidOperationException("not connected to the router");
+        }
+
+        var box = SealedBox.Seal(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(command, WireProtocol.Json), AdminCommand.SealPurpose, RouterId,
+            _routerEncryptionKey);
+        var signed = await InvokeRoomAsync<SignedAdminResult>(HubMethods.RunAdmin, box, cancellationToken);
+        if (!PublicKeys.Verify(_routerKey, SignedAdminResult.Payload(command.Id, _keys.MachineId, signed.Box), signed.Signature))
+        {
+            throw new InvalidOperationException("the admin result isn't signed by the router's pinned key");
+        }
+
+        var result = System.Text.Json.JsonSerializer.Deserialize<AdminResult>(signed.Box.Open(AdminCommand.ResultPurpose, _keys.MachineId, _keys.Encryption),
+            WireProtocol.Json)!;
+        return result.CommandId == command.Id ? result : throw new InvalidOperationException("the admin result is for another command");
+    }
+
+    public async Task<IReadOnlyList<AdminCommand>> GetOwnerHandoversAsync(CancellationToken cancellationToken = default) =>
+        IsConnected ? await _connection.InvokeAsync<IReadOnlyList<AdminCommand>>(HubMethods.GetOwnerHandovers, cancellationToken)
+            : throw new InvalidOperationException("not connected to the router");
 
     /// <summary>How far the router lets clocks differ (from the last Hello).</summary>
     public TimeSpan? RouterClockSkew { get; private set; }
@@ -904,6 +978,7 @@ public sealed class RelayClient : IAsyncDisposable
     {
         _authenticated = false;
         var hello = await _connection.InvokeAsync<HelloResult>(HubMethods.Hello, WireProtocol.Version, cancellationToken);
+        PinRouter(hello);
         ClockOffset = hello.ServerTime - _time.GetUtcNow();
         RouterClockSkew = hello.ClockSkew;
         var challenge = await _connection.InvokeAsync<string>(HubMethods.GetChallenge, cancellationToken);

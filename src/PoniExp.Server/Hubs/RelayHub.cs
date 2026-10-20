@@ -23,6 +23,8 @@ public sealed class RelayHub(
     PoniExp.Server.Rooms.RoomRegistry rooms,
     PoniExp.Server.Jobs.JobBoard jobs,
     PoniExp.Server.Owner.OwnerDesk desk,
+    PoniExp.Server.Owner.RouterKeys routerKeys,
+    PoniExp.Server.Owner.RemoteAdmin remoteAdmin,
     TimeProvider time,
     IOptionsSnapshot<RouterOptions> options,
     ILogger<RelayHub> logger) : Hub
@@ -59,7 +61,8 @@ public sealed class RelayHub(
         }
 
         Context.Items[HelloItem] = protocolVersion;
-        return new HelloResult(WireProtocol.Version, time.GetUtcNow(), options.Value.ClockSkew);
+        return new HelloResult(WireProtocol.Version, time.GetUtcNow(), options.Value.ClockSkew, routerKeys.Keys.PublicKey, routerKeys.Keys.EncryptionPublicKey,
+            routerKeys.Keys.EncryptionKeySignature);
     }
 
     [HubMethodName(HubMethods.GetChallenge)]
@@ -118,6 +121,11 @@ public sealed class RelayHub(
         if (desk.Latest is { } here)
         {
             await Clients.Caller.SendAsync(HubMethods.HereChanged, here);
+        }
+
+        if (desk.Desk == id)
+        {
+            await Clients.Caller.SendAsync(HubMethods.PendingJoinsChanged, desk.PendingJoins());
         }
 
         foreach (var room in rooms.Mine(id, []))
@@ -181,6 +189,7 @@ public sealed class RelayHub(
         if (newRequest && record.Status == MembershipStatus.Pending)
         {
             traffic.JoinRequested(record.Id, record.Name, Address);
+            await desk.PushPendingJoinsAsync();
         }
 
         logger.LogInformation("Join request: {Name} ({Id}) on {Os} {Arch}, join code {Code}: {Status}",
@@ -404,6 +413,21 @@ public sealed class RelayHub(
             await desk.LeaveAsync(me);
             return true;
         }, me);
+    }
+
+    /// <summary>An owner-signed admin command, sealed to the router's encryption key.</summary>
+    [HubMethodName(HubMethods.RunAdmin)]
+    public Task<SignedAdminResult> RunAdminAsync(SealedBox command)
+    {
+        var me = RequireMember();
+        return Room(() => remoteAdmin.RunAsync(me, command), me);
+    }
+
+    [HubMethodName(HubMethods.GetOwnerHandovers)]
+    public IReadOnlyList<AdminCommand> GetOwnerHandovers()
+    {
+        RequireMember();
+        return desk.Handovers;
     }
 
     // ---- the job board ----
