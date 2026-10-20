@@ -75,10 +75,11 @@ only has to build on the ones before it; a protection that arrives in a later ph
 | Traffic log | Off by default (`poniexp admin traffic-log on`), kept 30 days. Besides what the server can see about each message (time, sender and recipient machine, id, size, sequence), it records the event (relayed, delivered, confirmed, expired, refused) and refusals with their reason (bad signature, limits, join requests), so delays and attacks show. |
 | Roles | Removed. Agents carry no roles; addressing is by `machine/agent`, groups and rooms, and jobs match machines by requirements. |
 | Capabilities and requirements | Each daemon detects what its machine has (OS, version, architecture, CPU, cores, memory, GPUs and their memory, plus tags from its settings) and reports it to the router on each connect. A job lists requirements (`key op value`: `=`, `!=`, `>=`, `<=`, `~`), all of which a machine must meet to claim it; minimums and maximums both, so `memory<=8` keeps a low-end test off a big machine. The router enforces them on the claim, against what the machine reported. |
-| Permission level | Machines only. No per-agent keys or permissions: an agent is a name any local process may use, so separating agents takes separate machines (or containers, each its own machine). |
+| Permission level | No machine-to-machine rules: allow by default. Approvals (phase 9) are the permission system: an agent asks, you answer at your desk (`here`, signed with the owner key). Agents are labels, not identities. |
+| Owner key | Your Bitwarden SSH key ("agent-relay owner", ssh-ed25519) through the SSH agent, pinned on every machine; it signs `here` (one prompt per desk). |
 | Naming | What was called an endpoint is an **agent**: addresses are `machine/agent`, flags `--agent`, the automatic announcement type `agent`. Agent names are labels, not identities. |
 | Job board | An open forum for every approved machine: jobs are in the clear on the router (signed changes, approved machines only) so a dashboard can show them. Any agent posts and comments; an agent on a machine meeting the job's requirements claims it under a lease its daemon renews, and moves it through backlog, ready, claimed, running, done / failed. Live jobs are in `admin backup`, and posters' daemons re-post their open jobs. GitHub issues stay outside PoniExp. |
-| Web interface | Its own workshop phase (12), after owner admin, before the Hermes bridge. |
+| Web interface | Its own workshop phase (13), after owner admin, before the Hermes bridge. |
 | Rooms | Named (unique on the router while live), created by any agent; members invite, invitees accept, members leave; no admins, no removals. Membership is a log of signed events the router keeps and orders and can see (agents included); each message's key is wrapped for exactly the current members' machines, checked by the router. A room collapses when empty or idle (`RoomIdleExpiry`); the router then keeps only stats, per machine (no subjects, bodies or sending agents). |
 | Groups | Owner-defined lists of addresses on the router (`admin group`), resolved by the sender's daemon into separate messages. |
 | Local trust | Every local process running as the machine's user is trusted; it could read the user's keys anyway. The daemon scopes what each agent is shown, but that is convenience, not a security boundary. |
@@ -144,7 +145,7 @@ and files have their own events.
 transaction as the event. A late event never moves it back (a `received` after `acknowledged`), and a
 final one (`rejected`, `failed`, `expired`) is never left.
 
-`bridge_tasks` (phase 13): for messages delivered through the Hermes bridge, `message_id`,
+`bridge_tasks` (phase 14): for messages delivered through the Hermes bridge, `message_id`,
 `a2a_task_id`, `context_id`, the peer (`machine/agent`) the task belongs to, and the task's last
 known state.
 
@@ -316,14 +317,14 @@ is what bounds its replay window, so it doesn't take the relay's value on trust.
 
 Agents on different machines talk through their daemons, with MCP as the agents' interface. Adds
 `message_events`, `message_state`, `agents`, `peer_agents` and `diagnostics` to the client
-database. Pushing messages into Hermes (the Hermes bridge) is phase 13.
+database. Pushing messages into Hermes (the Hermes bridge) is phase 14.
 
 - **`poniexp-client daemon`:** the machine's only connection to the server. It handles local
   routing to agents, the outbox, and the client database.
   - **Outbox:** a message sent while the router is unreachable waits in the outbox. One whose expiry
     passes before it is relayed is marked `expired` instead: its `createdOn` is signed and the
     recipient's clamp counts from it, so relaying it late would only get it refused.
-- **Local API** on a Unix socket or named pipe, used by the CLI, the MCP servers and (phase 13) the
+- **Local API** on a Unix socket or named pipe, used by the CLI, the MCP servers and (phase 14) the
   Hermes bridge.
 - **`poniexp-client mcp`** (stdio). Tools: `send`, `reply`, `ack`, `inbox`, `conversation`,
   `message` (one message and its delivery history), `machines`, `status`; later `attach` and `fetch`.
@@ -352,7 +353,7 @@ database. Pushing messages into Hermes (the Hermes bridge) is phase 13.
     agent is online.
   - **`acknowledged`:** an agent has actually taken the message on. Fetching a message isn't
     enough; the agent acknowledges it explicitly (the MCP `ack` tool, or the local API). Replying
-    acknowledges too. For the Hermes bridge, see phase 13.
+    acknowledges too. For the Hermes bridge, see phase 14.
   - **`rejected`:** the recipient's machine won't deliver it, with a reason (e.g. "unknown
     agent"). Sent instead of `received`.
 - **`poniexp-client doctor`:** checks reachability, the certificate pin, clock skew against the
@@ -536,7 +537,7 @@ Roles were built here and later removed (jobs match machines by requirements, ph
 - `group:<name>` is resolved by the sender's daemon into separate messages, one per member. A group
   isn't a room: its members don't see each other.
 - The router serves the lists, so a compromised router could point a group at another approved
-  machine (it still can't read what it relays). Owner-signed lists can come with phase 9.
+  machine (it still can't read what it relays). Owner-signed lists can come with owner admin (phase 11).
 
 ### Rooms
 
@@ -608,7 +609,7 @@ an agent that matches picks it up when it has capacity and moves it through the 
 
 - **Open, not end-to-end encrypted.** The board is shared by every approved machine, so the router
   holds jobs in the clear (over TLS, reachable only by approved machines) and can show them on a
-  dashboard (phase 12). Every change is signed by the machine that makes it and names its agent; the
+  dashboard (phase 13). Every change is signed by the machine that makes it and names its agent; the
   router checks the signature and the rules. Secrets don't belong on the board: send them as messages.
 - **A job:** id, title, description (markdown), requirements, poster, column, claimant, lease, a
   result note, and a history of moves and comments, each with when and by whom.
@@ -632,7 +633,7 @@ an agent that matches picks it up when it has capacity and moves it through the 
 - **GitHub issues:** not in PoniExp; an agent can mirror issues onto the board.
 - **CLI / MCP:** `job post|list|show|claim|move|release|comment|cancel`; MCP `jobs`, `job`,
   `job_post`, `job_claim`, `job_move`, `job_release`, `job_comment`, `job_cancel`; `admin jobs [--all]` on the
-  router. Approved machines read the board over the hub (`GetJobs`); phase 12 adds the web view.
+  router. Approved machines read the board over the hub (`GetJobs`); phase 13 adds the web view.
 - **Capabilities:** each daemon detects its machine (OS, version, architecture, CPU model, logical
   cores, memory as the runtime sees it, so a container's limit counts; GPUs and their memory from
   `nvidia-smi`, else the OS's display adapters) and adds tags from `Daemon:CapabilityTags`. It reports
@@ -655,22 +656,72 @@ an agent that matches picks it up when it has capacity and moves it through the 
 - finished jobs are dropped after `JobRetention`;
 - a backup restores the live jobs, and a poster's daemon re-posts its open jobs to an empty router.
 
-## Phase 9: Permissions and approval cards (workshop)
+## Phase 9: Approvals and the owner (workshop)
 
-- Deny by default, Cotal-style: which machines may send to which machines, and which may post or
-  claim which jobs. **Permissions are per machine only.** Agents have no keys, and any local
-  process can use any agent name (local processes are trusted), so a rule about agents
-  couldn't be enforced. Agent names stay labels for addressing, logs and stats.
-- **Approval cards** are part of the permission logic: a request outside the rules is held, and a
-  card goes to wherever you're active, approved with Touch ID using the owner key.
-- This phase introduces the owner identity.
+The point of this phase: an agent that needs a human's yes reaches you wherever you are. Allow by
+default: there are no machine-to-machine rules to configure; approvals are the permission system.
 
-## Phase 10: Owner admin from anywhere
+- **The owner key** is your SSH key in the Bitwarden SSH agent ("agent-relay owner", `ssh-ed25519`),
+  used through the SSH agent on whatever machine you're at (Windows: the OpenSSH agent pipe; macOS and
+  Linux: `SSH_AUTH_SOCK`). PoniExp never holds it.
+  - The router keeps the owner's public key (`poniexp admin owner set "<ssh public key>"`).
+  - Each machine pins it: `poniexp-client owner pin` shows its SHA-256 fingerprint (as `ssh-add -l`
+    does) and pins it on a yes; it pins without asking when the local SSH agent holds that very key.
+  - Owner signatures are SSH signatures (the `ssh-keygen -Y sign` format) under the namespace
+    `poniexp`, so they can't be mistaken for an SSH login and can be checked with `ssh-keygen -Y
+    verify`. Ed25519 is verified with BouncyCastle (.NET has no Ed25519).
+- **`poniexp-client here`** makes this machine your approval desk: one Bitwarden prompt signs a claim
+  (this machine, from now until `HereLifetime`, default 12 hours). The router checks it against the
+  owner key, keeps the newest, and sends it to every machine; each daemon checks it against its pin.
+  `poniexp-client away` ends it (signed by the owner, or sent by the desk machine itself). With no
+  desk, requests wait.
+- **Requests:** an agent asks through the MCP tool `request_approval` (a summary and details), or
+  Claude Code sends its own permission prompts through `approve` (run it with
+  `--permission-prompt-tool mcp__poniexp__approve`).
+  - The agent's daemon first checks its "always allow" rules (below); a match is allowed at once.
+  - Otherwise it sends an `approval-request`, end-to-end encrypted like any message, to the desk
+    machine's daemon, and the agent's call waits until you answer or the agent gives up (a withdrawn
+    request is marked `withdrawn` on the desk).
+  - When the desk moves, pending requests are sent to the new desk.
+- **Answering:** on the desk, `poniexp-client approvals` lists what waits (who asks, from which
+  machine, what), `approve <id> [--always]` and `deny <id> [--reason <text>]` answer it (an
+  `approval-answer`, signed by the desk machine). The requesting daemon accepts an answer only from
+  the machine named by the current owner-signed `here`. A desktop notification comes with the tray app
+  (phase 10).
+- **"Always allow"** makes a rule on the requesting machine: that agent may use that tool without
+  asking (for a shell tool, that exact command). `poniexp-client approvals rules` lists them, `rules
+  remove <id>` drops one.
+- **What the router sees:** the owner's public key and the current desk (machine and expiry). Not what
+  is asked or answered.
+- **Settings:** `Daemon:HereLifetime` (12 hours, at most 7 days).
+- **New protocol types:** `approval-request`, `approval-answer`, `approval-withdrawn`.
+
+**Done when:** tests show:
+- `here` signed by the owner key is accepted and sent to every machine; one signed by another key,
+  or expired, is refused by the router and by daemons;
+- a request reaches the desk, and the agent gets the answer;
+- an answer from a machine that isn't the desk is refused;
+- with no desk a request waits, and reaches the desk once there is one; moving the desk moves it;
+- "always allow" answers the next matching request at once, and only that agent and tool;
+- a withdrawn request is marked so on the desk;
+- the Claude Code permission tool returns `allow` with the input, or `deny` with the reason.
+
+Live: `here` on this machine with the real Bitwarden prompt; a request from a second machine
+approved here.
+
+## Phase 10: Tray app (workshop)
+
+A small PoniExp tray app on each machine (Windows, macOS, Linux; e.g. Avalonia): shows approval
+requests on the desk as notifications with Approve / Deny / Always, the desk state (`here` / `away`),
+and the daemon's health. Open, for the workshop: the stack, how it's installed and started with the
+daemon, and what else it shows.
+
+## Phase 11: Owner admin from anywhere
 
 Admin commands (approve a machine, change rules, clear a backlog) signed with the owner key and sent
 from any machine, instead of `docker exec` on Wojtek.
 
-## Phase 11: Key rotation and revocation
+## Phase 12: Key rotation and revocation
 
 - Identity key rotation, with the new key signed by the old one.
 - Encryption key rotation. Old encryption private keys are kept, protected, for as long as
@@ -680,17 +731,17 @@ from any machine, instead of `docker exec` on Wojtek.
 - Revocation signed by the owner, for a lost or stolen machine.
 - What happens to messages, files and jobs waiting for a revoked machine.
 
-## Phase 12: Web interface (workshop)
+## Phase 13: Web interface (workshop)
 
 A web interface served by the router: the job board as a dashboard (phase 8), and the router's state
 (machines and presence, rooms and their statistics, the traffic log, files). Read-only views first;
-admin actions in it are signed with the owner key (phases 9-10). Open, for the workshop:
+admin actions in it are signed with the owner key (phases 9 and 11). Open, for the workshop:
 - who may open it, and how they sign in (the owner key, an approved machine, a token);
 - where it listens (the relay port, the admin port, both);
 - the stack (server-rendered pages, or a small static app over the router's JSON);
 - live updates (polling or a push stream).
 
-## Phase 13: Hermes bridge (workshop)
+## Phase 14: Hermes bridge (workshop)
 
 Comes after everything else, and starts with a deep dive into how Hermes handles A2A, then a design
 discussion. Until then agents on Hermes use PoniExp through MCP like any other. Adds `bridge_tasks`

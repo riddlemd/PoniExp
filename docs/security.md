@@ -88,7 +88,7 @@ Agents, conversation, subject, type, metadata, body and `createdOn` are encrypte
 
 - **Groups** are the owner's lists, served by the router: a compromised router could point a group
   at another approved machine (still encrypted to that machine, so only it could read). Owner-signed
-  lists come with phase 9.
+  lists can come with owner admin (phase 11).
 - **Rooms:**
   - **What the router sees:** a room's name and members (which agents, when they joined and left,
     who invited whom), the machines each message goes to, and message sizes and times. Never subjects,
@@ -122,7 +122,7 @@ Agents, conversation, subject, type, metadata, body and `createdOn` are encrypte
 - **Agents are labels:** a machine vouches for its agents.
 - **Requirements are checked against what each machine reports** of itself (detected by its daemon):
   the router enforces them on claims, but a dishonest approved machine could report hardware it
-  doesn't have. Permissions are per machine (phase 9).
+  doesn't have.
 - **Leases** are renewed by the claimant's daemon while that agent is online; a claim nobody renews
   returns to `ready` after `JobLease`.
 
@@ -178,7 +178,8 @@ Agents, conversation, subject, type, metadata, body and `createdOn` are encrypte
 
 - A member machine can only send as itself: the router checks the envelope's sender against the key
   the connection proved, and the recipient checks the signature again.
-- Any approved machine can message any agent on any other. Phase 9 permissions are per machine; agent
+- Any approved machine can message any agent on any other: there are no machine-to-machine rules.
+  Approvals (phase 9) are how agents ask before acting. Agent
   names are never a security boundary (any local process can use any name), so agents that must not
   impersonate each other belong on separate machines or containers.
 - Private keys are kept in the OS's secret store: DPAPI (current user) on Windows, the login keychain
@@ -188,4 +189,4 @@ Agents, conversation, subject, type, metadata, body and `createdOn` are encrypte
 - The client database (`~/.poniexp/client.db`) keeps messages as their encrypted envelopes. Routing and
   conversation metadata (agents, subject, type, ids, times) is in the clear there for searching;
   bodies are not.
-- Not yet: rotating or revoking keys (phase 11). A stolen machine's keys stay valid until it is removed.
+- Not yet: rotating or revoking keys (phase 12). A stolen machine's keys stay valid until it is removed.
