@@ -17,6 +17,7 @@ public sealed class AdminService(
     RouterStore store,
     Blobs.BlobRegistry blobs,
     Rooms.RoomRegistry rooms,
+    Jobs.JobBoard jobs,
     IHubContext<RelayHub> hub,
     IOptionsMonitor<RouterOptions> options,
     TimeProvider time,
@@ -68,7 +69,8 @@ public sealed class AdminService(
         var pfx = Path.Combine(options.CurrentValue.DataDirectory, "router.pfx");
         return new RouterBackup(BackupFormat, 1, time.GetUtcNow(), certificate.Sha256,
             File.Exists(pfx) ? Convert.ToBase64String(File.ReadAllBytes(pfx)) : null,
-            [.. registry.List().Where(m => m.Status == MembershipStatus.Approved)]);
+            [.. registry.List().Where(m => m.Status == MembershipStatus.Approved)],
+            [.. jobs.List(includeFinished: false)]);
     }
 
     /// <summary>
@@ -98,9 +100,10 @@ public sealed class AdminService(
 
         var machines = backup.Machines.Where(m => m.Status == MembershipStatus.Approved && KeyFingerprint.MachineIdOf(m.PublicKey) == m.Id).ToList();
         await registry.RestoreAsync(machines);
+        var restoredJobs = jobs.Restore(backup.Jobs ?? []);
         logger.LogInformation("Restored {Count} machines from a backup of {On}; certificate {Changed}", machines.Count, backup.CreatedOn,
             certificateChanged ? "changed (restart to serve it)" : "unchanged");
-        return new RestoreResult(machines.Count, certificateChanged, backup.CertificateSha256);
+        return new RestoreResult(machines.Count, certificateChanged, backup.CertificateSha256, restoredJobs);
     }
 
     private async Task<IReadOnlyList<AdminMachineView>> ForgetAsync(IReadOnlyList<MachineRecord> forgotten, string verb)
@@ -118,6 +121,10 @@ public sealed class AdminService(
     public IReadOnlyList<GroupInfo> Groups() => store.LoadGroups();
 
     public IReadOnlyList<RoomSummary> Rooms() => rooms.Summaries();
+
+    /// <summary>The board, members shown as machine-name/agent.</summary>
+    public IReadOnlyList<Job> Jobs(bool includeFinished) =>
+        [.. jobs.List(includeFinished).Select(j => j with { Poster = rooms.Display(j.Poster), Claimant = j.Claimant is { } c ? rooms.Display(c) : null })];
 
     /// <summary>Collapsed rooms' statistics, members shown by machine name.</summary>
     public IReadOnlyList<RoomStats> CollapsedRooms(DateTimeOffset? since) =>
@@ -204,9 +211,9 @@ public sealed record AdminMachineView(
 
 /// <summary>A router backup: its TLS certificate (PKCS#12, base64, with the private key) and the approved machines.</summary>
 public sealed record RouterBackup(string Format, int Version, DateTimeOffset CreatedOn, string? CertificateSha256, string? Certificate,
-    IReadOnlyList<MachineRecord> Machines);
+    IReadOnlyList<MachineRecord> Machines, IReadOnlyList<Job>? Jobs = null);
 
-public sealed record RestoreResult(int Machines, bool CertificateChanged, string? CertificateSha256);
+public sealed record RestoreResult(int Machines, bool CertificateChanged, string? CertificateSha256, int Jobs = 0);
 
 public sealed record AdminBlobView(Guid Id, string Sender, BlobState State, long Bytes, int Chunks, IReadOnlyList<string> SharedWith,
     IReadOnlyList<string> ReleasedBy, DateTimeOffset CreatedOn, DateTimeOffset ExpiresOn, string? EndReason);

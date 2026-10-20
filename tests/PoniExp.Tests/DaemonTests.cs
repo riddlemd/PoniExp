@@ -225,7 +225,7 @@ public class DaemonTests
     public async Task MessagesSentWhileTheRouterIsDownWaitInTheOutbox()
     {
         var data = Path.Combine(Path.GetTempPath(), "poniexp-tests", Guid.NewGuid().ToString("N"));
-        var router = await RouterFixture.StartAsync(dataDirectory: data);
+        var router = await RouterFixture.StartAsync(dataDirectory: data, port: RouterFixture.RestartablePort());
         var url = router.Url;
         await using var ise = await DaemonFixture.StartAsync(router, "ise");
         await using var wojtek = await DaemonFixture.StartAsync(router, "wojtek");

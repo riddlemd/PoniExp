@@ -56,6 +56,12 @@ const string Usage = """
           --conversation <id> --operation <id> --peer <machine> --agent <name>
           --since <2h|3d|date> --limit <n> --automatic (receipts, announcements too)
           --bodies                 decrypt bodies into the output (they're then in the clear)
+      job list [--all] [--column <c>]        the job board (open to every approved machine)
+      job show <id>
+      job post <title> --as <agent> [--description <text|->] [--role <role>] [--backlog]
+      job claim|release|cancel <id> --as <agent>
+      job move <id> <backlog|ready|running|done|failed> --as <agent> [--note <result>]
+      job comment <id> --as <agent> <text>
       room list [--agent <name>]          rooms an agent here is in, was in, or is invited to
       room create <name> --as <agent> [--invite <address>]...
       room invite <room> --as <agent> <address>...   (roles and groups are resolved now)
@@ -105,6 +111,7 @@ try
         ["release", var id, .. var rest] => await ReleaseAsync(AgentOf(rest), Guid.Parse(id), Option(rest, "--blob") is { } b ? Guid.Parse(b) : null),
         ["blobs"] => await BlobsAsync(),
         ["room", .. var rest] => await RoomAsync(rest),
+        ["job", .. var rest] => await JobAsync(rest),
         ["cancel", var blob] => await CancelBlobAsync(Guid.Parse(blob)),
         ["conversations", .. var rest] => await ConversationsAsync(AgentOf(rest)),
         ["log", .. var rest] => await LogAsync(rest),
@@ -658,6 +665,13 @@ async Task<int> ListenAsync(string agent, bool json, bool ack, bool autoFetch, I
         {
             Console.WriteLine(json ? JsonSerializer.Serialize(e, WireProtocol.Json) : Format(rm));
         }
+        else if (e.Kind is LocalEventKinds.JobReady or LocalEventKinds.JobChanged && e.Job is { } job)
+        {
+            Console.WriteLine(json ? JsonSerializer.Serialize(e, WireProtocol.Json)
+                : e.Kind == LocalEventKinds.JobReady ? $"job ready: {job.Id.ToString()[..8]} {job.Title}" + (job.Role is { } r ? $" [role:{r}]" : "") + $" (job claim {job.Id.ToString()[..8]} --as <agent>)"
+                : $"job {job.Id.ToString()[..8]} {job.Title}: " + (job.History.LastOrDefault() is { } h
+                    ? $"{h.By} {h.What}" + (h.Text is { Length: > 0 } t && h.What != "posted" ? $": {t}" : "") : job.Column));
+        }
         else if (e.Kind == LocalEventKinds.RoomInvite && e.Invite is { } invite)
         {
             Console.WriteLine(json ? JsonSerializer.Serialize(e, WireProtocol.Json)
@@ -751,6 +765,81 @@ async Task<int> LogAsync(string[] rest)
     }
 
     return 0;
+}
+
+async Task<int> JobAsync(string[] rest)
+{
+    using var api = await DaemonAsync2();
+    string As() => Option(rest, "--as") ?? throw new ArgumentException("say which agent you are: --as <agent>");
+    var positional = new List<string>();
+    for (var i = 0; i < rest.Length; i++)
+    {
+        if (rest[i] is "--as" or "--description" or "--role" or "--column" or "--note")
+        {
+            i++;
+        }
+        else if (rest[i] is not ("--all" or "--backlog" or "--json"))
+        {
+            positional.Add(rest[i]);
+        }
+    }
+
+    void Show(LocalJob j, bool full = false)
+    {
+        if (rest.Contains("--json"))
+        {
+            Console.WriteLine(JsonSerializer.Serialize(j, WireProtocol.Json));
+            return;
+        }
+
+        Console.WriteLine($"{j.Id.ToString()[..8]}  {j.Column,-8} {j.Title}" + (j.Role is { } role ? $"  [role:{role}]" : "") +
+                          $"\n    posted by {j.Poster} {j.PostedOn.ToLocalTime():yyyy-MM-dd HH:mm}" + (j.Claimant is { } who ? $", claimed by {who}" : "") +
+                          (j.Result is { Length: > 0 } result ? $"\n    result: {result}" : ""));
+        if (full)
+        {
+            if (j.Description.Length > 0)
+            {
+                Console.WriteLine("\n" + j.Description + "\n");
+            }
+
+            foreach (var h in j.History)
+            {
+                Console.WriteLine($"    [{h.OccurredOn.ToLocalTime():yyyy-MM-dd HH:mm}] {h.By} {h.What}{(h.Column is { } c && h.What != c ? $" ({c})" : "")}" +
+                                  (h.Text is { Length: > 0 } text && h.What != "posted" ? $": {text}" : ""));
+            }
+        }
+    }
+
+    switch (positional)
+    {
+        case ["list"]:
+            var jobs = await api.JobsAsync(rest.Contains("--all"), Option(rest, "--column"), cancel.Token);
+            if (jobs.Count == 0)
+            {
+                Console.WriteLine("the board is empty");
+            }
+
+            jobs.ForEach(j => Show(j));
+            return 0;
+        case ["show", var id]:
+            Show(await api.JobAsync(id, cancel.Token), full: true);
+            return 0;
+        case ["post", var title]:
+            var description = Option(rest, "--description") is "-" ? await Console.In.ReadToEndAsync() : Option(rest, "--description");
+            Show(await api.PostJobAsync(new LocalJobPost(As(), title, description, Option(rest, "--role"), rest.Contains("--backlog")), cancel.Token));
+            return 0;
+        case [var verb and ("claim" or "release" or "cancel"), var id]:
+            Show(await api.JobActionAsync(id, verb, new LocalJobAction(As(), Text: Option(rest, "--note")), cancel.Token));
+            return 0;
+        case ["move", var id, var column]:
+            Show(await api.JobActionAsync(id, "move", new LocalJobAction(As(), column, Option(rest, "--note")), cancel.Token));
+            return 0;
+        case ["comment", var id, var text]:
+            Show(await api.JobActionAsync(id, "comment", new LocalJobAction(As(), Text: text), cancel.Token));
+            return 0;
+        default:
+            return Fail(Usage);
+    }
 }
 
 async Task<int> RoomAsync(string[] rest)

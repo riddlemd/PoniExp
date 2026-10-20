@@ -178,6 +178,32 @@ public static class LocalApiEndpoints
             return Results.Ok(new LocalOk(true));
         }));
 
+        app.MapGet("/jobs", (Daemon d, bool? all, string? column, CancellationToken ct) => Handle(async () =>
+            Results.Ok(await d.JobsAsync(all == true, column, ct))));
+
+        app.MapGet("/jobs/{id}", (Daemon d, string id, CancellationToken ct) => Handle(async () => Results.Ok(await d.JobAsync(id, ct))));
+
+        app.MapPost("/jobs", (Daemon d, LocalJobPost request, CancellationToken ct) => Handle(async () =>
+        {
+            RequireAgent(request.Agent);
+            return Results.Ok(await d.PostJobAsync(request.Agent, request.Title ?? throw new ArgumentException("a job needs a title"), request.Description,
+                request.Role, request.Backlog, ct));
+        }));
+
+        app.MapPost("/jobs/{id}/{verb}", (Daemon d, string id, string verb, LocalJobAction request, CancellationToken ct) => Handle(async () =>
+        {
+            RequireAgent(request.Agent);
+            return Results.Ok(verb switch
+            {
+                "claim" => await d.ClaimJobAsync(request.Agent, id, ct),
+                "move" => await d.MoveJobAsync(request.Agent, id, request.Column ?? throw new ArgumentException("say which column"), request.Text, ct),
+                "release" => await d.JobActionAsync(request.Agent, id, JobActionKind.Release, request.Text, ct),
+                "cancel" => await d.JobActionAsync(request.Agent, id, JobActionKind.Cancel, request.Text, ct),
+                "comment" => await d.JobActionAsync(request.Agent, id, JobActionKind.Comment, request.Text, ct),
+                _ => throw new ArgumentException("a job action is claim, move, release, cancel or comment"),
+            });
+        }));
+
         app.MapGet("/rooms", (Daemon d, string? agent) => Results.Ok(d.Rooms(agent)));
 
         app.MapGet("/rooms/invites", (Daemon d, string? agent) => Results.Ok(d.RoomInvites(agent)));

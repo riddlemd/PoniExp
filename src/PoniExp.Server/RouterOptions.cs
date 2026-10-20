@@ -88,6 +88,15 @@ public sealed class RouterOptions
 
     /// <summary>How long a collapsed room's statistics are kept.</summary>
     public TimeSpan RoomStatsRetention { get; set; } = TimeSpan.FromDays(365);
+
+    /// <summary>How long a job claim lasts unless the claimant's daemon renews it; then the job is ready again.</summary>
+    public TimeSpan JobLease { get; set; } = TimeSpan.FromMinutes(2);
+
+    /// <summary>How long a finished (done or failed) job stays on the board.</summary>
+    public TimeSpan JobRetention { get; set; } = TimeSpan.FromDays(90);
+
+    /// <summary>The most unfinished jobs one machine may have posted.</summary>
+    public int MaxLiveJobsPerMachine { get; set; } = 1000;
 }
 
 public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
@@ -144,6 +153,11 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
         if (options.TrafficLogRetention <= TimeSpan.Zero)
         {
             errors.Add("PoniExp:TrafficLogRetention must be positive.");
+        }
+
+        if (options.JobLease <= TimeSpan.Zero || options.JobRetention <= TimeSpan.Zero || options.MaxLiveJobsPerMachine < 1)
+        {
+            errors.Add("PoniExp:JobLease and JobRetention must be positive, and MaxLiveJobsPerMachine at least 1.");
         }
 
         if (options.RoomIdleExpiry <= TimeSpan.Zero || options.RoomStatsRetention <= TimeSpan.Zero)

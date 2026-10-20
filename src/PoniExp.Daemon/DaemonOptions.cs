@@ -27,6 +27,9 @@ public sealed class DaemonOptions
     /// <summary>How long to wait before trying the router again when it can't be reached at start.</summary>
     public TimeSpan ConnectRetry { get; set; } = TimeSpan.FromSeconds(5);
 
+    /// <summary>How often the leases of jobs held by online agents are renewed (keep it well under the router's JobLease).</summary>
+    public TimeSpan JobLeaseRenewal { get; set; } = TimeSpan.FromSeconds(30);
+
     /// <summary>How long a room invitation stays open (at most 30 days).</summary>
     public TimeSpan RoomInviteLifetime { get; set; } = TimeSpan.FromDays(7);
 
@@ -42,6 +45,11 @@ public sealed class DaemonOptionsValidator : IValidateOptions<DaemonOptions>
     public ValidateOptionsResult Validate(string? name, DaemonOptions options)
     {
         var errors = new List<string>();
+        if (options.JobLeaseRenewal <= TimeSpan.Zero)
+        {
+            errors.Add("Daemon:JobLeaseRenewal must be positive.");
+        }
+
         if (options.RoomInviteLifetime <= TimeSpan.Zero || options.RoomInviteLifetime > RoomLog.MaxInviteLifetime)
         {
             errors.Add("Daemon:RoomInviteLifetime must be positive and at most 30 days.");

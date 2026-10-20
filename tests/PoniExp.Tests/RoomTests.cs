@@ -21,6 +21,8 @@ public class RoomTests
         await RegisterAndLeaveAsync(blinky, "rev2", ["reviewer"]); // a holder, but offline
         await RouterFixture.EventuallyAsync(async () => (await ise.Api.MachinesAsync()).SelectMany(m => m.Agents)
             .Count(e => e.Roles?.Contains("reviewer") == true) == 2);
+        await RouterFixture.EventuallyAsync(async () => (await ise.Api.MachinesAsync()).SelectMany(m => m.Agents) // and has heard rev2 left
+            .Any(e => e.Name == "rev2" && e.State != "online"));
 
         var one = Assert.Single(await ise.Api.SendAsync(new LocalSendRequest("ops", ["role:reviewer"], "review this")));
         Assert.Equal("wojtek/rev", one.To); // the online one

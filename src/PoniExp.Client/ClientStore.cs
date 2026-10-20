@@ -17,7 +17,7 @@ namespace PoniExp.Client;
 /// </summary>
 public sealed class ClientStore
 {
-    private const int SchemaVersion = 7;
+    private const int SchemaVersion = 8;
 
     private const string Schema = """
         PRAGMA journal_mode = WAL;
@@ -171,6 +171,16 @@ public sealed class ClientStore
             collapsed    INTEGER NOT NULL DEFAULT 0,
             reason       TEXT,
             updated_on   TEXT NOT NULL
+        ) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS posted_jobs (
+            id          TEXT PRIMARY KEY,
+            agent       TEXT NOT NULL,
+            title       TEXT NOT NULL,
+            description TEXT NOT NULL,
+            role        TEXT,
+            job_column  TEXT NOT NULL,
+            open        INTEGER NOT NULL DEFAULT 1,
+            posted_on   TEXT NOT NULL
         ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS diagnostics (
             occurred_on  TEXT NOT NULL,
@@ -405,6 +415,12 @@ public sealed class ClientStore
             r.GetString(4), r.GetString(5), r.GetInt64(6), r.GetString(7), r.GetInt64(8) == 1, r.IsDBNull(9) ? null : Parse(r.GetString(9)),
             r.IsDBNull(10) ? null : r.GetString(10), r.IsDBNull(11) ? null : r.GetString(11), r.IsDBNull(12) ? null : r.GetString(12),
             r.IsDBNull(13) ? null : r.GetString(13));
+
+    /// <summary>Jobs this machine's agents posted that haven't finished: re-posted if the router loses them.</summary>
+    public IReadOnlyList<PostedJob> GetOpenPostedJobs() =>
+        Query("SELECT id, agent, title, description, role, job_column FROM posted_jobs WHERE open = 1 ORDER BY posted_on;", r =>
+            new PostedJob(Guid.Parse(r.GetString(0)), r.GetString(1), r.GetString(2), r.GetString(3), r.IsDBNull(4) ? null : r.GetString(4),
+                Enum.GetValues<JobColumn>().First(c => WireProtocol.NameOf(c) == r.GetString(5))));
 
     internal const string RoomColumns = "id, name, events, collapsed, reason, updated_on";
 
@@ -853,6 +869,16 @@ public sealed class StoreTransaction
             ON CONFLICT (id) DO UPDATE SET events = $events, updated_on = $now;
             """, ("$id", ClientStore.Id(id)), ("$name", name), ("$events", JsonSerializer.Serialize(events, WireProtocol.Json)), ("$now", ClientStore.Stamp(Now)));
 
+    public void SavePostedJob(PostedJob job) =>
+        Execute("""
+            INSERT INTO posted_jobs (id, agent, title, description, role, job_column, posted_on) VALUES ($id, $agent, $title, $description, $role, $column, $now)
+            ON CONFLICT (id) DO NOTHING;
+            """, ("$id", ClientStore.Id(job.Id)), ("$agent", job.Agent), ("$title", job.Title), ("$description", job.Description), ("$role", job.Role),
+            ("$column", WireProtocol.NameOf(job.Column)), ("$now", ClientStore.Stamp(Now)));
+
+    /// <summary>The job finished (or is gone): no re-posting it.</summary>
+    public void ClosePostedJob(Guid id) => Execute("UPDATE posted_jobs SET open = 0 WHERE id = $id;", ("$id", ClientStore.Id(id)));
+
     /// <summary>The room has collapsed: this machine keeps its log and messages (under the usual retention).</summary>
     public void CollapseRoom(Guid id, string reason) =>
         Execute("UPDATE rooms SET collapsed = 1, reason = $reason, updated_on = $now WHERE id = $id AND collapsed = 0;",
@@ -1104,6 +1130,9 @@ public static class AttachmentEvents
 }
 
 /// <summary>A conversation as one local agent sees it. <see cref="State"/> is open or finished.</summary>
+/// <summary>A job an agent here posted, as posted (for re-posting it under the same id).</summary>
+public sealed record PostedJob(Guid Id, string Agent, string Title, string Description, string? Role, JobColumn Column);
+
 /// <summary>A room as this machine knows it: its membership log (checked), and whether it has collapsed.</summary>
 public sealed record RoomRecord(Guid Id, string Name, IReadOnlyList<RoomEvent> Events, bool Collapsed, string? CollapseReason, DateTimeOffset UpdatedOn);
 

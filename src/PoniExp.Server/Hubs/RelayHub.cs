@@ -21,6 +21,7 @@ public sealed class RelayHub(
     RouterStore store,
     PoniExp.Server.Blobs.BlobRegistry blobs,
     PoniExp.Server.Rooms.RoomRegistry rooms,
+    PoniExp.Server.Jobs.JobBoard jobs,
     TimeProvider time,
     IOptionsSnapshot<RouterOptions> options,
     ILogger<RelayHub> logger) : Hub
@@ -363,6 +364,33 @@ public sealed class RelayHub(
     /// <summary>Live rooms this machine is involved in, and what became of the ones it knows that aren't.</summary>
     [HubMethodName(HubMethods.GetMyRooms)]
     public IReadOnlyList<RoomState> GetMyRooms(IReadOnlyList<Guid> known) => rooms.Mine(RequireMember(), known ?? []);
+
+    // ---- the job board ----
+
+    [HubMethodName(HubMethods.SubmitJobAction)]
+    public Task<Job> SubmitJobActionAsync(JobAction action)
+    {
+        var me = RequireMember();
+        return Room(() => jobs.SubmitAsync(me, action), me);
+    }
+
+    [HubMethodName(HubMethods.GetJobs)]
+    public IReadOnlyList<Job> GetJobs(bool includeFinished)
+    {
+        RequireMember();
+        return jobs.List(includeFinished);
+    }
+
+    [HubMethodName(HubMethods.GetJob)]
+    public Job GetJob(Guid id)
+    {
+        RequireMember();
+        return jobs.Get(id) ?? throw new HubException("No such job.");
+    }
+
+    /// <summary>The claimant's daemon keeps its leases alive; returns the jobs it still holds.</summary>
+    [HubMethodName(HubMethods.RenewJobLeases)]
+    public IReadOnlyList<Guid> RenewJobLeases(IReadOnlyList<Guid> ids) => jobs.Renew(RequireMember(), ids ?? []);
 
     private async Task<T> Room<T>(Func<Task<T>> work, string me)
     {

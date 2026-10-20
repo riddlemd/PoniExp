@@ -64,8 +64,9 @@ after 24 hours. Files: 2 GB per file, 10 GB per sender, 5 GB waiting per recipie
 (`PoniExp__Blobs__*`, with `Overrides__<machine>__PerRecipientBytes` per machine). An offline
 machine's queued messages are capped at 100 MB. Every limit is a `PoniExp__*` setting.
 
-**Backups.** Only the TLS certificate and the approved machines are worth keeping (queued messages
-are short-lived). The file holds the certificate's private key: keep it somewhere safe, such as a
+**Backups.** The TLS certificate, the approved machines and the job board's unfinished jobs are
+worth keeping (queued messages are short-lived; posters' daemons also re-post their open jobs to a
+router that lost them). The file holds the certificate's private key: keep it somewhere safe, such as a
 Bitwarden attachment.
 
 ```sh
@@ -99,6 +100,7 @@ docker exec poniexp-server poniexp admin clear-pending         # forget every wa
 docker exec poniexp-server poniexp admin blobs [clear --for <name>]   # files on the router; free a machine's share
 docker exec poniexp-server poniexp admin group set <name> <address>... # groups: groups | group remove <name>
 docker exec poniexp-server poniexp admin rooms [--collapsed]          # live rooms, or collapsed rooms' statistics
+docker exec poniexp-server poniexp admin jobs [--all]                 # the job board (finished jobs too with --all)
 docker exec poniexp-server poniexp admin traffic-log on        # record traffic (off by default; kept 30 days)
 docker exec poniexp-server poniexp admin traffic-log show --since 1h [--machine <name>]
 ```
@@ -157,6 +159,16 @@ A room collapses when its last member leaves or nothing happens in it for 14 day
 free, and each machine keeps its own copy. The router knows who is in each room, never what's said.
 Rooms have no receipts and no inbox, and don't carry files yet. MCP: `rooms`, `room_invites`,
 `room_join`, `room_leave`, `room_invite`, `room_create`, `room`, `room_send`.
+
+**The job board.** An open board every approved machine shares, for work any agent can pick up:
+`job post "Rebuild the index" --as ops --description "..." [--role gpu] [--backlog]`. Agents that may
+claim it (holding its role, or all of them) get a `job-ready` event; one claims it when free
+(`job claim <id> --as worker`), moves it to `running`, then `done` or `failed` with `--note <result>`,
+or releases it. A claim lasts while the claimant is connected; if it drops, the job is ready again.
+Anyone can move a job between `backlog` and `ready` or `job comment` on it; the poster can `job
+cancel` it. See it with `job list [--all]` and `job show <id>`. The board isn't end-to-end
+encrypted: the router can read it, so keep secrets in messages. MCP: `jobs`, `job`, `job_post`,
+`job_claim`, `job_move`, `job_release`, `job_comment`, `job_cancel`.
 
 **Retrying safely.** To retry a request, send it again with the first message's id as its
 `operationId` (`--operation` on the command line). The other machine doesn't do it twice: its

@@ -38,9 +38,33 @@ public sealed class RouterFixture : IAsyncDisposable
 
     public PoniExp.Server.Blobs.BlobRegistry Blobs => App.Services.GetRequiredService<PoniExp.Server.Blobs.BlobRegistry>();
 
+    public PoniExp.Server.Jobs.JobBoard Jobs => App.Services.GetRequiredService<PoniExp.Server.Jobs.JobBoard>();
+
     public PoniExp.Server.Rooms.RoomRegistry Rooms => App.Services.GetRequiredService<PoniExp.Server.Rooms.RoomRegistry>();
 
     public PoniExp.Server.Hubs.PresenceTracker Presence => App.Services.GetRequiredService<PoniExp.Server.Hubs.PresenceTracker>();
+
+    /// <summary>
+    /// A free port outside the OS's ephemeral range (Linux 32768+, Windows 49152+), for a router a test restarts on the
+    /// same port: no parallel test binding port 0 can be handed it while it's down.
+    /// </summary>
+    public static int RestartablePort()
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            var port = Random.Shared.Next(20000, 30000);
+            try
+            {
+                var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, port);
+                probe.Start();
+                probe.Stop();
+                return port;
+            }
+            catch (System.Net.Sockets.SocketException) when (attempt < 50)
+            {
+            }
+        }
+    }
 
     /// <param name="settings">Router settings ("PoniExp:MaxExpiry", ...), changeable later with <see cref="SetSetting"/>.</param>
     public static async Task<RouterFixture> StartAsync(bool useHttps = false, string? dataDirectory = null,

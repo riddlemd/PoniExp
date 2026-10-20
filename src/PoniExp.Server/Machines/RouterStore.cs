@@ -13,7 +13,7 @@ namespace PoniExp.Server.Machines;
 /// </summary>
 public sealed class RouterStore
 {
-    private const int SchemaVersion = 5;
+    private const int SchemaVersion = 6;
 
     private static readonly JsonSerializerOptions Json = WireProtocol.Configure(new JsonSerializerOptions(JsonSerializerDefaults.Web));
 
@@ -72,6 +72,12 @@ public sealed class RouterStore
                 record           TEXT NOT NULL
             ) WITHOUT ROWID;
             CREATE UNIQUE INDEX IF NOT EXISTS rooms_live_name ON rooms (name) WHERE state = 'live';
+            CREATE TABLE IF NOT EXISTS jobs (
+                id         TEXT PRIMARY KEY,
+                job_column TEXT NOT NULL,
+                updated_on TEXT NOT NULL,
+                record     TEXT NOT NULL
+            ) WITHOUT ROWID;
             CREATE TABLE IF NOT EXISTS router_state (
                 name  TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -178,6 +184,34 @@ public sealed class RouterStore
             : "INSERT INTO groups (name, members) VALUES ($name, $members) ON CONFLICT (name) DO UPDATE SET members = $members;";
         command.Parameters.AddWithValue("$name", name);
         command.Parameters.AddWithValue("$members", JsonSerializer.Serialize(members, Json));
+        command.ExecuteNonQuery();
+    }
+
+    // ---- jobs ----
+
+    public IReadOnlyList<Job> LoadJobs() => Load<Job>("SELECT record FROM jobs;");
+
+    public void SaveJob(Job job)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO jobs (id, job_column, updated_on, record) VALUES ($id, $column, $updated, $record)
+            ON CONFLICT (id) DO UPDATE SET job_column = $column, updated_on = $updated, record = $record;
+            """;
+        command.Parameters.AddWithValue("$id", job.Id.ToString("D"));
+        command.Parameters.AddWithValue("$column", WireProtocol.NameOf(job.Column));
+        command.Parameters.AddWithValue("$updated", Signatures.Stamp(job.UpdatedOn));
+        command.Parameters.AddWithValue("$record", JsonSerializer.Serialize(job, Json));
+        command.ExecuteNonQuery();
+    }
+
+    public void DeleteJob(Guid id)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM jobs WHERE id = $id;";
+        command.Parameters.AddWithValue("$id", id.ToString("D"));
         command.ExecuteNonQuery();
     }
 

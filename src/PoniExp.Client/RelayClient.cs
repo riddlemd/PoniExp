@@ -105,6 +105,11 @@ public sealed class RelayClient : IAsyncDisposable
             PresenceChanged?.Invoke(change);
         }));
         _connection.On<MembershipStatus>(HubMethods.MembershipChanged, status => Post(() => OnMembershipChangedAsync(status)));
+        _connection.On<JobChange>(HubMethods.JobChanged, change => Post(() =>
+        {
+            JobChanged?.Invoke(change);
+            return Task.CompletedTask;
+        }));
         _connection.On<RoomState>(HubMethods.RoomChanged, room => Post(() =>
         {
             RoomChanged?.Invoke(room); // on the worker, so before any room message the router sends after it
@@ -146,6 +151,9 @@ public sealed class RelayClient : IAsyncDisposable
     public event Action<PresenceChange>? PresenceChanged;
 
     public event Action<MembershipStatus>? MembershipChanged;
+
+    /// <summary>A job on the board changed (pushed to every approved machine).</summary>
+    public event Action<JobChange>? JobChanged;
 
     /// <summary>A room this machine is involved in changed or collapsed (the log is unchecked: the caller replays it).</summary>
     public event Action<RoomState>? RoomChanged;
@@ -257,6 +265,34 @@ public sealed class RelayClient : IAsyncDisposable
     /// <summary>The owner's groups (named lists of addresses), as the router serves them.</summary>
     /// <summary>Signs a room event with this machine's key.</summary>
     public RoomEvent SignRoomEvent(RoomEvent e) => Signatures.SignRoomEvent(_keys, e);
+
+    public JobAction SignJobAction(JobAction a) => Signatures.SignJobAction(_keys, a);
+
+    public Task<Job> SubmitJobActionAsync(JobAction action, CancellationToken cancellationToken = default) =>
+        InvokeBoardAsync<Job>(HubMethods.SubmitJobAction, action, cancellationToken);
+
+    public Task<IReadOnlyList<Job>> GetJobsAsync(bool includeFinished, CancellationToken cancellationToken = default) =>
+        InvokeBoardAsync<IReadOnlyList<Job>>(HubMethods.GetJobs, includeFinished, cancellationToken);
+
+    /// <summary>The job, or null if the board doesn't have it.</summary>
+    public async Task<Job?> GetJobAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await InvokeBoardAsync<Job>(HubMethods.GetJob, id, cancellationToken);
+        }
+        catch (InvalidOperationException e) when (e.Message.Contains("No such job", StringComparison.Ordinal))
+        {
+            return null;
+        }
+    }
+
+    public Task<IReadOnlyList<Guid>> RenewJobLeasesAsync(IReadOnlyList<Guid> ids, CancellationToken cancellationToken = default) =>
+        InvokeBoardAsync<IReadOnlyList<Guid>>(HubMethods.RenewJobLeases, ids, cancellationToken);
+
+    private Task<T> InvokeBoardAsync<T>(string method, object argument, CancellationToken cancellationToken) =>
+        IsConnected ? InvokeRoomAsync<T>(method, argument, cancellationToken)
+            : throw new InvalidOperationException("not connected to the router: the job board needs it");
 
     public Task<RoomState> CreateRoomAsync(RoomEvent create, CancellationToken cancellationToken = default) =>
         InvokeRoomAsync<RoomState>(HubMethods.CreateRoom, create, cancellationToken);

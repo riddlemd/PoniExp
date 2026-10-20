@@ -67,6 +67,7 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
             {
                 Background(() => AnnounceAsync(null));
                 Background(SyncRoomsAsync);
+                Background(SyncJobsAsync);
             }
             else
             {
@@ -74,6 +75,7 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
             }
         };
         relay.RoomChanged += ApplyRoom;
+        relay.JobChanged += OnJobChanged;
         relay.MessageRejected += (envelope, why) => Diagnose("warning", why.Contains("signature", StringComparison.Ordinal) ? "signature" : "delivery",
             $"refused a message: {why}", envelope?.FromMachine, envelope?.Id);
         relay.BackgroundError += e => Diagnose("error", "delivery", e.Message);
@@ -138,6 +140,7 @@ public sealed partial class Daemon : BackgroundService, IIncomingHandler
         var skew = _messaging.CurrentValue.ClockSkew;
         Store.Transact(Now, tx => tx.ExpireIncoming(skew));
         await _relay.FlushOutboxAsync(cancellationToken);
+        await RenewJobLeasesAsync(cancellationToken);
         var retention = _retention.CurrentValue;
         if (Now - _lastRetention >= retention.Interval)
         {

@@ -97,6 +97,27 @@ public static class Signatures
             e.ActorKey,
         ]);
 
+    /// <summary>Signs a job board action with this machine's key.</summary>
+    public static JobAction SignJobAction(MachineKeys keys, JobAction a)
+    {
+        var unsigned = a with { OccurredOn = Truncate(a.OccurredOn), ActorKey = keys.PublicKey, Signature = string.Empty };
+        return unsigned with { Signature = keys.Sign(JobActionPayload(unsigned)) };
+    }
+
+    public static byte[] JobActionPayload(JobAction a) =>
+        SigningPayload.Build("job-action", [
+            a.ActionId.ToString("D"),
+            a.JobId.ToString("D"),
+            WireProtocol.NameOf(a.Kind),
+            a.Actor,
+            a.Column is { } c ? WireProtocol.NameOf(c) : "",
+            a.Title ?? "",
+            a.Text ?? "",
+            a.Role ?? "",
+            Stamp(a.OccurredOn),
+            a.ActorKey,
+        ]);
+
     public static bool VerifyJoin(JoinRequest request) =>
         PublicKeys.Verify(request.PublicKey, JoinPayload(request), request.Signature)
         && PublicKeys.VerifyEncryptionKey(request.PublicKey, request.EncryptionKey, request.EncryptionKeySignature);

@@ -41,6 +41,9 @@ only has to build on the ones before it; a protection that arrives in a later ph
   (`group:x`, `admin group`), named rooms with a signed invite/join/leave log on the router,
   envelopes sealed for exactly the members' machines, collapse when empty or idle, statistics
   afterwards (`admin rooms`). Endpoints are called agents. Protocol 6.
+- **Job board (phase 8):** an open forum on the router: signed job actions, columns from backlog to
+  done / failed, leases renewed by the claimant's daemon, `job-ready` events by role, retention,
+  backups and re-posting by posters' daemons. Protocol 7.
 - **Executables:**
   - `poniexp` (`src/PoniExp.Server`), with the subcommands `router` and `admin`.
   - `poniexp-client` (`src/PoniExp.Cli`).
@@ -607,7 +610,7 @@ Revised after review (the first build used admins and versioned snapshots; that 
 - a sender that missed a leave refused and re-sealing;
 - collapse on the last leave and on idleness, with only the stats kept on the router.
 
-## Phase 8: Job board (workshop)
+## Phase 8: Job board (workshop, done)
 
 An open forum for every approved machine: any agent posts work from whatever machine you're on, and
 an agent that matches picks it up when it has capacity and moves it through the columns.
@@ -636,8 +639,11 @@ an agent that matches picks it up when it has capacity and moves it through the 
   open jobs, and re-posts them under the same id if the router no longer has them (a lost volume).
 - **GitHub issues:** not in PoniExp; an agent can mirror issues onto the board.
 - **CLI / MCP:** `job post|list|show|claim|move|release|comment|cancel`; MCP `jobs`, `job`,
-  `job_post`, `job_claim`, `job_move`, `job_release`, `job_comment`. The router also serves the board as
-  read-only JSON to approved machines (for phase 12).
+  `job_post`, `job_claim`, `job_move`, `job_release`, `job_comment`, `job_cancel`; `admin jobs [--all]` on the
+  router. Approved machines read the board over the hub (`GetJobs`); phase 12 adds the web view.
+- **Roles are checked by the claimant's daemon:** the router doesn't know agents' roles (they're
+  self-declared labels in machine-to-machine announcements), so a claim's role check is a courtesy,
+  not a permission; permissions are per machine (phase 9).
 - **Limits:** title 200 characters, description 64 KB, comment 16 KB, 1000 live jobs per machine
   (settings).
 

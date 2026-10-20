@@ -106,6 +106,49 @@ public sealed class PoniExpTools(McpAgent me)
     public async Task<string> MessageAsync([Description("The message id.")] string messageId, CancellationToken cancellationToken = default) =>
         Json(await me.Api.MessageAsync(me.Agent, ParseId(messageId) ?? throw new ArgumentException("messageId is required"), cancellationToken));
 
+    [McpServerTool(Name = "jobs", ReadOnly = true), Description(
+        "The job board: work any agent on any approved machine posted, open for all to see (don't put secrets on it). " +
+        "Lists unfinished jobs (all=true adds finished ones), optionally one column: backlog, ready, claimed, running, done, failed.")]
+    public async Task<string> JobsAsync(bool all = false, string? column = null, CancellationToken cancellationToken = default) =>
+        Json(await me.Api.JobsAsync(all, column, cancellationToken));
+
+    [McpServerTool(Name = "job", ReadOnly = true), Description("One job, with its description, result and history (moves and comments).")]
+    public async Task<string> JobAsync([Description("The job's id (or the start of it).")] string id, CancellationToken cancellationToken = default) =>
+        Json(await me.Api.JobAsync(id, cancellationToken));
+
+    [McpServerTool(Name = "job_post"), Description(
+        "Post a job to the board for any agent to pick up. With a role, only agents declaring it may claim it. " +
+        "It goes to 'ready' (or 'backlog' if it isn't ready to be picked up yet).")]
+    public async Task<string> JobPostAsync([Description("A one-line title.")] string title, [Description("What to do (markdown).")] string? description = null,
+        [Description("The role an agent needs to claim it (optional).")] string? role = null, bool backlog = false, CancellationToken cancellationToken = default) =>
+        Json(await me.Api.PostJobAsync(new LocalJobPost(me.Agent, title, description, role, backlog), cancellationToken));
+
+    [McpServerTool(Name = "job_claim"), Description(
+        "Claim a ready job when you have capacity: it's yours while you stay connected. Move it to 'running' when you start, " +
+        "then 'done' or 'failed' with a result note; or release it if you can't do it.")]
+    public async Task<string> JobClaimAsync([Description("The job's id (or the start of it).")] string id, CancellationToken cancellationToken = default) =>
+        Json(await me.Api.JobActionAsync(id, "claim", new LocalJobAction(me.Agent), cancellationToken));
+
+    [McpServerTool(Name = "job_move"), Description(
+        "Move a job: between backlog and ready (anyone), or a job you claimed to running, done or failed (with a result note for those).")]
+    public async Task<string> JobMoveAsync([Description("The job's id (or the start of it).")] string id,
+        [Description("backlog, ready, running, done or failed.")] string column, [Description("The result, for done or failed.")] string? note = null,
+        CancellationToken cancellationToken = default) =>
+        Json(await me.Api.JobActionAsync(id, "move", new LocalJobAction(me.Agent, column, note), cancellationToken));
+
+    [McpServerTool(Name = "job_release"), Description("Give back a job you claimed: it's ready for someone else.")]
+    public async Task<string> JobReleaseAsync([Description("The job's id (or the start of it).")] string id, [Description("Why (optional).")] string? note = null,
+        CancellationToken cancellationToken = default) =>
+        Json(await me.Api.JobActionAsync(id, "release", new LocalJobAction(me.Agent, Text: note), cancellationToken));
+
+    [McpServerTool(Name = "job_comment"), Description("Comment on a job (everyone sees it).")]
+    public async Task<string> JobCommentAsync([Description("The job's id (or the start of it).")] string id, string text, CancellationToken cancellationToken = default) =>
+        Json(await me.Api.JobActionAsync(id, "comment", new LocalJobAction(me.Agent, Text: text), cancellationToken));
+
+    [McpServerTool(Name = "job_cancel"), Description("Cancel a job you posted that hasn't finished.")]
+    public async Task<string> JobCancelAsync([Description("The job's id (or the start of it).")] string id, CancellationToken cancellationToken = default) =>
+        Json(await me.Api.JobActionAsync(id, "cancel", new LocalJobAction(me.Agent), cancellationToken));
+
     [McpServerTool(Name = "rooms", ReadOnly = true), Description(
         "Rooms: named, standing conversations where every member sees every message. Lists the rooms you're in or invited to, " +
         "with their members and open invitations.")]

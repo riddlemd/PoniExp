@@ -89,6 +89,12 @@ public static class AdminCli
                     }
 
                     return 0;
+                case ["jobs", .. var jobArgs]:
+                    var board = await http.GetFromJsonAsync<List<Job>>("admin/jobs" + (jobArgs.Contains("--all") ? "?all=true" : ""), Json) ?? [];
+                    output.WriteLine(board.Count == 0 ? "the board is empty" : string.Join("\n", board.Select(j =>
+                        $"{j.Id.ToString()[..8]}  {WireProtocol.NameOf(j.Column),-8} {j.Title}" + (j.Role is { } role ? $"  [role:{role}]" : "") +
+                        $"\n    posted by {j.Poster} {j.PostedOn.ToLocalTime():yyyy-MM-dd HH:mm}" + (j.Claimant is { } who ? $", claimed by {who}" : ""))));
+                    return 0;
                 case ["rooms"]:
                     var live = await http.GetFromJsonAsync<List<RoomSummary>>("admin/rooms", Json) ?? [];
                     output.WriteLine(live.Count == 0 ? "no live rooms" : string.Join("\n", live.Select(r =>
@@ -176,7 +182,7 @@ public static class AdminCli
                         return 1;
                     }
 
-                    output.WriteLine($"restored {restored.Machines} approved machine(s)" + (restored.CertificateChanged
+                    output.WriteLine($"restored {restored.Machines} approved machine(s) and {Count(restored.Jobs, "live job")}" + (restored.CertificateChanged
                         ? $"; the certificate ({restored.CertificateSha256?[..16]}...) is served after a restart: docker restart poniexp-server"
                         : "; the certificate is the one already in use"));
                     return 0;
@@ -187,7 +193,7 @@ public static class AdminCli
                 default:
                     output.WriteLine("usage: poniexp admin [list | approve <id|name> | reject <id|name> | remove <id|name> | clear-pending | certificate\n" +
                                      "                      | backup <path|-> | restore <path|-> | blobs [clear --for <machine>]\n" +
-                                     "                      | rooms [--collapsed [--since <time>]]\n" +
+                                     "                      | rooms [--collapsed [--since <time>]] | jobs [--all]\n" +
                                      "                      | groups | group set <name> <machine/agent|role:x[/all]>... | group remove <name>\n" +
                                      "                      | traffic-log [on | off | status | show [--since 2h|date] [--machine name] [--limit n] [--json]]] [--url URL]");
                     return 2;

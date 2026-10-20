@@ -122,7 +122,13 @@ public class EncryptionTests
         await ise.SendAsync("wojtek/vault", new OutgoingMessage("the eagle lands at 0400") { Subject = "landing", FromAgent = "ops" });
         await RouterFixture.Eventually(() => router.Queue.Count == 1);
 
-        var onDisk = string.Concat(Directory.GetFiles(router.DataDirectory, "router.db*").Select(ReadShared));
+        // Re-read until the envelope is visible: SQLite may checkpoint the -wal between reading it and the main file.
+        var onDisk = "";
+        await RouterFixture.Eventually(() =>
+        {
+            onDisk = string.Concat(Directory.GetFiles(router.DataDirectory, "router.db*").Select(ReadShared));
+            return onDisk.Contains("ciphertext", StringComparison.Ordinal);
+        });
         Assert.DoesNotContain("eagle", onDisk);
         Assert.DoesNotContain("landing", onDisk);
         Assert.DoesNotContain("vault", onDisk); // agents too

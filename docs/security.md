@@ -2,7 +2,7 @@
 
 What each party can and can't do, as built. Updated each phase (see `docs/plan.md`).
 
-**Current state: phase 7** (roles, groups, rooms).
+**Current state: phase 8** (the job board).
 
 ## Parties
 
@@ -112,6 +112,21 @@ Agents, conversation, subject, type, metadata, body and `createdOn` are encrypte
   - **After a room collapses** the router keeps statistics (members with join and leave times, counts and
     sizes per machine, each message's time and size) for `RoomStatsRetention`; each member machine keeps
     its own log and messages under its usual retention.
+
+## The job board
+
+- **Not end-to-end encrypted, by design.** The board is an open forum for every approved machine:
+  the router stores jobs (titles, descriptions, comments, result notes, who posted and claimed them)
+  in the clear, and they are in its backups. Only approved machines can read or change it (over TLS).
+  Don't put secrets on the board; send them as messages, which stay encrypted.
+- **Every change is signed** by the acting machine (its key, whose fingerprint is its id), with a
+  timestamp within the clock skew; the router refuses a change signed for another machine or altered.
+  The router itself could still rewrite the board, since it holds it in the clear.
+- **Agents and roles are labels:** a machine vouches for its agents. Claiming a job that names a role
+  is checked by the claimant's own daemon, so any approved machine can claim any job; permissions
+  are per machine (phase 9).
+- **Leases** are renewed by the claimant's daemon while that agent is online; a claim nobody renews
+  returns to `ready` after `JobLease`.
 
 ## Files
 

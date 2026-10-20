@@ -25,6 +25,12 @@ public static class HubMethods
     public const string GetRoom = nameof(GetRoom);
     public const string GetMyRooms = nameof(GetMyRooms);
 
+    // the job board: open to every approved machine
+    public const string SubmitJobAction = nameof(SubmitJobAction);
+    public const string GetJobs = nameof(GetJobs);
+    public const string GetJob = nameof(GetJob);
+    public const string RenewJobLeases = nameof(RenewJobLeases);
+
     // files (the chunks themselves go over HTTP, under BlobsPath, with a ticket)
     public const string BlobsPath = "/blobs";
     public const string BeginUpload = nameof(BeginUpload);
@@ -42,4 +48,6 @@ public static class HubMethods
     public const string MembershipChanged = nameof(MembershipChanged);
     /// <summary>A room this machine is involved in changed (a <see cref="RoomState"/>), or collapsed.</summary>
     public const string RoomChanged = nameof(RoomChanged);
+    /// <summary>A job changed (a <see cref="JobChange"/>), to every approved machine.</summary>
+    public const string JobChanged = nameof(JobChanged);
 }

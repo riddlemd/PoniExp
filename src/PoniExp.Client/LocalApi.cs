@@ -196,6 +196,18 @@ public sealed class LocalApiClient : IDisposable
 
     public async Task CancelBlobAsync(Guid blobId, CancellationToken ct = default) => await PostAsync<LocalOk>($"blobs/{blobId}/cancel", new { }, ct);
 
+    /// <summary>The board: unfinished jobs (and finished ones with <paramref name="all"/>), optionally only one column.</summary>
+    public Task<List<LocalJob>> JobsAsync(bool all = false, string? column = null, CancellationToken ct = default) =>
+        GetAsync<List<LocalJob>>("jobs?all=" + (all ? "true" : "false") + (column is null ? "" : "&column=" + Uri.EscapeDataString(column)), ct);
+
+    public Task<LocalJob> JobAsync(string id, CancellationToken ct = default) => GetAsync<LocalJob>($"jobs/{Uri.EscapeDataString(id)}", ct);
+
+    public Task<LocalJob> PostJobAsync(LocalJobPost request, CancellationToken ct = default) => PostAsync<LocalJob>("jobs", request, ct);
+
+    /// <summary><paramref name="verb"/>: claim, release, cancel, comment or move.</summary>
+    public Task<LocalJob> JobActionAsync(string id, string verb, LocalJobAction request, CancellationToken ct = default) =>
+        PostAsync<LocalJob>($"jobs/{Uri.EscapeDataString(id)}/{verb}", request, ct);
+
     /// <summary>Rooms with an agent of this machine in them or invited (or just <paramref name="agent"/>'s), collapsed ones last.</summary>
     public Task<List<LocalRoom>> RoomsAsync(string? agent = null, CancellationToken ct = default) =>
         GetAsync<List<LocalRoom>>("rooms" + (agent is null ? "" : "?agent=" + Uri.EscapeDataString(agent)), ct);
@@ -462,6 +474,10 @@ public static class LocalEventKinds
     public const string RoomInvite = "room-invite";
     /// <summary>A room the agent is in changed: someone joined or left, or it collapsed.</summary>
     public const string RoomChanged = "room-changed";
+    /// <summary>A job the agent may claim became ready (its role, or a job with no role).</summary>
+    public const string JobReady = "job-ready";
+    /// <summary>A job the agent posted or holds changed: claimed, moved, commented on, or its lease ran out.</summary>
+    public const string JobChanged = "job-changed";
     /// <summary>A file receipt (downloaded, download-failed) for a file the agent sent.</summary>
     public const string FileReceipt = "file-receipt";
 }
@@ -494,7 +510,7 @@ public sealed record LocalMessageDetail(LocalMessage Message, IReadOnlyList<Mess
 public sealed record LocalReceipt(Guid MessageId, string Receipt, string? Reason, string From);
 
 public sealed record LocalEvent(string Kind, LocalMessage? Message = null, LocalReceipt? Receipt = null, LocalFileReceipt? FileReceipt = null,
-    LocalRoom? Room = null, LocalRoomInvite? Invite = null);
+    LocalRoom? Room = null, LocalRoomInvite? Invite = null, LocalJob? Job = null);
 
 /// <summary>A file receipt for <see cref="BlobId"/>, sent with <see cref="MessageId"/>: downloaded, or download-failed (with why).</summary>
 public sealed record LocalFileReceipt(Guid MessageId, Guid BlobId, string Receipt, string? Reason, string From);
@@ -601,6 +617,18 @@ public sealed record LocalRoomInviteRequest(string Agent, IReadOnlyList<string> 
 
 /// <summary>Join (accept an invitation) or leave.</summary>
 public sealed record LocalRoomAgent(string Agent);
+
+/// <summary>A job on the board. Poster and claimant are <c>machine-name/agent</c>; the board is open to every approved machine.</summary>
+public sealed record LocalJob(Guid Id, string Title, string Description, string? Role, string Poster, string Column, string? Claimant,
+    DateTimeOffset? LeaseExpiresOn, string? Result, DateTimeOffset PostedOn, DateTimeOffset UpdatedOn, IReadOnlyList<LocalJobEntry> History);
+
+public sealed record LocalJobEntry(DateTimeOffset OccurredOn, string By, string What, string? Column, string? Text);
+
+/// <summary>Post a job: to ready (default) or backlog; with a role, only agents declaring it may claim it.</summary>
+public sealed record LocalJobPost(string Agent, string Title, string? Description = null, string? Role = null, bool Backlog = false);
+
+/// <summary>Claim, release, cancel, comment on (<see cref="Text"/>) or move (<see cref="Column"/>, with a result note for done and failed) a job.</summary>
+public sealed record LocalJobAction(string Agent, string? Column = null, string? Text = null);
 
 public sealed record LocalRoomSend(string Agent, string Body, Guid? ReplyTo = null, string? Subject = null, string? ContentType = null,
     IReadOnlyDictionary<string, string>? Metadata = null);
