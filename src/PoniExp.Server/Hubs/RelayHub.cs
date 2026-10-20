@@ -419,10 +419,11 @@ public sealed class RelayHub(
 
     /// <summary>An owner-signed admin command, sealed to the router's encryption key.</summary>
     [HubMethodName(HubMethods.RunAdmin)]
-    public Task<SignedAdminResult> RunAdminAsync(SealedBox command)
+    public async Task<SignedAdminResult> RunAdminAsync(SealedBox command)
     {
         var me = RequireMember();
-        return Room(() => remoteAdmin.RunAsync(me, command), me);
+        await using var hold = presence.Hold(Context); // "remove <this machine>" still answers before the drop
+        return await Room(() => remoteAdmin.RunAsync(me, command), me);
     }
 
     [HubMethodName(HubMethods.DenyAdminRequest)]

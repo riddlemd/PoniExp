@@ -37,6 +37,17 @@ public class RemoteAdminTests
     }
 
     [Fact]
+    public async Task RemovingTheMachineTheCommandCameFromStillAnswersThenDropsIt()
+    {
+        await using var setup = await Setup.StartAsync();
+        var (wojtek, owner, router) = (setup.Wojtek, setup.Owner, setup.RouterId);
+        var result = await wojtek.Api.AdminAsync(owner.Admin(router, ["remove", "wojtek"]));
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("removed wojtek", result.Output);
+        await RouterFixture.Eventually(() => !wojtek.Daemon.Relay.IsConnected);
+    }
+
+    [Fact]
     public async Task WithoutAnOwnerKeyNothingRunsRemotely()
     {
         await using var router = await RouterFixture.StartAsync(adminPort: RouterFixture.RestartablePort());

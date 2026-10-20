@@ -54,7 +54,55 @@ public sealed class PresenceTracker
 
         foreach (var context in contexts)
         {
+            lock (_lock)
+            {
+                if (_holding.TryGetValue(context.ConnectionId, out var held))
+                {
+                    _holding[context.ConnectionId] = held with { Pending = true }; // dropped once its call has answered
+                    continue;
+                }
+            }
+
             context.Abort();
+        }
+    }
+
+    private readonly Dictionary<string, (HubCallerContext Context, bool Pending)> _holding = [];
+
+    /// <summary>
+    /// Holds off dropping this connection while it runs a call (an admin command that removes or revokes its own
+    /// machine), so the caller gets its answer; a drop asked for meanwhile happens shortly after.
+    /// </summary>
+    public IAsyncDisposable Hold(HubCallerContext context)
+    {
+        lock (_lock)
+        {
+            _holding[context.ConnectionId] = (context, false);
+        }
+
+        return new Release(this, context);
+    }
+
+    private sealed class Release(PresenceTracker tracker, HubCallerContext context) : IAsyncDisposable
+    {
+        public async ValueTask DisposeAsync()
+        {
+            bool pending;
+            lock (tracker._lock)
+            {
+                pending = tracker._holding.Remove(context.ConnectionId, out var held) && held.Pending;
+            }
+
+            if (pending)
+            {
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(1)); // the call's result is written after the method returns
+                    context.Abort();
+                });
+            }
+
+            await Task.CompletedTask;
         }
     }
 }
