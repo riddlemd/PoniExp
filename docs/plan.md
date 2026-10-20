@@ -65,7 +65,7 @@ only has to build on the ones before it; a protection that arrives in a later ph
 | Message types | `type` is protocol level and hard-coded: a closed C# enum (`message`, `receipt`, `file-receipt`, `agent`, later `job`, `room`) that only PoniExp defines, because it decides how the daemon handles a message. Higher-level protocols between agents are not types: they ride on `type: message`, defined by its `contentType`, `metadata` and `body`, which agents are free to fill as they like. There is no reply type: a reply is a `message` with `replyTo` set. |
 | Agent registry | Every agent that has ever registered with a daemon is remembered (`agents`). Registered but not connected is **offline**: its messages wait until it returns or they expire. Never registered, or retired with `poniexp-client agent retire <name>`, is **unknown**: the message gets a `rejected` receipt. |
 | Automatic messages | `receipt`, `file-receipt` and `agent` are automatic. Nothing automatic is ever sent in response to something automatic; they expire after a short time (default 1 hour, a setting) and aren't retried after that; at most one goes out per message per event. They get rows in `messages` (so duplicates and sequence numbers work as for any message) but are never shown to agents. An expired message sends nothing back: the sender marks it `expired` by its own clock. |
-| Hermes bridge | One agent per Hermes profile, named `hermes-<profile>` (e.g. `wojtek/hermes-default`), since each profile has its own memory, skills and gateway. Each has its own gateway URL (configuration) and its own A2A token, registered with that profile's Hermes and kept in PoniExp's secret store. |
+| Hermes | One agent per Hermes profile, named `hermes-<profile>` (e.g. `wojtek/hermes-default`), since each profile has its own memory, skills and gateway. Each profile's MCP server uses that name; its wake target is that profile's gateway URL, with its own A2A token kept in PoniExp's secret store (phase 12). |
 | Daemon start-up | Two modes. **User mode** runs at logon as the user: the per-user `Run` registry key (Windows; a logon task would need admin), a LaunchAgent (macOS), a systemd user unit (Linux). **System mode** runs at boot: a Windows service under its own virtual account `NT SERVICE\PoniExp` (keys in that account's DPAPI, data in `%ProgramData%\PoniExp`, the local pipe restricted to the owning user; never a "do not store password" task), a macOS LaunchDaemon (keys in the System keychain), a systemd user unit with `loginctl enable-linger` (Linux). |
 | Connection limits | By what a connection has proved, because behind port forwarding (Rancher Desktop) every client arrives from the same address. A connection that hasn't proved a key, or whose key is neither approved nor pending, must authenticate within 10 s, and at most 20 such connections exist at once. An approved or pending machine may hold at most 5 connections. At most 10 new join requests per hour across the router. Per-address limits (10 unauthenticated connections, 5 join requests an hour) apply on top, except to `SharedAddresses`: addresses known to stand for many clients, such as the port forwarder's. All of these are settings. |
 | Backups | `poniexp admin backup` writes the TLS certificate (with its private key) and the approved machines to one owner-only file, or to stdout, for the owner to keep (e.g. as a Bitwarden attachment). `admin restore` puts them back. Queued messages, files and the traffic log aren't backed up. |
@@ -79,7 +79,7 @@ only has to build on the ones before it; a protection that arrives in a later ph
 | Owner key | Your Bitwarden SSH key ("agent-relay owner", ssh-ed25519) through the SSH agent, pinned on every machine; it signs `here` (one prompt per desk). |
 | Naming | What was called an endpoint is an **agent**: addresses are `machine/agent`, flags `--agent`, the automatic announcement type `agent`. Agent names are labels, not identities. |
 | Job board | An open forum for every approved machine: jobs are in the clear on the router (signed changes, approved machines only) so a dashboard can show them. Any agent posts and comments; an agent on a machine meeting the job's requirements claims it under a lease its daemon renews, and moves it through backlog, ready, claimed, running, done / failed. Live jobs are in `admin backup`, and posters' daemons re-post their open jobs. GitHub issues stay outside PoniExp. |
-| Web interface | Deferred: its own workshop phase (13), after the Hermes bridge, before the tray app. |
+| Web interface | Deferred: its own workshop phase (13), after waking agents (phase 12), before the tray app. |
 | Tray app | Built on Oriel (the user's Electron for .NET), not Avalonia; the last phase (14), waiting for Oriel to ship and finish `Notification`. |
 | Rooms | Named (unique on the router while live), created by any agent; members invite, invitees accept, members leave; no admins, no removals. Membership is a log of signed events the router keeps and orders and can see (agents included); each message's key is wrapped for exactly the current members' machines, checked by the router. A room collapses when empty or idle (`RoomIdleExpiry`); the router then keeps only stats, per machine (no subjects, bodies or sending agents). |
 | Groups | Owner-defined lists of addresses on the router (`admin group`), resolved by the sender's daemon into separate messages. |
@@ -145,10 +145,6 @@ and files have their own events.
 `message_state` (phase 3): the furthest event per message and direction, updated in the same
 transaction as the event. A late event never moves it back (a `received` after `acknowledged`), and a
 final one (`rejected`, `failed`, `expired`) is never left.
-
-`bridge_tasks` (phase 12): for messages delivered through the Hermes bridge, `message_id`,
-`a2a_task_id`, `context_id`, the peer (`machine/agent`) the task belongs to, and the task's last
-known state.
 
 `agents` (phase 3): every agent that has registered with this daemon: `name`, `registered_on`,
 `last_seen_on`, `retired_on`. The agent registry (see Agent registry).
@@ -318,18 +314,17 @@ is what bounds its replay window, so it doesn't take the relay's value on trust.
 
 Agents on different machines talk through their daemons, with MCP as the agents' interface. Adds
 `message_events`, `message_state`, `agents`, `peer_agents` and `diagnostics` to the client
-database. Pushing messages into Hermes (the Hermes bridge) is phase 12.
+database. Waking agents that only use MCP (such as Hermes) is phase 12.
 
 - **`poniexp-client daemon`:** the machine's only connection to the server. It handles local
   routing to agents, the outbox, and the client database.
   - **Outbox:** a message sent while the router is unreachable waits in the outbox. One whose expiry
     passes before it is relayed is marked `expired` instead: its `createdOn` is signed and the
     recipient's clamp counts from it, so relaying it late would only get it refused.
-- **Local API** on a Unix socket or named pipe, used by the CLI, the MCP servers and (phase 12) the
-  Hermes bridge.
+- **Local API** on a Unix socket or named pipe, used by the CLI and the MCP servers.
 - **`poniexp-client mcp`** (stdio). Tools: `send`, `reply`, `ack`, `inbox`, `conversation`,
   `message` (one message and its delivery history), `machines`, `status`; later `attach` and `fetch`.
-- **Agent announcements:** an agent (an MCP server, the Hermes bridge, a CLI `listen`)
+- **Agent announcements:** an agent (an MCP server, a CLI `listen`)
   registers with its daemon by name and keeps the registration alive with a heartbeat.
   - The daemon announces each change to every approved machine: an agent came **online**,
     **left** (unregistered cleanly), or **timed out** (missed its heartbeat).
@@ -354,7 +349,7 @@ database. Pushing messages into Hermes (the Hermes bridge) is phase 12.
     agent is online.
   - **`acknowledged`:** an agent has actually taken the message on. Fetching a message isn't
     enough; the agent acknowledges it explicitly (the MCP `ack` tool, or the local API). Replying
-    acknowledges too. For the Hermes bridge, see phase 12.
+    acknowledges too. For waking agents, see phase 12.
   - **`rejected`:** the recipient's machine won't deliver it, with a reason (e.g. "unknown
     agent"). Sent instead of `received`.
 - **`poniexp-client doctor`:** checks reachability, the certificate pin, clock skew against the
@@ -840,75 +835,58 @@ revocation.
   the router's machine list and incoming envelopes. `JobRules.MachineRevoked`; `PosterRevoked` lets
   anyone cancel. A desk naming a machine that isn't approved is ignored.
 
-## Phase 12: Hermes bridge (workshop)
+## Phase 12: Waking agents (Hermes through MCP)
 
-Comes after everything else, and starts with a deep dive into how Hermes handles A2A, then a design
-discussion. Until then agents on Hermes use PoniExp through MCP like any other. Adds `bridge_tasks`
-to the client database.
+**Decided (owner, October 2026):** Hermes uses PoniExp through MCP like every other agent; there is
+no Hermes-shaped bridge. The deep dive into Hermes' A2A adapter (kept below) showed a bridge would
+mostly translate PoniExp onto A2A's model (task states, a `bridge_tasks` table, re-attaching after
+restarts, the turn limit). The one thing MCP can't do is start a turn: an MCP server only answers
+calls, and Hermes' MCP client uses server notifications only to refresh its tool list. So the daemon
+gets a general **wake hook**: a doorbell, not a bridge.
 
-**Draft, written before the deep dive:**
+- **Settings** (`Wake` section of settings.json, read through `IOptionsMonitor`, `ValidateOnStart`):
+  `Delay` (2 s, gathers a burst into one nudge), `Retry` (1 minute, after a failed nudge), `Timeout`
+  (30 s to deliver one), and `Agents:<agent>` with exactly one of:
+  - `A2aUrl`: an A2A gateway (Hermes). http only on a loopback address, https otherwise.
+  - `Command` and `Arguments`: a program to run (e.g. something that wakes a Claude Code session).
+- **The token** for an A2A gateway (one of Hermes' `A2A_PEER_TOKENS`) is kept in the machine's secret
+  store (`wake-token:<agent>`), never in settings.json.
+- **When:** a direct message for an agent with a wake target (rooms and jobs don't wake; the agent
+  reads them when it's awake anyway). After `Delay`, one nudge covers every message in the agent's
+  inbox not yet nudged about. A nudge is sent whether the agent shows as online or not: an MCP
+  server is "online" for as long as its host runs, not only during a turn. At start, the daemon
+  nudges about what's already waiting. A failed nudge is retried every `Retry` while messages it
+  would cover are still waiting; what's acknowledged or expired drops out.
+- **The nudge** carries no message bodies, only the count, the senders and the tools to use:
+  "PoniExp: 2 new messages for agent 'hermes-default' from ise/claude, blinky/bot. Read them with the
+  poniexp `inbox` tool, then `ack` and `reply`."
+  - **A2A:** `message/stream` with a fresh `contextId` each time (so Hermes' per-context turn limit
+    never applies) and the token as `Authorization: Bearer`. Delivered on the first `submitted` or
+    `working` event; a terminal state first (rejected, failed) is a failure with its text. The rest
+    of the stream is read to its end in the background, since closing it early fails the task.
+  - **Command:** run with the nudge on stdin and `PONIEXP_AGENT`, `PONIEXP_COUNT`, `PONIEXP_FROM` in
+    its environment; exit code 0 within `Timeout` is delivered.
+- **Setup:** `poniexp-client wake set <agent> --a2a <url> [--token]` (the token typed at a hidden
+  prompt) or `wake set <agent> --command <program> [args...]`; `wake` lists targets with their last
+  nudge and error; `wake test <agent>`; `wake remove <agent>`. The daemon writes its own settings.json
+  (which reloads) and keeps the token, so this works the same in system mode.
+- **Hermes setup** (README): the MCP server `poniexp-client mcp --agent hermes-default` in Hermes' config, a
+  peer token for PoniExp in `A2A_PEER_TOKENS`, then `wake set hermes-default --a2a http://127.0.0.1:9900
+  --token`. Each Hermes session starts its own MCP server; they share the agent name `hermes-default` (one holds the
+  live stream, the tools work in all of them).
+- **What this gives up:** receipts and replies depend on the agent calling `ack` and `reply`; a bridge
+  would have set them from Hermes' task states. Each nudge costs a Hermes turn.
+- **Done when:** tests for one nudge per burst, retry after a failure, a token sent as bearer, a
+  command target, and settings validation; 3x on Windows and Linux; live against this machine's
+  Hermes gateway: a message for `hermes-default` wakes it, and it reads, acknowledges and replies through MCP.
 
-The Hermes bridge pushes incoming messages into the local Hermes gateway
-over A2A, since agents don't poll MCP. Hermes puts each A2A task into its live agent session,
-so choosing the session is the gateway's job, not the bridge's.
-- The bridge uses `message/stream` (SSE), not a blocking send, and turns the A2A task's state
-  changes into receipts and replies:
-
-  | A2A task state | PoniExp |
-  |---|---|
-  | `submitted` (the gateway took it) | nothing new; `received` was already sent |
-  | `working` (the agent has started on it) | `acknowledged` |
-  | `input-required` | a reply with `status: progress`, carrying the question |
-  | `completed` | a reply with `status: done`, carrying the agent's answer |
-  | `failed`, `rejected`, `canceled` | a reply with `status: failed` |
-
-- The A2A `contextId` is derived from the peer (`machine/agent`) **and** the `conversationId`,
-  so a conversation stays one multi-turn exchange inside Hermes. The sender chooses the
-  `conversationId`, so using it alone would let another machine join someone else's conversation.
-- The A2A message carries the PoniExp message id, sender (`machine/agent`) and conversation id
-  in its metadata, so the agent can use the MCP tools on it (e.g. `reply`).
-- The A2A task id is stored in `bridge_tasks`. After a restart the bridge picks the task up again
-  (`tasks/subscribe`, or `tasks/get` for one that has already finished), so no receipt or reply
-  is lost.
-- **Answering a question:** when the sender replies to an `input-required` question (its
-  `replyTo` is that progress reply), the bridge looks up the task in `bridge_tasks` and sends the
-  answer into the same A2A task, rather than starting a new one. An answer is accepted only from the
-  peer the task belongs to.
-- The bridge sends the reply, from the task result. If the agent already replied to the same
-  message through the MCP `reply` tool, the bridge doesn't send another: one answer, never two.
-- The agent doesn't need to call `ack` itself: the task state is set by Hermes, so it can't be
-  forgotten. `ack` remains for MCP agents that pull from their inbox.
-- **To check first:** whether Hermes keeps a task `submitted` while the live session is busy with
-  another turn, and only moves it to `working` when the agent actually starts on it. If it marks
-  the task `working` as soon as it's injected, the bridge acknowledges on the first event the
-  agent produces for the task instead.
-
-**Found in Hermes' A2A adapter (`plugins/platforms/a2a/`), October 2026:**
-- It sends `submitted` and then `working` the moment it hands a task to the session, even while the
-  session is busy with another turn; nothing later says the agent has started. **Decided:**
-  `acknowledged` is sent on `working`, meaning the message has been handed to the agent's session and
-  will be worked on in turn.
-- Every incoming message is a new task; an answer to `input-required` can't continue the task that
-  asked. It can only go into the same `contextId` as a new task, linked through `bridge_tasks`.
-- Tasks are kept in memory only. A bridge restart can reattach (`tasks/subscribe`, `tasks/get`) while
-  the gateway is up; a gateway restart loses them. **Decided:** a message whose task is lost gets a
-  reply with `status: failed` and the reason "Hermes restarted"; the sender can retry (idempotent
-  through `operationId`, phase 5).
-- A task the agent hasn't answered within `A2A_REPLY_TIMEOUT` (default 300 seconds, orphan ceiling
-  24 hours) fails, so the bridge's setup has to raise it.
-- At most `A2A_MAX_PINGPONG_TURNS` incoming messages per `contextId` (default 5, at most 20), so a long
-  conversation is refused partway. **Open:** how the bridge handles it.
-- The agent sees text only; data parts are rendered into it as JSON, so the PoniExp ids travel as a
-  data part.
-- Each conversation (`contextId`) is its own Hermes session. A gateway can also serve other profiles
-  (`a2a_served_agents`), but through a one-shot `hermes chat` per turn, not a live session; hence one
-  gateway per profile.
-- Callers are identified by per-peer tokens (`A2A_PEER_TOKENS`); the bridge's token is one of these.
-- **Done when** (draft): against a live Hermes gateway, the reply arrives once, from the task result;
-  an answer to an `input-required` question lands in the same context; a bridge restart mid-task
-  still delivers the acknowledgement and the reply; a gateway restart mid-task produces a `failed`
-  reply; two peers using the same `conversationId` land in different contexts; and an answer to
-  another peer's question is refused.
+**The A2A deep dive (October 2026), kept for reference.** Hermes' A2A adapter
+(`plugins/platforms/a2a/`): it sends `submitted` and then `working` the moment it hands a task to the
+session, even while busy; every incoming message is a new task (an answer to `input-required` can't
+continue the task that asked); tasks are kept in memory only; a task unanswered within
+`A2A_REPLY_TIMEOUT` (300 s) fails; at most `A2A_MAX_PINGPONG_TURNS` incoming messages per `contextId`
+(5, at most 20) within an hour; the agent sees text only, and inbound text is framed as untrusted
+peer input; each `contextId` is its own Hermes session; callers are identified by per-peer tokens.
 
 ## Alongside
 
@@ -924,7 +902,7 @@ None right now; each workshop phase lists its own.
 
 ## Phase 13: Web interface (workshop; deferred)
 
-Deferred by the owner: after the Hermes bridge, before the tray app. A proposal is on record: served
+Deferred by the owner: after waking agents (phase 12), before the tray app. A proposal is on record: served
 by each machine's daemon on localhost (not the router), so it can sign through the SSH agent; Blazor
 components shared later with the Oriel tray app.
 
