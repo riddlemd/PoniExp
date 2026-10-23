@@ -888,6 +888,105 @@ continue the task that asked); tasks are kept in memory only; a task unanswered 
 (5, at most 20) within an hour; the agent sees text only, and inbound text is framed as untrusted
 peer input; each `contextId` is its own Hermes session; callers are identified by per-peer tokens.
 
+## Phase 12b: Follow-ups from the first live week (proposal)
+
+Found on 2026-10-23 while restarting gateways through PoniExp. Nothing here is built. The decisions
+are numbered at the end.
+
+### Approvals outlive the call
+
+**Today:** `request_approval` blocks until it's answered (`LocalApi.AskAsync` polls in 50 s steps).
+The MCP client gives up after 300 s and cancels, `AskAsync` withdraws the request, and an approval
+that comes later does nothing. Both gateway restarts on 2026-10-23 failed this way.
+
+**Proposal:**
+- `request_approval` gets `wait` (seconds, default 240: under the 300 s MCP and A2A timeouts; 0 returns
+  at once). If nobody has answered by then, it returns `state: pending` and the id. The request stays
+  pending. A cancelled call no longer withdraws it.
+- New tool `approval` (an id, or a unique 4+ character prefix, plus an optional `wait`) returns the
+  request's state. New tool `withdraw_approval` drops a request on purpose. The `request_approval`
+  description tells the agent: if the state is pending, end the turn or do other work, and act once
+  it is approved.
+- **Wake on answer:** when an answer arrives for a request from an agent that has a wake target, the
+  daemon sends it a nudge ("PoniExp: approval 1a2b3c4d for 'restart the gateway' was approved. Check
+  it with the poniexp `approval` tool."). A Hermes agent whose turn has ended picks the work up again,
+  which is the case that failed today.
+- **Expiry:** a request nobody answers is withdrawn after `Daemon:ApprovalLifetime` (default 24 h),
+  with the reason "expired". This uses the existing `approval-withdrawn` message, so the desk shows it
+  as withdrawn.
+- Claude Code's permission tool `approve` keeps blocking, and still withdraws if it's cancelled.
+  Claude Code waits on it, and an answer that comes too late has nobody to act on it.
+- **Wire:** none. `wait`, the new tools and the expiry are local (MCP and local API). The answer
+  nudge reuses the wake hook. `WireProtocol.Version` is unchanged.
+- **Done when:** tests show that a request outlives a cancelled `request_approval` and a late approval
+  is visible through `approval`; that `wait: 0` returns pending at once; that an answer nudges an agent
+  with a wake target exactly once; that an unanswered request is withdrawn at its lifetime and the desk
+  shows it withdrawn; and that `approve` (Claude Code) still withdraws when cancelled.
+
+### A notification on the desk
+
+**Today:** a request shows only in `poniexp-client approvals`. Notifications are planned for the
+phase-14 tray app, which waits on Oriel.
+
+**Proposal:** a minimal interim notifier in the daemon, replaced by the tray app later.
+- When a request becomes pending on this desk (another machine's request, a join, an admin change, or
+  this machine's own), the daemon shows one notification for it. Requests that arrive together are
+  gathered with the wake `Delay` (2 s), so a burst shows one notification ("3 approval requests").
+- Text: the title is "PoniExp: approval from <agent>@<machine>", the body is the summary cut to 120
+  characters plus `poniexp-client approve <id8>`. There are no buttons; answering stays in the CLI.
+- **Built in, per OS** (each one run as a process with arguments, never through a shell, so a summary
+  can't inject anything):
+  - macOS: `osascript -e 'on run argv' -e 'display notification (item 2 of argv) with title (item 1
+    of argv)' -e 'end run' <title> <body>`.
+  - Windows: `powershell -NoProfile -NonInteractive -Command` with a fixed script that reads title and
+    body from the environment and shows a `ToastNotificationManager` toast under PowerShell's AppUserModelID.
+    That works without installing a shortcut or registering an app ID.
+  - Linux: `notify-send <title> <body>` if it's on PATH; otherwise nothing.
+- **Settings:** `Notify:Enabled` (default true), plus an optional `Notify:Command` and `Arguments`
+  override. Title and body go in `PONIEXP_TITLE` and `PONIEXP_BODY`, like wake commands. A failed
+  notification is logged once and doesn't retry; the request still waits in `approvals`.
+- **System mode** (Windows service in session 0, macOS LaunchDaemon): those can't show anything on
+  the user's screen, so the daemon skips the notification and `status` says so. Only user mode
+  (LaunchAgent, or the Windows user-mode install) notifies.
+- **Wire:** none.
+- **Done when:** tests show that one pending request runs the notifier once with the right title and
+  body, that a burst gives one notification, that `Notify:Enabled=false` and system mode run nothing,
+  and that a summary with quotes and `$(...)` arrives literally. Live: a request from Blinky pops up
+  on Ise and on Wojtek.
+
+### A woken turn hides what it took
+
+**Today:** a wake nudge starts a separate Hermes turn. That turn reads the inbox and acks the reply.
+A session that was waiting for the reply then calls `inbox`, finds it empty, and concludes nothing
+came. Sessions share the agent name, so the daemon can't tell them apart. This misled Wojtek twice.
+
+**Options:**
+- **(a) Description only:** the `inbox` description says "another turn of yours may already have
+  acknowledged it; check `conversation` for the thread you're waiting on". This costs nothing, but it
+  relies on the agent reading the description.
+- **(b) Recent acknowledgements:** `inbox` also returns `recentlyAcknowledged`: messages to this agent
+  acknowledged in the last `Messaging:RecentWindow` (default 1 h), headers only (id, from,
+  conversation, subject, acknowledged on). The agent sees it in the same call it already makes, with
+  no new tool. It's local API only, no wire change.
+
+**Proposed: (b) plus the description line from (a).** (b) puts the evidence in the result the agent
+is already reading. (a) alone failed in practice: the agent never opened `conversation`.
+
+### Decisions for you
+
+1. Approvals: the default `wait` for `request_approval` is 240 s. Agree, or pick another value.
+2. Approvals: unanswered requests expire after 24 h (`ApprovalLifetime`). Agree, or choose never.
+3. Approvals: a nudge on an answer (wake on answer). Agree, or leave it to the agent to check.
+4. Approvals: a late approval stays valid however old it is. Alternative: it lapses after the lifetime.
+5. Notifications: built-in per-OS notifiers with a `Notify:Command` override. Alternative: command only,
+   nothing built in.
+6. Notifications: show the summary on screen, which can appear on a lock screen. Alternative: only
+   "approval from <agent>@<machine>".
+7. Notifications: notify on joins and admin changes too, not only agent requests.
+8. Notifications: system mode skips them, the tray app covers it later. Alternative: a user-session
+   helper now.
+9. Woken turns: option (b) plus the description line, with a 1 h window.
+
 ## Alongside
 
 - **`docs/security.md`:** the threat model, updated each phase. What the server can and can't do:
