@@ -264,6 +264,20 @@ poniexp-client log --peer wojtek --since 2d            # the message log; also -
 poniexp-client log --export log.jsonl [--bodies]       # JSONL, metadata only unless --bodies (then in the clear)
 ```
 
+**Tab completion.** `poniexp-client completion bash|zsh|powershell` prints a script that completes
+commands, options and what the daemon knows: ids waiting on the desk (`approve b<Tab>`), inbox
+and logged message ids, conversations, rules, jobs, rooms, agents and addresses. Load it from your
+shell profile:
+
+```sh
+source <(poniexp-client completion zsh)        # ~/.zshrc (macOS)
+source <(poniexp-client completion bash)       # ~/.bashrc (Git Bash, Linux)
+poniexp-client completion powershell | Out-String | Invoke-Expression   # $PROFILE (PowerShell)
+```
+
+With the daemon stopped, only commands and fixed values complete. `approve` and `deny` also take a
+unique prefix of at least 4 characters without Tab.
+
 The client database keeps message envelopes for 90 days, then just their metadata for a year;
 diagnostics 30 days; and stays under 1 GB, dropping the oldest envelopes first. A message still
 waiting (in the outbox, or for an agent) is never dropped. Change these under `Retention`.

@@ -183,6 +183,24 @@ public class ApprovalTests
         Assert.Equal(("deny", "The owner denied it: wrong folder"), (denied.GetProperty("behavior").GetString(), denied.GetProperty("message").GetString()));
     }
 
+    [Fact]
+    public async Task Given_ARequestWaitingOnTheDesk_When_CompletingApproveWithTwoCharacters_Then_TheDaemonOffersItsFullId()
+    {
+        // Given
+        await using var setup = await Setup.StartAsync();
+        var (ise, wojtek) = (setup.Ise, setup.Wojtek);
+        await setup.HereAsync(wojtek);
+        _ = ise.Api.AskAsync(new LocalApprovalRequest("claude", "Restart the gateway", Tool: "Bash", Command: "hermes gateway restart"));
+        var waiting = await RouterFixture.EventuallyValueAsync(async () => (await wojtek.Api.DeskAsync()).SingleOrDefault());
+
+        // When
+        var offered = await PoniExp.Client.Completion.CommandCompletion.CompleteAsync(["approve", waiting.Id.ToString()[..2]],
+            new PoniExp.Client.Completion.LocalApiCompletionSource(wojtek.Api));
+
+        // Then
+        Assert.Equal([waiting.Id.ToString()], offered);
+    }
+
     /// <summary>Three machines with the owner key set and pinned.</summary>
     private sealed class Setup : IAsyncDisposable
     {

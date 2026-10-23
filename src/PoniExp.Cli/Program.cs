@@ -96,6 +96,7 @@ const string Usage = """
                                            the agent registry; a retired agent's messages are rejected
       diagnostics                          recent connection, signature and delivery problems
       mcp --agent <name>                   an MCP server (stdio) for an agent, as that agent
+      completion bash|zsh|powershell       tab completion for your shell (ids, agents, rooms...): load it from your profile
 
     "-" as a body reads stdin. Settings: <home>/settings.json, e.g.
       { "Messaging": { "DefaultExpiry": "1.00:00:00" }, "Daemon": { "AgentTimeout": "00:01:00" } }
@@ -160,6 +161,8 @@ try
         ["service", "install", .. var rest] => await ServiceInstallAsync(rest.Contains("--system") ? ServiceMode.System : ServiceMode.User, rest.Contains("--dry-run")),
         ["service", "uninstall", .. var rest] => await ServiceUninstallAsync(rest.Contains("--system") ? ServiceMode.System : ServiceMode.User, rest.Contains("--dry-run")),
         ["service", "status"] => await ServiceStatusAsync(),
+        ["completion", var shell] => Completion(shell),
+        ["complete", .. var rest] => await CompleteAsync(rest),
         _ => Fail(Usage),
     };
 }
@@ -1362,6 +1365,44 @@ async Task<int> AnswerAsync(string id, bool approve, bool always, string? reason
     return 0;
 }
 
+int Completion(string shell)
+{
+    Console.Write(PoniExp.Client.Completion.CompletionScripts.For(shell));
+    return 0;
+}
+
+/// <summary>
+/// `complete --line <text up to the cursor> [--bash]` or `complete -- <words>`: the shell scripts' helper. It prints one
+/// candidate per line and never fails, since an error on Tab would garble the prompt.
+/// </summary>
+async Task<int> CompleteAsync(string[] rest)
+{
+    var dash = Array.IndexOf(rest, "--");
+    var line = Option(dash < 0 ? rest : rest[..dash], "--line");
+    var words = line is not null ? PoniExp.Client.Completion.CommandCompletion.SplitLine(line) : dash >= 0 ? rest[(dash + 1)..] : [string.Empty];
+    using var quick = CancellationTokenSource.CreateLinkedTokenSource(cancel.Token);
+    quick.CancelAfter(TimeSpan.FromSeconds(3));
+    try
+    {
+        using var api = await LocalApiClient.FindAsync(ClientConfig.HomeDirectory, quick.Token);
+        PoniExp.Client.Completion.ICompletionSource source = await api.IsRunningAsync(quick.Token)
+            ? new PoniExp.Client.Completion.LocalApiCompletionSource(api) : new NoDaemonSource();
+        var candidates = await PoniExp.Client.Completion.CommandCompletion.CompleteAsync(words, source, quick.Token);
+        if (rest.Contains("--bash"))
+        {
+            candidates = PoniExp.Client.Completion.CommandCompletion.ForBash(words.Count == 0 ? string.Empty : words[^1], candidates);
+        }
+
+        Console.Write(string.Concat(candidates.Select(c => c + "\n")));
+    }
+    catch (Exception)
+    {
+        // nothing to offer: the shell falls back to file names
+    }
+
+    return 0;
+}
+
 async Task<int> RulesAsync()
 {
     using var api = await DaemonAsync2();
@@ -1692,4 +1733,11 @@ static int Fail(string message)
 {
     Console.Error.WriteLine(message.TrimEnd());
     return 2;
+}
+
+/// <summary>With the daemon stopped, commands and fixed values still complete; nothing that needs the daemon does.</summary>
+sealed class NoDaemonSource : PoniExp.Client.Completion.ICompletionSource
+{
+    public Task<IReadOnlyList<string>> ListAsync(PoniExp.Client.Completion.CompletionKind kind, string? agent, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<string>>([]);
 }
