@@ -21,6 +21,9 @@ const string Usage = """
       service install|uninstall [--system] [--dry-run]
                                            start the daemon automatically: at logon (default) or at boot
       service status
+      update <new-binary> [--system]       replace the binary the service runs: stop it, swap, start, check the daemon answers
+                                           with the new version; the old binary goes back if it doesn't
+      version                              this build's version (<version>+<commit>)
       join <name> [--notes <text>]         ask to join; waits for approval (through the daemon if it runs)
       doctor                               check the router, certificate pin, clock, membership and daemon
 
@@ -161,6 +164,8 @@ try
         ["service", "install", .. var rest] => await ServiceInstallAsync(rest.Contains("--system") ? ServiceMode.System : ServiceMode.User, rest.Contains("--dry-run")),
         ["service", "uninstall", .. var rest] => await ServiceUninstallAsync(rest.Contains("--system") ? ServiceMode.System : ServiceMode.User, rest.Contains("--dry-run")),
         ["service", "status"] => await ServiceStatusAsync(),
+        ["update", var newBinary, .. var rest] => await UpdateAsync(newBinary, rest.Contains("--system") ? ServiceMode.System : ServiceMode.User),
+        ["version" or "--version"] => Version(),
         ["completion", var shell] => Completion(shell),
         ["complete", .. var rest] => await CompleteAsync(rest),
         _ => Fail(Usage),
@@ -495,6 +500,34 @@ async Task<int> RunPlanAsync(ServicePlan plan, bool dryRun, Func<Task<bool>> ver
     }
 
     Console.WriteLine(await verify() ? "done" : "installed, but the daemon didn't answer yet; see 'poniexp-client doctor'");
+    return 0;
+}
+
+async Task<int> UpdateAsync(string newBinary, ServiceMode mode)
+{
+    var exe = Environment.ProcessPath ?? throw new InvalidOperationException("can't tell where poniexp-client is");
+    if (Path.GetFileNameWithoutExtension(exe) == "dotnet")
+    {
+        throw new InvalidOperationException("run update from the installed poniexp-client, not 'dotnet run'");
+    }
+
+    var plan = ServiceInstaller.Control(mode, exe, ClientConfig.HomeDirectory);
+    if (plan.NeedsAdmin && !IsAdmin())
+    {
+        throw new InvalidOperationException(OperatingSystem.IsWindows() ? "this needs an elevated (administrator) prompt" : "this needs sudo");
+    }
+
+    Console.WriteLine($"updating {plan.InstalledExe} from {Path.GetFullPath(newBinary)}");
+    var address = LocalAddress.ForHome(mode == ServiceMode.User ? ClientConfig.HomeDirectory : LocalAddress.SystemHome);
+    var updater = new ClientUpdater(new ServiceControl(plan, address, Console.Out), Console.Out);
+    var version = await updater.UpdateAsync(newBinary, plan.InstalledExe, cancel.Token);
+    Console.WriteLine($"done: the daemon answers, version {version}");
+    return 0;
+}
+
+int Version()
+{
+    Console.WriteLine(ClientVersion.Current);
     return 0;
 }
 

@@ -28,6 +28,18 @@ public sealed record ServicePlan(
     bool NeedsAdmin = false,
     string? Notes = null);
 
+/// <summary>
+/// How <c>update</c> stops and starts an installed daemon, and which binary its service runs. <see cref="StopThroughApi"/>:
+/// there is no service manager to stop it (the Windows Run key), so the daemon is asked to shut down.
+/// </summary>
+public sealed record ServiceControlPlan(
+    string InstalledExe,
+    IReadOnlyList<string[]> Stop,
+    IReadOnlyList<string[]> Start,
+    string[]? StartDetached = null,
+    bool StopThroughApi = false,
+    bool NeedsAdmin = false);
+
 public static class ServiceInstaller
 {
     public const string Name = "PoniExp";
@@ -47,8 +59,7 @@ public static class ServiceInstaller
         switch (os ?? Current)
         {
             case OSPlatformKind.Windows when mode == ServiceMode.User:
-                var conhost = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "conhost.exe");
-                string[] start = [conhost, "--headless", exe, "daemon", "--home", home];
+                var start = WindowsUserStart(exe, home);
                 return new ServicePlan(
                     "Start the daemon at logon, as you (HKCU Run key, no console window)",
                     [], [],
@@ -57,7 +68,7 @@ public static class ServiceInstaller
                     Notes: "Starts at each logon. It isn't restarted if it stops; 'poniexp-client service status' shows whether it runs.");
 
             case OSPlatformKind.Windows:
-                var programFiles = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), Name);
+                var programFiles = WindowsSystemDir;
                 var systemHome = LocalAddress.SystemHome;
                 var serviceExe = Path.Combine(programFiles, exeName);
                 return new ServicePlan(
@@ -78,15 +89,15 @@ public static class ServiceInstaller
                            "'poniexp-client join <name>', which goes through the service. Only you and the service can open its pipe.");
 
             case OSPlatformKind.MacOS when mode == ServiceMode.User:
-                var agent = Path.Combine(userHome, "Library", "LaunchAgents", LaunchdLabel + ".plist");
+                var agent = LaunchAgentPath(userHome);
                 return new ServicePlan(
                     "Start the daemon at login, as you (launchd LaunchAgent)",
                     [], [new PlannedFile(agent, Plist([exe, "daemon", "--home", home], userName: null))],
                     [["launchctl", "bootout", $"gui/{Uid()}/{LaunchdLabel}"], ["launchctl", "bootstrap", $"gui/{Uid()}", agent]]);
 
             case OSPlatformKind.MacOS:
-                var daemonPlist = Path.Combine("/Library/LaunchDaemons", LaunchdLabel + ".plist");
-                var libDir = "/usr/local/lib/poniexp";
+                var daemonPlist = LaunchDaemonPath;
+                var libDir = MacSystemDir;
                 return new ServicePlan(
                     "Run the daemon at boot (launchd LaunchDaemon, as root, keys in the System keychain)",
                     [(appDir, libDir), (Path.Combine(home, "config.json"), Path.Combine(LocalAddress.SystemHome, "config.json"))],
@@ -110,6 +121,38 @@ public static class ServiceInstaller
                     [], [new PlannedFile(unit, Unit([exe, "daemon", "--home", home]))], commands);
         }
     }
+
+    /// <summary>Stopping and starting what <see cref="Install"/> set up, for swapping its binary.</summary>
+    /// <param name="exe">The running poniexp-client: the binary a user-mode service runs.</param>
+    public static ServiceControlPlan Control(ServiceMode mode, string exe, string home, string? userHome = null, OSPlatformKind? os = null)
+    {
+        userHome ??= Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var exeName = exe[(exe.LastIndexOfAny(['/', '\\']) + 1)..]; // a Windows path's name, on any OS (tests plan every platform)
+        return (os ?? Current) switch
+        {
+            OSPlatformKind.Windows when mode == ServiceMode.User => new ServiceControlPlan(exe, [], [], WindowsUserStart(exe, home), StopThroughApi: true),
+            OSPlatformKind.Windows => new ServiceControlPlan(Path.Combine(WindowsSystemDir, exeName),
+                [["sc.exe", "stop", Name]], [["sc.exe", "start", Name]], NeedsAdmin: true),
+            OSPlatformKind.MacOS when mode == ServiceMode.User => new ServiceControlPlan(exe,
+                [["launchctl", "bootout", $"gui/{Uid()}/{LaunchdLabel}"]], [["launchctl", "bootstrap", $"gui/{Uid()}", LaunchAgentPath(userHome)]]),
+            OSPlatformKind.MacOS => new ServiceControlPlan(Path.Combine(MacSystemDir, exeName),
+                [["launchctl", "bootout", $"system/{LaunchdLabel}"]], [["launchctl", "bootstrap", "system", LaunchDaemonPath]], NeedsAdmin: true),
+            // Both modes are a systemd user unit running the binary in place.
+            _ => new ServiceControlPlan(exe, [["systemctl", "--user", "stop", SystemdUnit]], [["systemctl", "--user", "start", SystemdUnit]]),
+        };
+    }
+
+    private static string WindowsSystemDir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), Name);
+
+    private const string MacSystemDir = "/usr/local/lib/poniexp";
+
+    private static string LaunchDaemonPath => Path.Combine("/Library/LaunchDaemons", LaunchdLabel + ".plist");
+
+    private static string LaunchAgentPath(string userHome) => Path.Combine(userHome, "Library", "LaunchAgents", LaunchdLabel + ".plist");
+
+    // conhost --headless: no console window for a process started at logon.
+    private static string[] WindowsUserStart(string exe, string home) =>
+        [Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "conhost.exe"), "--headless", exe, "daemon", "--home", home];
 
     public static ServicePlan Uninstall(ServiceMode mode, string? userHome = null, OSPlatformKind? os = null)
     {

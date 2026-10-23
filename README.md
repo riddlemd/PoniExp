@@ -117,6 +117,21 @@ own keys, so join it with `poniexp-client join` afterwards), a LaunchDaemon on m
 lingering systemd user unit on Linux. `--dry-run` shows what it would do; `service uninstall
 [--system]` undoes it; `service status` shows what's installed and running.
 
+**Updating the client.** Build the new one (`scripts/publish.sh <rid>`), then run the installed client with
+its path:
+
+```bash
+poniexp-client update artifacts/osx-arm64/poniexp-client    # add --system for a boot-time service (sudo / admin)
+```
+
+It checks the new binary runs here (`<new-binary> version`), stops the service, swaps the binary the
+service runs (the old one is renamed aside, so it works on Windows where a running exe can't be
+overwritten), starts the service and waits for the daemon to answer with the new version. If the
+service won't start, or the daemon doesn't answer with that version within 30 seconds, the old binary
+goes back and is started again. A missing or unrunnable new binary is refused before anything stops.
+`poniexp-client version` prints a build's version: `<version>+<git commit>`. A client from before
+`update` existed doesn't have it: update that one by hand once (`service uninstall`, copy, `service install`).
+
 ## Agents (MCP)
 
 Each agent is an agent. Give it the MCP server, as its own agent name:
