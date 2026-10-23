@@ -32,14 +32,19 @@ public sealed class TestOwner : IOwnerSigner
             throw new OwnerKeyUnavailableException("the SSH agent doesn't hold the owner's key");
         }
 
+        return Task.FromResult(Convert.ToBase64String(SignatureBlob(OwnerKey.SignedData(message))));
+    }
+
+    /// <summary>The SSH signature blob over <paramref name="data"/> (already the SSHSIG preimage), as an SSH agent returns it.</summary>
+    public byte[] SignatureBlob(byte[] data)
+    {
         Signed++;
-        var data = OwnerKey.SignedData(message);
         var signature = new byte[64];
         _private.Sign(Org.BouncyCastle.Math.EC.Rfc8032.Ed25519.Algorithm.Ed25519, null, data, 0, data.Length, signature, 0);
         var writer = new SshWriter();
         writer.String(OwnerKey.KeyType);
         writer.Bytes(signature);
-        return Task.FromResult(Convert.ToBase64String(writer.ToArray()));
+        return writer.ToArray();
     }
 
     public Task<IReadOnlyList<OwnerKey>> KeysAsync(CancellationToken ct) => Task.FromResult<IReadOnlyList<OwnerKey>>([Key]);

@@ -54,17 +54,37 @@ public sealed class DaemonFixture : IAsyncDisposable
     {
         var (joining, keys) = await router.MemberAsync(name);
         await joining.DisposeAsync(); // only the daemon talks to the router from here on
+        var daemon = new DaemonFixture(router, name, keys, NewHome(), WithFast(settings));
+        await daemon.StartAsync();
+        return daemon;
+    }
+
+    /// <summary>A new machine that hasn't asked to join yet: its daemon runs and reaches the router, unapproved.</summary>
+    public static async Task<DaemonFixture> StartUnjoinedAsync(RouterFixture router, string name)
+    {
+        var daemon = new DaemonFixture(router, name, MachineKeys.Create(), NewHome(), WithFast(null)) { _unjoined = true };
+        await daemon.StartAsync();
+        return daemon;
+    }
+
+    private bool _unjoined;
+
+    private static string NewHome()
+    {
         var home = Path.Combine(Path.GetTempPath(), "poniexp-tests", "home-" + Guid.NewGuid().ToString("N")[..12]);
         Directory.CreateDirectory(home);
+        return home;
+    }
+
+    private static IDictionary<string, string?> WithFast(IDictionary<string, string?>? settings)
+    {
         var all = FastSettings();
         foreach (var (key, value) in settings ?? new Dictionary<string, string?>())
         {
             all[key] = value;
         }
 
-        var daemon = new DaemonFixture(router, name, keys, home, all);
-        await daemon.StartAsync();
-        return daemon;
+        return all;
     }
 
     public async Task StartAsync()
@@ -76,7 +96,7 @@ public sealed class DaemonFixture : IAsyncDisposable
         }, new ClientStore(_router.StorePath(Keys)), LocalAddress.ForHome(Home), Secrets: PoniExp.Secrets.SecretStores.ForHome(Home));
         _app = DaemonHost.Build(context, ["--Logging:LogLevel:Default=None"], c => c.AddInMemoryCollection(_settings));
         await DaemonHost.StartAsync(_app, context);
-        await RouterFixture.Eventually(() => Daemon.Relay.IsConnected);
+        await RouterFixture.Eventually(() => _unjoined ? Daemon.Relay.IsReachable : Daemon.Relay.IsConnected);
     }
 
     public async Task StopAsync()
