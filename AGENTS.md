@@ -12,7 +12,7 @@ docker exec poniexp-server poniexp admin list    # admin, inside the container
 dotnet run --project src/PoniExp.Server -- router   # run the server locally
 dotnet run --project src/PoniExp.Cli -- <command>     # poniexp-client
 scripts/publish.sh win-x64 linux-x64                  # self-contained single-file clients in artifacts/
-node --test integrations/hermes/tests/poniexp.test.mjs  # Hermes TUI widget (plain JS, no build)
+node --test integrations/hermes/tests/*.test.mjs       # Hermes TUI widget (plain JS, no build)
 ```
 
 ## Executables
