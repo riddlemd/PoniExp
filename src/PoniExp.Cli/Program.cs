@@ -47,6 +47,7 @@ const string Usage = """
                                            download a message's files (verified) and print where they are
       release <id> [--agent <name>] [--blob <id>]
                                            done with them: the copy goes once every agent has released it
+                                           (ack, reply, message, conversation, fetch, release: <id> may be a unique start of it, 4+ characters)
       blobs | cancel <blob-id>             files this machine uploaded; cancel one (the router deletes it)
       listen [--agent <name>] [--json] [--ack] [--auto-fetch]
                                            be the agent: print messages and receipts as they arrive
@@ -123,13 +124,13 @@ try
         ["machines"] => await MachinesAsync(),
         ["send", .. var rest] => await SendAsync(rest),
         ["inbox", .. var rest] => await InboxAsync(AgentOf(rest), rest.Contains("--json")),
-        ["ack", var id, .. var rest] => await AckAsync(AgentOf(rest), Guid.Parse(id)),
-        ["reply", var id, .. var rest] => await ReplyAsync(Guid.Parse(id), rest),
-        ["message", var id, .. var rest] => await MessageAsync(AgentOf(rest), Guid.Parse(id)),
-        ["conversation", var id, .. var rest] => await ConversationAsync(AgentOf(rest), Guid.Parse(id), rest.Contains("--json")),
+        ["ack", var id, .. var rest] => await AckAsync(AgentOf(rest), id),
+        ["reply", var id, .. var rest] => await ReplyAsync(id, rest),
+        ["message", var id, .. var rest] => await MessageAsync(AgentOf(rest), id),
+        ["conversation", var id, .. var rest] => await ConversationAsync(AgentOf(rest), id, rest.Contains("--json")),
         ["listen", .. var rest] => await ListenAsync(AgentOf(rest), rest.Contains("--json"), rest.Contains("--ack"), rest.Contains("--auto-fetch")),
-        ["fetch", var id, .. var rest] => await FetchAsync(AgentOf(rest), Guid.Parse(id), Option(rest, "--blob") is { } b ? Guid.Parse(b) : null),
-        ["release", var id, .. var rest] => await ReleaseAsync(AgentOf(rest), Guid.Parse(id), Option(rest, "--blob") is { } b ? Guid.Parse(b) : null),
+        ["fetch", var id, .. var rest] => await FetchAsync(AgentOf(rest), id, Option(rest, "--blob") is { } b ? Guid.Parse(b) : null),
+        ["release", var id, .. var rest] => await ReleaseAsync(AgentOf(rest), id, Option(rest, "--blob") is { } b ? Guid.Parse(b) : null),
         ["blobs"] => await BlobsAsync(),
         ["room", .. var rest] => await RoomAsync(rest),
         ["job", .. var rest] => await JobAsync(rest),
@@ -625,7 +626,7 @@ async Task<int> InboxAsync(string agent, bool json)
     return 0;
 }
 
-async Task<int> AckAsync(string agent, Guid id)
+async Task<int> AckAsync(string agent, string id)
 {
     using var api = await DaemonAsync2();
     var m = await api.AckAsync(agent, id, cancel.Token);
@@ -633,7 +634,7 @@ async Task<int> AckAsync(string agent, Guid id)
     return 0;
 }
 
-async Task<int> ReplyAsync(Guid id, string[] rest)
+async Task<int> ReplyAsync(string id, string[] rest)
 {
     var metadata = new Dictionary<string, string>();
     var files = new List<string>();
@@ -668,7 +669,7 @@ async Task<int> ReplyAsync(Guid id, string[] rest)
     return 0;
 }
 
-async Task<int> MessageAsync(string agent, Guid id)
+async Task<int> MessageAsync(string agent, string id)
 {
     using var api = await DaemonAsync2();
     var detail = await api.MessageAsync(agent, id, cancel.Token);
@@ -681,7 +682,7 @@ async Task<int> MessageAsync(string agent, Guid id)
     return 0;
 }
 
-async Task<int> ConversationAsync(string agent, Guid id, bool json)
+async Task<int> ConversationAsync(string agent, string id, bool json)
 {
     using var api = await DaemonAsync2();
     foreach (var m in await api.ConversationAsync(agent, id, cancel.Token))
@@ -704,7 +705,7 @@ async Task<int> ListenAsync(string agent, bool json, bool ack, bool autoFetch)
             {
                 try
                 {
-                    foreach (var a in await api.FetchAsync(agent, new LocalFileRequest(m.Id), cancel.Token))
+                    foreach (var a in await api.FetchAsync(agent, new LocalFileRequest(m.Id.ToString()), cancel.Token))
                     {
                         Console.Error.WriteLine($"* fetched {a.Name}: {a.Path}");
                     }
@@ -1488,7 +1489,7 @@ async Task<int> RoomAsync(string[] rest)
     }
 }
 
-async Task<int> FetchAsync(string agent, Guid id, Guid? blob)
+async Task<int> FetchAsync(string agent, string id, Guid? blob)
 {
     using var api = await DaemonAsync2();
     foreach (var a in await api.FetchAsync(agent, new LocalFileRequest(id, blob), cancel.Token))
@@ -1499,7 +1500,7 @@ async Task<int> FetchAsync(string agent, Guid id, Guid? blob)
     return 0;
 }
 
-async Task<int> ReleaseAsync(string agent, Guid id, Guid? blob)
+async Task<int> ReleaseAsync(string agent, string id, Guid? blob)
 {
     using var api = await DaemonAsync2();
     foreach (var a in await api.ReleaseAsync(agent, new LocalFileRequest(id, blob), cancel.Token))

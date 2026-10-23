@@ -53,7 +53,7 @@ public class FileTests
         Assert.Equal(("data.bin", bytes.Length, AttachmentEvents.Waiting), (offered.Name, offered.Size, offered.State));
         Assert.Contains(router.Blobs.List(), b => b.Id == offered.BlobId && b.State == BlobState.Sealed);
 
-        var fetched = Assert.Single(await wojtek.Api.FetchAsync("agent", new LocalFileRequest(message.Id)));
+        var fetched = Assert.Single(await wojtek.Api.FetchAsync("agent", new LocalFileRequest(message.Id.ToString())));
         Assert.Equal(AttachmentEvents.Downloaded, fetched.State);
         Assert.Equal(bytes, await File.ReadAllBytesAsync(fetched.Path!));
 
@@ -81,7 +81,7 @@ public class FileTests
         onDisk[10] ^= 0xff; // the router (or its disk) changes a byte
         await File.WriteAllBytesAsync(chunk, onDisk);
 
-        var error = await Assert.ThrowsAsync<LocalApiException>(() => wojtek.Api.FetchAsync("agent", new LocalFileRequest(message.Id)));
+        var error = await Assert.ThrowsAsync<LocalApiException>(() => wojtek.Api.FetchAsync("agent", new LocalFileRequest(message.Id.ToString())));
         Assert.Contains("chunk 1 doesn't match its hash", error.Message);
         Assert.False(Directory.Exists(Path.Combine(wojtek.Home, "files", message.Attachments!.Single().BlobId.ToString("N"), "plan.txt")));
         await RouterFixture.EventuallyAsync(async () =>
@@ -104,7 +104,7 @@ public class FileTests
 
         await ise.Api.CancelBlobAsync(blob);
 
-        var error = await Assert.ThrowsAsync<LocalApiException>(() => wojtek.Api.FetchAsync("agent", new LocalFileRequest(message.Id)));
+        var error = await Assert.ThrowsAsync<LocalApiException>(() => wojtek.Api.FetchAsync("agent", new LocalFileRequest(message.Id.ToString())));
         Assert.Contains("cancelled by the sender", error.Message);
         await RouterFixture.EventuallyAsync(async () =>
             ise.Store.GetAttachmentEvents(ise.Keys.MachineId, sent.Id).Select(e => e.Event).SequenceEqual(
@@ -128,9 +128,9 @@ public class FileTests
         var toBeta = await InboxOneAsync(wojtek, "beta");
         Assert.Equal(toAlpha.Attachments!.Single().BlobId, toBeta.Attachments!.Single().BlobId);
 
-        var first = Assert.Single(await wojtek.Api.FetchAsync("alpha", new LocalFileRequest(toAlpha.Id)));
+        var first = Assert.Single(await wojtek.Api.FetchAsync("alpha", new LocalFileRequest(toAlpha.Id.ToString())));
         await RouterFixture.Eventually(() => router.Blobs.List().Count == 0); // this machine has it: the router can let go
-        var second = Assert.Single(await wojtek.Api.FetchAsync("beta", new LocalFileRequest(toBeta.Id))); // from the local copy
+        var second = Assert.Single(await wojtek.Api.FetchAsync("beta", new LocalFileRequest(toBeta.Id.ToString()))); // from the local copy
         Assert.Equal(first.Path, second.Path);
 
         foreach (var s in sent) // a downloaded receipt for each message that carried it
@@ -143,9 +143,9 @@ public class FileTests
         await wojtek.Api.AckAsync("beta", toBeta.Id);
         Assert.True(File.Exists(first.Path)); // acknowledging doesn't release
 
-        Assert.Equal(AttachmentEvents.Released, Assert.Single(await wojtek.Api.ReleaseAsync("alpha", new LocalFileRequest(toAlpha.Id))).State);
+        Assert.Equal(AttachmentEvents.Released, Assert.Single(await wojtek.Api.ReleaseAsync("alpha", new LocalFileRequest(toAlpha.Id.ToString()))).State);
         Assert.Equal(bytes, await File.ReadAllBytesAsync(first.Path!)); // beta still has it
-        await wojtek.Api.ReleaseAsync("beta", new LocalFileRequest(toBeta.Id));
+        await wojtek.Api.ReleaseAsync("beta", new LocalFileRequest(toBeta.Id.ToString()));
         Assert.False(File.Exists(first.Path));
         Assert.Equal("deleted", wojtek.Store.GetLocalBlob(first.BlobId)!.State);
     }
@@ -161,10 +161,10 @@ public class FileTests
         await InboxOneAsync(wojtek, "agent");
         var (path, bytes) = NewFile(2048, "build.log");
 
-        await wojtek.Api.ReplyAsync("agent", new LocalReplyRequest(request.Id, "attached", "done", Attachments: [path]));
+        await wojtek.Api.ReplyAsync("agent", new LocalReplyRequest(request.Id.ToString(), "attached", "done", Attachments: [path]));
 
         var reply = await InboxOneAsync(ise, "ops");
-        var file = Assert.Single(await ise.Api.FetchAsync("ops", new LocalFileRequest(reply.Id)));
+        var file = Assert.Single(await ise.Api.FetchAsync("ops", new LocalFileRequest(reply.Id.ToString())));
         Assert.Equal(("build.log", "text/plain"), (file.Name, file.ContentType));
         Assert.Equal(bytes, await File.ReadAllBytesAsync(file.Path!));
     }

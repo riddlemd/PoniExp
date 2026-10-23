@@ -25,8 +25,8 @@ public class HistoryTests
         var first = (await ise.Api.SendAsync(new LocalSendRequest("ops", ["wojtek/agent"], "count the sheep", Subject: "sheep"))).Single();
         var second = (await ise.Api.SendAsync(new LocalSendRequest("ops", ["wojtek/agent"], "and the goats", Subject: "goats"))).Single();
         await RouterFixture.EventuallyAsync(async () => (await wojtek.Api.InboxAsync("agent")).Count == 2);
-        await wojtek.Api.ReplyAsync("agent", new LocalReplyRequest(first.Id, "forty", "done"));
-        await wojtek.Api.ReplyAsync("agent", new LocalReplyRequest(second.Id, "counting", "progress"));
+        await wojtek.Api.ReplyAsync("agent", new LocalReplyRequest(first.Id.ToString(), "forty", "done"));
+        await wojtek.Api.ReplyAsync("agent", new LocalReplyRequest(second.Id.ToString(), "counting", "progress"));
         await RouterFixture.EventuallyAsync(async () => (await ise.Api.InboxAsync("ops")).Count == 2);
 
         await wojtek.RestartAsync();
@@ -101,7 +101,7 @@ public class HistoryTests
         await RegisterAndLeaveAsync(wojtek, "agent");
         var first = (await ise.Api.SendAsync(new LocalSendRequest("ops", ["wojtek/agent"], "build it"))).Single();
         await RouterFixture.EventuallyAsync(async () => (await wojtek.Api.InboxAsync("agent")).Count == 1);
-        await wojtek.Api.ReplyAsync("agent", new LocalReplyRequest(first.Id, "built: v1.2", "done", Metadata: new Dictionary<string, string> { ["version"] = "1.2" }));
+        await wojtek.Api.ReplyAsync("agent", new LocalReplyRequest(first.Id.ToString(), "built: v1.2", "done", Metadata: new Dictionary<string, string> { ["version"] = "1.2" }));
         await RouterFixture.EventuallyAsync(async () => (await ise.Api.InboxAsync("ops")).Count == 1);
         await ise.Api.AckAsync("ops", (await ise.Api.InboxAsync("ops")).Single().Id);
 

@@ -357,6 +357,25 @@ public sealed class ClientStore
             WHERE m.from_machine = $me AND m.from_agent = $agent AND m.id = $id AND m.type = 'message';
             """, ReadMessage, ("$me", me), ("$agent", agent), ("$id", Id(id))).FirstOrDefault();
 
+    /// <summary>
+    /// The ids of a local agent's messages (received, and with <paramref name="sent"/> also sent) that start with
+    /// <paramref name="prefix"/>, compared ordinally (<c>substr</c>, so no LIKE wildcards to escape).
+    /// </summary>
+    public IReadOnlyList<Guid> FindMessageIds(string me, string agent, string prefix, bool sent = false) =>
+        Query("""
+            SELECT id FROM messages
+            WHERE type = 'message' AND substr(id, 1, length($prefix)) = $prefix
+                AND ((to_machine = $me AND to_agent = $agent) OR ($sent AND from_machine = $me AND from_agent = $agent));
+            """, r => Guid.Parse(r.GetString(0)), ("$me", me), ("$agent", agent), ("$prefix", prefix), ("$sent", sent));
+
+    /// <summary>The ids of a local agent's conversations (as <see cref="GetConversation"/> sees them) that start with <paramref name="prefix"/>.</summary>
+    public IReadOnlyList<Guid> FindConversationIds(string me, string agent, string prefix) =>
+        Query("""
+            SELECT DISTINCT conversation_id FROM messages
+            WHERE type = 'message' AND substr(conversation_id, 1, length($prefix)) = $prefix
+                AND ((to_machine = $me AND to_agent = $agent) OR (from_machine = $me AND from_agent = $agent));
+            """, r => Guid.Parse(r.GetString(0)), ("$me", me), ("$agent", agent), ("$prefix", prefix));
+
     /// <summary>A conversation as one local agent sees it: the messages it sent and received in it, oldest first.</summary>
     public IReadOnlyList<StoredMessage> GetConversation(string me, string agent, Guid conversationId) =>
         Query($"""

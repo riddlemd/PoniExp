@@ -277,8 +277,9 @@ source <(poniexp-client completion bash)       # ~/.bashrc (Git Bash, Linux)
 poniexp-client completion powershell | Out-String | Invoke-Expression   # $PROFILE (PowerShell)
 ```
 
-With the daemon stopped, only commands and fixed values complete. `approve` and `deny` also take a
-unique prefix of at least 4 characters without Tab.
+With the daemon stopped, only commands and fixed values complete. `approve`, `deny`, `ack`, `reply`,
+`message`, `conversation`, `fetch` and `release` (and the matching MCP tools) also take a unique
+prefix of at least 4 characters without Tab.
 
 The client database keeps message envelopes for 90 days, then just their metadata for a year;
 diagnostics 30 days; and stays under 1 GB, dropping the oldest envelopes first. A message still

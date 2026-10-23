@@ -99,7 +99,7 @@ public static class LocalApiEndpoints
         app.MapPost("/agents/{agent}/reply", (Daemon d, string agent, LocalReplyRequest request, CancellationToken ct) => Handle(async () =>
         {
             RequireAgent(agent);
-            var sent = await d.ReplyAsync(agent, request.Id, new OutgoingMessage(request.Body ?? throw new ArgumentException("a body is required"))
+            var sent = await d.ReplyAsync(agent, d.ResolveMessageId(agent, request.Id), new OutgoingMessage(request.Body ?? throw new ArgumentException("a body is required"))
             {
                 Subject = request.Subject,
                 Status = ParseStatus(request.Status),
@@ -113,7 +113,7 @@ public static class LocalApiEndpoints
         app.MapPost("/agents/{agent}/ack", (Daemon d, string agent, LocalAckRequest request, CancellationToken ct) => Handle(async () =>
         {
             RequireAgent(agent);
-            return Results.Ok(d.ToLocal(await d.AcknowledgeAsync(agent, request.Id, ct), MessageDirection.In));
+            return Results.Ok(d.ToLocal(await d.AcknowledgeAsync(agent, d.ResolveMessageId(agent, request.Id), ct), MessageDirection.In));
         }));
 
         app.MapGet("/agents/{agent}/inbox", (Daemon d, string agent) => Handle(() =>
@@ -125,9 +125,10 @@ public static class LocalApiEndpoints
             return Task.FromResult(Results.Ok(messages));
         }));
 
-        app.MapGet("/agents/{agent}/messages/{id:guid}", (Daemon d, string agent, Guid id) => Handle(() =>
+        app.MapGet("/agents/{agent}/messages/{messageId}", (Daemon d, string agent, string messageId) => Handle(() =>
         {
             RequireAgent(agent);
+            var id = d.ResolveMessageId(agent, messageId, sent: true);
             var (stored, direction) = d.Store.FindIncoming(d.MachineId, agent, id) is { } incoming ? (incoming, MessageDirection.In)
                 : d.Store.FindOutgoing(d.MachineId, agent, id) is { } outgoing ? (outgoing, MessageDirection.Out)
                 : throw new KeyNotFoundException($"agent '{agent}' has no message {id}");
@@ -135,10 +136,10 @@ public static class LocalApiEndpoints
                 [.. d.Store.GetEvents(stored.FromMachine, id).Where(e => e.Direction == direction)])));
         }));
 
-        app.MapGet("/agents/{agent}/conversations/{id:guid}", (Daemon d, string agent, Guid id) => Handle(() =>
+        app.MapGet("/agents/{agent}/conversations/{conversationId}", (Daemon d, string agent, string conversationId) => Handle(() =>
         {
             RequireAgent(agent);
-            return Task.FromResult(Results.Ok(d.Store.GetConversation(d.MachineId, agent, id)
+            return Task.FromResult(Results.Ok(d.Store.GetConversation(d.MachineId, agent, d.ResolveConversationId(agent, conversationId))
                 .Select(m => d.ToLocal(m, m.ToMachine == d.MachineId && m.ToAgent == agent ? MessageDirection.In : MessageDirection.Out)).ToList()));
         }));
 
@@ -161,13 +162,13 @@ public static class LocalApiEndpoints
         app.MapPost("/agents/{agent}/fetch", (Daemon d, string agent, LocalFileRequest request, CancellationToken ct) => Handle(async () =>
         {
             RequireAgent(agent);
-            return Results.Ok(await d.FetchAsync(agent, request.Id, request.BlobId, ct));
+            return Results.Ok(await d.FetchAsync(agent, d.ResolveMessageId(agent, request.Id), request.BlobId, ct));
         }));
 
         app.MapPost("/agents/{agent}/release", (Daemon d, string agent, LocalFileRequest request) => Handle(() =>
         {
             RequireAgent(agent);
-            return Task.FromResult(Results.Ok(d.Release(agent, request.Id, request.BlobId)));
+            return Task.FromResult(Results.Ok(d.Release(agent, d.ResolveMessageId(agent, request.Id), request.BlobId)));
         }));
 
         app.MapGet("/blobs", (Daemon d, CancellationToken ct) => Handle(async () => Results.Ok(await d.Relay.GetBlobsAsync(ct))));
