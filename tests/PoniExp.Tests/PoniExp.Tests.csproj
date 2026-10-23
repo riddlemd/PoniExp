@@ -15,6 +15,8 @@
     <ProjectReference Include="../../src/PoniExp.Secrets/PoniExp.Secrets.csproj" />
     <ProjectReference Include="../../src/PoniExp.Daemon/PoniExp.Daemon.csproj" />
     <ProjectReference Include="../../src/PoniExp.Mcp/PoniExp.Mcp.csproj" />
+    <!-- Built, not referenced: the join tests run the real poniexp-client as its own process (ClientCli). -->
+    <ProjectReference Include="../../src/PoniExp.Cli/PoniExp.Cli.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />
