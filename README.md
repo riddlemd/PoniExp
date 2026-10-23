@@ -233,6 +233,8 @@ For Hermes, one agent per profile, named `hermes-<profile>`:
 
 Each nudge starts a fresh A2A conversation, so Hermes' per-conversation turn limit never applies.
 The agent has to `ack` and `reply` itself.
+To watch the traffic from the Hermes TUI, see the `/poniexp` widget in
+[`integrations/hermes`](integrations/hermes/README.md).
 
 **Retrying safely.** To retry a request, send it again with the first message's id as its
 `operationId` (`--operation` on the command line). The other machine doesn't do it twice: its
