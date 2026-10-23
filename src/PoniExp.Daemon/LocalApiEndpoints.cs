@@ -48,7 +48,7 @@ public static class LocalApiEndpoints
             return Results.Ok(new LocalStatus(d.MachineId, relay.Name, WireProtocol.NameOf(relay.Status), relay.IsConnected, relay.IsReachable,
                 relay.RouterUrl.ToString(),
                 relay.ClockOffset, relay.RouterClockSkew, d.Context.Home, d.Store.GetOutbox(d.MachineId).Count, Agents(d),
-                await d.Store.GetMetricsAsync()));
+                await d.Store.GetMetricsAsync(), ClientVersion.Current));
         }));
 
         app.MapGet("/machines", (Daemon d) => Handle(() =>

@@ -33,7 +33,8 @@ public static class CommandCompletion
     [
         "ack", "admin", "agent", "approvals", "approve", "away", "blobs", "cancel", "capabilities", "completion", "conversation",
         "conversations", "daemon", "deny", "diagnostics", "doctor", "fetch", "here", "id", "inbox", "init", "job", "join", "keys",
-        "listen", "log", "machines", "mcp", "message", "owner", "release", "reply", "room", "send", "service", "status", "wake",
+        "listen", "log", "machines", "mcp", "message", "owner", "release", "reply", "room", "send", "service", "status", "update",
+        "version", "wake",
     ];
 
     public static readonly IReadOnlyList<string> Shells = ["bash", "powershell", "zsh"];
@@ -76,6 +77,7 @@ public static class CommandCompletion
         ["room"] = ["--as", "--agent", "--invite", "--since", "--json", "--reply"],
         ["send"] = ["--to", "--from", "--subject", "--conversation", "--operation", "--expires", "--content-type", "--meta", "--attach"],
         ["service"] = ["--system", "--dry-run"],
+        ["update"] = ["--system"],
         ["wake"] = ["--a2a", "--command", "--token"],
     };
 

@@ -691,7 +691,8 @@ public sealed record LocalStatus(
     string Home,
     int Outbox,
     IReadOnlyList<LocalAgentInfo> Agents,
-    IReadOnlyList<ClientMetric> Metrics);
+    IReadOnlyList<ClientMetric> Metrics,
+    string? Version = null);
 
 public sealed record LocalError(string Error);
 

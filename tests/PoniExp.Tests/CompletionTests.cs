@@ -234,6 +234,47 @@ public class CompletionTests
         Assert.Equal(["approvals", "approve"], offered);
     }
 
+    [Theory]
+    [InlineData("up", "update")]
+    [InlineData("vers", "version")]
+    public async Task Given_APrefixOfUpdateOrVersion_When_Completing_Then_TheCommandIsOffered(string typed, string expected)
+    {
+        // Given
+        var source = new FakeSource();
+
+        // When
+        var offered = await CompleteAsync(source, typed);
+
+        // Then
+        Assert.Equal([expected], offered);
+    }
+
+    [Fact]
+    public async Task Given_UpdateWithAPath_When_CompletingAnOption_Then_SystemIsOffered()
+    {
+        // Given
+        var source = new FakeSource();
+
+        // When
+        var offered = await CompleteAsync(source, "update", "artifacts/osx-arm64/poniexp-client", "--");
+
+        // Then
+        Assert.Equal(["--system"], offered);
+    }
+
+    [Fact]
+    public async Task Given_Update_When_CompletingItsPath_Then_NothingIsOfferedSoTheShellCompletesFileNames()
+    {
+        // Given
+        var source = new FakeSource();
+
+        // When
+        var offered = await CompleteAsync(source, "update", "art");
+
+        // Then
+        Assert.Empty(offered);
+    }
+
     [Fact]
     public void Given_ALineEndingInASpace_When_Splitting_Then_TheWordUnderTheCursorIsEmpty()
     {
