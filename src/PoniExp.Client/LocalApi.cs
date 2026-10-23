@@ -144,17 +144,26 @@ public sealed class LocalApiClient : IDisposable
     public Task<LocalSent> ReplyAsync(string agent, LocalReplyRequest request, CancellationToken ct = default) =>
         PostAsync<LocalSent>($"agents/{agent}/reply", request, ct);
 
-    public Task<LocalMessage> AckAsync(string agent, Guid id, CancellationToken ct = default) =>
+    /// <summary><paramref name="id"/> is the message's id or a unique prefix of it (4 characters or more), as for the other message calls.</summary>
+    public Task<LocalMessage> AckAsync(string agent, string id, CancellationToken ct = default) =>
         PostAsync<LocalMessage>($"agents/{agent}/ack", new LocalAckRequest(id), ct);
+
+    public Task<LocalMessage> AckAsync(string agent, Guid id, CancellationToken ct = default) => AckAsync(agent, id.ToString(), ct);
 
     /// <summary>Messages for the agent that haven't been acknowledged; fetching them doesn't acknowledge them.</summary>
     public Task<List<LocalMessage>> InboxAsync(string agent, CancellationToken ct = default) => GetAsync<List<LocalMessage>>($"agents/{agent}/inbox", ct);
 
-    public Task<LocalMessageDetail> MessageAsync(string agent, Guid id, CancellationToken ct = default) =>
-        GetAsync<LocalMessageDetail>($"agents/{agent}/messages/{id}", ct);
+    public Task<LocalMessageDetail> MessageAsync(string agent, string id, CancellationToken ct = default) =>
+        GetAsync<LocalMessageDetail>($"agents/{agent}/messages/{Uri.EscapeDataString(id)}", ct);
+
+    public Task<LocalMessageDetail> MessageAsync(string agent, Guid id, CancellationToken ct = default) => MessageAsync(agent, id.ToString(), ct);
+
+    /// <summary><paramref name="conversationId"/> is the conversation's id or a unique prefix of it (4 characters or more).</summary>
+    public Task<List<LocalMessage>> ConversationAsync(string agent, string conversationId, CancellationToken ct = default) =>
+        GetAsync<List<LocalMessage>>($"agents/{agent}/conversations/{Uri.EscapeDataString(conversationId)}", ct);
 
     public Task<List<LocalMessage>> ConversationAsync(string agent, Guid conversationId, CancellationToken ct = default) =>
-        GetAsync<List<LocalMessage>>($"agents/{agent}/conversations/{conversationId}", ct);
+        ConversationAsync(agent, conversationId.ToString(), ct);
 
     /// <summary>The agent's conversations, most recent first: what an agent picks up again after a restart.</summary>
     public Task<List<LocalConversation>> ConversationsAsync(string agent, CancellationToken ct = default) =>
@@ -612,8 +621,8 @@ public sealed record LocalFileReceipt(Guid MessageId, Guid BlobId, string Receip
 /// </summary>
 public sealed record LocalAttachment(Guid BlobId, string Name, string ContentType, long Size, string State, string? Path, string? Detail);
 
-/// <summary>Fetch (or release) a message's files: all of them, or the one blob.</summary>
-public sealed record LocalFileRequest(Guid Id, Guid? BlobId = null);
+/// <summary>Fetch (or release) a message's files: all of them, or the one blob. <see cref="Id"/> is the message's id or a unique prefix of it.</summary>
+public sealed record LocalFileRequest(string Id, Guid? BlobId = null);
 
 public sealed record LocalSendRequest(
     string From,
@@ -629,8 +638,9 @@ public sealed record LocalSendRequest(
     TimeSpan? ExpiresIn = null,
     IReadOnlyList<string>? Attachments = null);
 
+/// <summary><see cref="Id"/> is the id of the message being answered, or a unique prefix of it (4 characters or more).</summary>
 public sealed record LocalReplyRequest(
-    Guid Id,
+    string Id,
     string Body,
     string? Status = null,
     string? Subject = null,
@@ -639,7 +649,8 @@ public sealed record LocalReplyRequest(
     TimeSpan? ExpiresIn = null,
     IReadOnlyList<string>? Attachments = null);
 
-public sealed record LocalAckRequest(Guid Id);
+/// <summary><see cref="Id"/> is the message's id or a unique prefix of it (4 characters or more).</summary>
+public sealed record LocalAckRequest(string Id);
 
 /// <summary>A conversation as one local agent sees it; <see cref="Peer"/> is <c>machine-name/agent</c>, <see cref="State"/> open or finished.</summary>
 public sealed record LocalConversation(Guid Id, string Peer, string? Subject, string StartedBy, DateTimeOffset StartedOn, DateTimeOffset LastActivityOn,

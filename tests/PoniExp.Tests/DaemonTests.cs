@@ -49,7 +49,7 @@ public class DaemonTests
 
         var sent = (await ise.Api.SendAsync(new LocalSendRequest("ops", ["wojtek/agent"], "how many?", Subject: "count"))).Single();
         await RouterFixture.EventuallyAsync(async () => (await wojtek.Api.InboxAsync("agent")).Count == 1);
-        await wojtek.Api.ReplyAsync("agent", new LocalReplyRequest(sent.Id, "three", "done"));
+        await wojtek.Api.ReplyAsync("agent", new LocalReplyRequest(sent.Id.ToString(), "three", "done"));
 
         await ise.WaitForOutgoingAsync(sent.Id, MessageEvents.Acknowledged);
         await RouterFixture.EventuallyAsync(async () => (await ise.Api.InboxAsync("ops")).Count == 1);
@@ -117,7 +117,7 @@ public class DaemonTests
         await RegisterAndLeaveAsync(wojtek, "agent"); // announcements both ways
         var sent = (await ise.Api.SendAsync(new LocalSendRequest("ops", ["wojtek/agent"], "go"))).Single();
         await RouterFixture.EventuallyAsync(async () => (await wojtek.Api.InboxAsync("agent")).Count == 1);
-        await wojtek.Api.ReplyAsync("agent", new LocalReplyRequest(sent.Id, "went", "done"));
+        await wojtek.Api.ReplyAsync("agent", new LocalReplyRequest(sent.Id.ToString(), "went", "done"));
         await ise.WaitForOutgoingAsync(sent.Id, MessageEvents.Acknowledged);
         await RouterFixture.EventuallyAsync(async () => (await ise.Api.InboxAsync("ops")).Count == 1);
         await Task.Delay(500);
