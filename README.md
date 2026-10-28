@@ -117,11 +117,14 @@ own keys, so join it with `poniexp-client join` afterwards), a LaunchDaemon on m
 lingering systemd user unit on Linux. `--dry-run` shows what it would do; `service uninstall
 [--system]` undoes it; `service status` shows what's installed and running.
 
-**Updating the client.** Build the new one (`scripts/publish.sh <rid>`), then run the installed client with
-its path:
+**Updating the client.** Pull, build for this machine's runtime only (with no argument
+`publish.sh` builds all six, about 115 MB each), then run the installed client with the new build's path:
 
 ```bash
+git pull --ff-only
+scripts/publish.sh osx-arm64                                # this machine's rid: win-x64, linux-x64, ...
 poniexp-client update artifacts/osx-arm64/poniexp-client    # add --system for a boot-time service (sudo / admin)
+poniexp-client version && poniexp-client doctor
 ```
 
 It checks the new binary runs here (`<new-binary> version`), stops the service, swaps the binary the
@@ -129,8 +132,24 @@ service runs (the old one is renamed aside, so it works on Windows where a runni
 overwritten), starts the service and waits for the daemon to answer with the new version. If the
 service won't start, or the daemon doesn't answer with that version within 30 seconds, the old binary
 goes back and is started again. A missing or unrunnable new binary is refused before anything stops.
-`poniexp-client version` prints a build's version: `<version>+<git commit>`. A client from before
-`update` existed doesn't have it: update that one by hand once (`service uninstall`, copy, `service install`).
+On Windows the renamed-aside `poniexp-client.exe.old` can stay behind while something still runs it;
+the next `update` removes it.
+`poniexp-client version` prints a build's version: `<version>+<git commit>`.
+
+- **A client from before `update`** has no `version` command. Update that one by hand once:
+  `service uninstall`, move the old binary aside (`mv poniexp-client.exe poniexp-client.exe.old`; on Windows
+  the agents' MCP servers keep it locked, so it can be renamed but not overwritten), copy the new one
+  in, `service install`.
+- **Agents' MCP servers keep the old code.** `update` replaces the daemon only. Each `poniexp-client
+  mcp` process (one per agent) runs the old binary until its host (Claude Code, Hermes) restarts.
+- **macOS: sign the new build as the old one was.** The keys are in the login keychain, and its
+  access list names the signed binary that stored them. A build signed differently, or not at all, may
+  get a keychain prompt that a background daemon can't answer. `publish.sh` doesn't sign, so sign the
+  build before running `update`. If the daemon can't read its keys it never answers, and `update`
+  puts the old binary back.
+- **The router updates separately.** Only rebuild it when its code changed:
+  `git diff --stat <old>..<new> -- src/PoniExp.Server src/PoniExp.Core`. If it did, run
+  `docker compose up -d --build` on the router's host.
 
 ## Agents (MCP)
 
