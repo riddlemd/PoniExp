@@ -403,6 +403,42 @@ public class IdPrefixTests
     }
 
     [Fact]
+    public async Task Given_AReceivedMessage_When_TheMcpAckToolAcknowledgesIt_Then_ItReturnsOnlyTheIdStateAndTime()
+    {
+        // Given
+        await using var pair = await Pair.StartAsync();
+        var received = await pair.ReceiveAsync("a body the agent already read");
+        var tools = new PoniExpTools(new McpAgent(pair.Wojtek.Api, Agent));
+
+        // When
+        var json = await tools.AckAsync(Prefix(received.Id));
+
+        // Then
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal(["id", "state", "changedOn"], doc.RootElement.EnumerateObject().Select(p => p.Name));
+        Assert.Equal(received.Id, doc.RootElement.GetProperty("id").GetGuid());
+        Assert.Equal(MessageEvents.Acknowledged, doc.RootElement.GetProperty("state").GetString());
+        Assert.Equal(JsonValueKind.String, doc.RootElement.GetProperty("changedOn").ValueKind);
+        Assert.DoesNotContain("a body the agent already read", json);
+    }
+
+    [Fact]
+    public async Task Given_AnAcknowledgedMessage_When_TheMcpAckToolAcknowledgesItAgain_Then_ItReturnsTheSameConfirmation()
+    {
+        // Given
+        await using var pair = await Pair.StartAsync();
+        var received = await pair.ReceiveAsync("ack me twice");
+        var tools = new PoniExpTools(new McpAgent(pair.Wojtek.Api, Agent));
+        var first = await tools.AckAsync(Prefix(received.Id));
+
+        // When
+        var second = await tools.AckAsync(received.Id.ToString());
+
+        // Then
+        Assert.Equal(first, second);
+    }
+
+    [Fact]
     public async Task Given_AReceivedMessage_When_TheMcpReplyToolGetsAPrefix_Then_TheReplyReachesItsSender()
     {
         // Given

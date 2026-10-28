@@ -13,6 +13,9 @@ namespace PoniExp.Mcp;
 /// <summary>Which agent this MCP server is, and the daemon it talks to.</summary>
 public sealed record McpAgent(LocalApiClient Api, string Agent);
 
+/// <summary>What the MCP <c>ack</c> tool returns: no body, metadata or attachments.</summary>
+public sealed record AckResult(Guid Id, string? State, DateTimeOffset? ChangedOn);
+
 /// <summary>
 /// The MCP tools: an agent's view of PoniExp, as one agent on this machine. Every result is JSON.
 /// Fetching the inbox doesn't acknowledge anything: the agent acknowledges with <c>ack</c>, or by replying.
@@ -80,9 +83,16 @@ public sealed class PoniExpTools(McpAgent me)
             body, status, Metadata: metadata, Attachments: files is { Length: > 0 } ? [.. files.Select(Path.GetFullPath)] : null), cancellationToken));
 
     [McpServerTool(Name = "ack"), Description(
-        "Acknowledge a message: tell its sender you have taken it on. Do this when you start on it (replying acknowledges too).")]
-    public async Task<string> AckAsync([Description(MessageIdOrPrefix + ".")] string messageId, [Description(AgentParameter)] string? agent = null, CancellationToken cancellationToken = default) =>
-        Json(await me.Api.AckAsync(As(agent), Required(messageId, nameof(messageId)), cancellationToken));
+        "Acknowledge a message: tell its sender you have taken it on. Do this when you start on it (replying acknowledges too). " +
+        "Returns only the id, state and when it was acknowledged; acknowledging again returns the same.")]
+    public async Task<string> AckAsync([Description(MessageIdOrPrefix + ".")] string messageId, [Description(AgentParameter)] string? agent = null, CancellationToken cancellationToken = default)
+    {
+        var acked = await me.Api.AckAsync(As(agent), Required(messageId, nameof(messageId)), cancellationToken);
+        // The caller read the message from inbox already: echoing the body back would cost its tokens twice.
+        var detail = await me.Api.MessageAsync(As(agent), acked.Id.ToString(), cancellationToken);
+        var changedOn = detail.Events.LastOrDefault(e => e.Event == MessageEvents.Acknowledged)?.OccurredOn;
+        return Json(new AckResult(acked.Id, acked.State, changedOn));
+    }
 
     [McpServerTool(Name = "inbox", ReadOnly = true), Description(
         "Messages for you that you haven't acknowledged yet, oldest first. Fetching doesn't acknowledge them.")]
