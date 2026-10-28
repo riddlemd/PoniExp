@@ -111,7 +111,7 @@ public class SessionWakeTests
         // Then
         Assert.Equal(ClaudeHook.Wake, await hook.WaitAsync(TimeSpan.FromSeconds(20)));
         var nudge = stderr.ToString();
-        Assert.Contains($"1 new message for wojtek/{SessionAgent} (this session) from ise/ops", nudge);
+        Assert.StartsWith($"[ASYNC COMPLETE — PoniExp wake] 1 new message for wojtek/{SessionAgent} (this session) from ise/ops", nudge);
         Assert.Contains($"agent \"{SessionAgent}\"", nudge);
         Assert.DoesNotContain("secret", nudge);
     }

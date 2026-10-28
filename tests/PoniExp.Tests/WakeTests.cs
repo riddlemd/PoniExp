@@ -16,6 +16,32 @@ namespace PoniExp.Tests;
 public class WakeTests
 {
     [Fact]
+    public void Given_NewMessages_When_TheDaemonWritesTheNudge_Then_ItStartsWithTheTagMemoryProvidersSkip()
+    {
+        // Given
+        IReadOnlyList<string> from = ["ise/ops"];
+
+        // When
+        var nudge = PoniExp.Daemon.Daemon.NudgeText("hermes", 1, from, test: false);
+
+        // Then
+        Assert.StartsWith("[ASYNC COMPLETE — PoniExp wake] 1 new message for agent 'hermes' from ise/ops", nudge);
+    }
+
+    [Fact]
+    public void Given_AWakeTest_When_TheDaemonWritesTheNudge_Then_ItStartsWithTheTagMemoryProvidersSkip()
+    {
+        // Given
+        IReadOnlyList<string> from = [];
+
+        // When
+        var nudge = PoniExp.Daemon.Daemon.NudgeText("hermes", 0, from, test: true);
+
+        // Then
+        Assert.StartsWith("[ASYNC COMPLETE — PoniExp wake] a test nudge for agent 'hermes'", nudge);
+    }
+
+    [Fact]
     public async Task ABurstOfMessagesWakesTheAgentOnceWithoutTheBodies()
     {
         await using var gateway = await FakeA2aGateway.StartAsync();

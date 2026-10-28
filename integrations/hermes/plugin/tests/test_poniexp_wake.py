@@ -148,6 +148,40 @@ def test_Given_ABurstOfTwoMessages_When_TheyArrive_Then_TheSessionGetsOneNudgeWi
     assert "secret" not in text
 
 
+def test_Given_AMessage_When_TheSessionIsNudged_Then_TheNudgeStartsWithTheTagMemoryProvidersSkip(fake):
+    # Given
+    fake.lines.write_text(message("a1", "ise/ops") + "\n")
+
+    # When
+    fake.ctx.hooks["on_session_start"](session_id="s1", platform="cli")
+
+    # Then
+    assert wait_for(lambda: len(fake.ctx.injected) == 1)
+    _, text = fake.ctx.injected[0]
+    assert text.startswith("[ASYNC COMPLETE — PoniExp wake] 1 new message for wojtek/hermes-default.s1")
+
+
+HONCHO = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")) / "plugins" / "honcho" / "__init__.py"
+
+
+@pytest.mark.skipif(not HONCHO.exists(), reason="no Honcho plugin installed")
+def test_Given_TheInstalledHonchoPlugin_When_ItChecksANudge_Then_ItSkipsTheTurn():
+    # Given
+    spec = importlib.util.spec_from_file_location(
+        "honcho_under_test", HONCHO, submodule_search_locations=[str(HONCHO.parent)])
+    assert spec is not None and spec.loader is not None
+    honcho = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = honcho
+    spec.loader.exec_module(honcho)
+    nudge = load_plugin().nudge_text("ise", "hermes-default.s1", ["blinky/ops"], 1)
+
+    # When
+    skipped = honcho._is_internal_gateway_turn(nudge)
+
+    # Then
+    assert skipped
+
+
 def test_Given_AMessageDeliveredTwice_When_TheStreamRedeliversIt_Then_TheSessionIsNudgedOnce(fake):
     # Given
     fake.lines.write_text(message("a1") + "\n" + message("a1") + "\n")

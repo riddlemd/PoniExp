@@ -145,11 +145,11 @@ public sealed partial class Daemon
         const string how = "Read them with the poniexp MCP `inbox` tool, then `ack` each one you take on and answer with `reply`.";
         if (test)
         {
-            return $"PoniExp: a test nudge for agent '{agent}' (from `poniexp-client wake test`). "
+            return $"{SessionWake.NudgeTag} a test nudge for agent '{agent}' (from `poniexp-client wake test`). "
                 + (count == 0 ? "Nothing waits in its inbox; no need to do anything." : $"{count} message(s) wait in its inbox. {how}");
         }
 
-        return $"PoniExp: {count} new message{(count == 1 ? "" : "s")} for agent '{agent}' from {string.Join(", ", from)}. {how}";
+        return $"{SessionWake.NudgeTag} {count} new message{(count == 1 ? "" : "s")} for agent '{agent}' from {string.Join(", ", from)}. {how}";
     }
 
     // ---- A2A ----
