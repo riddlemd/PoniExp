@@ -15,6 +15,7 @@ import atexit
 import json
 import logging
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -77,7 +78,8 @@ def base_agent() -> str:
 def machine_name(binary: str) -> str:
     global _machine
     if _machine is None:
-        fallback = os.uname().nodename.split(".")[0].lower()
+        # platform.node(), not os.uname(): Windows has no os.uname.
+        fallback = platform.node().split(".")[0].lower()
         try:
             out = subprocess.run([binary, "status"], capture_output=True, text=True, timeout=10).stdout
             match = re.search(r"\bas ([a-z][a-z0-9-]*) \(", out)  # "approved as ise (5f667cdc), connected to ..."
