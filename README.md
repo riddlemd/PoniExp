@@ -22,8 +22,10 @@ server, the CLI, or the local API) as **agents**: `machine/agent`, e.g. `wojtek/
 
 - **A machine is its key.** Each machine makes two key pairs on first use: an identity key (ECDSA
   P-256, which it signs with) and an encryption key (ECDH P-256, signed by the identity key). The
-  private keys never leave it and are kept in the OS's secret store: DPAPI on Windows, the login
-  keychain on macOS, owner-only files on Linux. The machine id is a hash of the identity public key.
+  private keys never leave it and are kept in the OS's secret store: DPAPI on Windows, owner-only
+  files on macOS and Linux (the macOS keychain with `"Secrets": { "Store": "keychain" }` in
+  settings.json, once builds are Developer ID signed; see below). The machine id is a hash of the
+  identity public key.
 - **Joining.** A machine sends its public key, name and description (OS, architecture, host name,
   notes), signed with that key. The router lists it as **pending** and shows a **join code**, which is
   the start of the machine id. The joining machine prints the same code. You compare the two, then
@@ -142,11 +144,13 @@ the next `update` removes it.
   in, `service install`.
 - **Agents' MCP servers keep the old code.** `update` replaces the daemon only. Each `poniexp-client
   mcp` process (one per agent) runs the old binary until its host (Claude Code, Hermes) restarts.
-- **macOS: sign the new build as the old one was.** The keys are in the login keychain, and its
-  access list names the signed binary that stored them. A build signed differently, or not at all, may
-  get a keychain prompt that a background daemon can't answer. `publish.sh` doesn't sign, so sign the
-  build before running `update`. If the daemon can't read its keys it never answers, and `update`
-  puts the old binary back.
+- **macOS: keys are in owner-only files by default, because the keychain can't survive an update.**
+  Each keychain item is also tied to the exact build that saved it (its cdhash), unless the build has
+  an Apple Developer team ID. The self-signed RiddTech certificate has none, so every new build gets a
+  keychain prompt the user may not be allowed to answer. Set `"Secrets": { "Store": "keychain" }` in
+  settings.json (or `PONIEXP_Secrets__Store=keychain`) only once builds are Developer ID signed.
+  Changing the store gives the machine new keys, so it joins again. If the daemon can't read its keys,
+  it says so and waits instead of exiting, so launchd doesn't restart it into another prompt.
 - **The router updates separately.** Only rebuild it when its code changed:
   `git diff --stat <old>..<new> -- src/PoniExp.Server src/PoniExp.Core`. If it did, run
   `docker compose up -d --build` on the router's host.

@@ -106,6 +106,8 @@ const string Usage = """
 
     "-" as a body reads stdin. Settings: <home>/settings.json, e.g.
       { "Messaging": { "DefaultExpiry": "1.00:00:00" }, "Daemon": { "AgentTimeout": "00:01:00" } }
+    Keys: "Secrets": { "Store": "file" | "keychain" (macOS) | "dpapi" (Windows) }; default dpapi on
+      Windows, owner-only files elsewhere. Changing it gives the machine new keys: join again.
     """;
 
 args = TakeHome(args);
@@ -223,9 +225,15 @@ async Task<int> DaemonAsync(bool windowsService)
         File.SetUnixFileMode(home, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
     }
 
-    using var keys = KeyRing.LoadOrCreate(home);
+    var secrets = SecretStores.ForHome(home);
+    using var keys = await KeyRing.LoadOrWaitAsync(home, secrets, Console.Error, cancel.Token);
+    if (keys is null)
+    {
+        return 1;
+    }
+
     var context = new DaemonContext(keys, home, config.ToOptions(), new ClientStore(ClientConfig.DatabasePath), LocalAddress.ForHome(home),
-        k => KeyRing.SaveEncryption(home, k), SecretStores.ForHome(home));
+        k => KeyRing.SaveEncryption(home, k, secrets), secrets);
     await using var app = DaemonHost.Build(context, windowsService: windowsService);
     await DaemonHost.StartAsync(app, context, cancel.Token);
     Console.Error.WriteLine($"* daemon for {keys.MachineId[..8]} ({home}) listening on {context.Address}; Ctrl+C to stop");

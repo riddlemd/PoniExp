@@ -240,8 +240,11 @@ Agents, conversation, subject, type, metadata, body and `createdOn` are encrypte
   Approvals (phase 9) are how agents ask before acting. Agent
   names are never a security boundary (any local process can use any name), so agents that must not
   impersonate each other belong on separate machines or containers.
-- Private keys are kept in the OS's secret store: DPAPI (current user) on Windows, the login keychain
-  on macOS, owner-only (0600) files on Linux, where disk encryption protects them at rest.
+- Private keys are kept in the OS's secret store: DPAPI (current user) on Windows, owner-only (0600)
+  files on macOS and Linux, where disk encryption (FileVault, LUKS) protects them at rest. Any process
+  running as the user can read those files. The macOS login keychain (`Secrets:Store` = `keychain`)
+  would also stop other apps reading them, but it pins each item to the build that saved it unless the
+  build carries an Apple Developer team ID, so it waits until builds are Developer ID signed.
 - In system mode (a boot-time service) the daemon has its own keys, under its own account (Windows:
   `NT SERVICE\PoniExp`, DPAPI; macOS: root). It is a separate machine identity, joined separately.
 - The client database (`~/.poniexp/client.db`) keeps messages as their encrypted envelopes. Routing and

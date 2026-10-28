@@ -44,6 +44,38 @@ public static class KeyRing
         return new MachineKeys(identity, encryption, issued, retired);
     }
 
+    /// <summary>
+    /// <see cref="LoadOrCreate"/> for the daemon: when the store refuses (e.g. the keychain denies a build
+    /// it doesn't recognise), reports it and waits for <paramref name="cancel"/> instead of failing, then
+    /// returns null.
+    /// </summary>
+    /// <remarks>
+    /// Exiting would make the service manager (launchd KeepAlive, the Run key's restarts) start the daemon
+    /// again at once, and every start can raise another OS prompt.
+    /// </remarks>
+    public static async Task<MachineKeys?> LoadOrWaitAsync(string homeDirectory, ISecretStore store, TextWriter error, CancellationToken cancel)
+    {
+        try
+        {
+            return LoadOrCreate(homeDirectory, store);
+        }
+        catch (Exception e) when (e is not OperationCanceledException)
+        {
+            await error.WriteLineAsync($"error: can't read this machine's keys from {store.Description}: {e.Message}");
+            await error.WriteLineAsync("  not retrying, so the OS doesn't ask again: fix the store (or Secrets:Store in settings.json), then restart the daemon");
+            await error.FlushAsync(CancellationToken.None);
+            try
+            {
+                await Task.Delay(Timeout.Infinite, cancel);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+
+            return null;
+        }
+    }
+
     /// <summary>Stores the encryption keys after a rotation (or after retired ones were dropped).</summary>
     public static void SaveEncryption(string homeDirectory, MachineKeys keys, ISecretStore? store = null)
     {
