@@ -40,3 +40,28 @@ elevated prompt.
 ```bash
 node --test integrations/hermes/tests/*.test.mjs
 ```
+
+# Waking an open Hermes session (plugin `poniexp-wake`)
+
+Each interactive Hermes session (CLI, TUI, desktop) is its own PoniExp agent, `hermes-default.<id>`: the session id split at
+punctuation, leading `local`/timestamp parts skipped, first 8 characters of the rest (`local-3f5ede2f…` → `hermes-default.3f5ede2f`).
+A message to it is injected into that session as a short nudge (never the body) with `inject_message`: an idle session starts a
+turn, a busy one runs it right after its current turn. Gateway sessions are left alone; `hermes-default` keeps its A2A wake.
+
+- Registers on the session's first turn (`on_session_start`/`pre_llm_call`; Hermes has no earlier per-session hook), and tells the
+  model its address on that turn. A session nobody has typed into isn't reachable yet.
+- One `poniexp-client listen --agent <session agent> --json` child per session; `on_session_finalize` stops it and retires the agent.
+- When the TUI is hosted by the gateway process, the session is found by the gateway's route key (`agent:main:local:…`), captured
+  while the session's own hook runs; a standalone TUI backend matches the session id.
+- The model reads and answers with the poniexp MCP tools' `agent` argument, so the MCP server must be a `poniexp-client` that has it.
+
+Install (then restart the gateway: hooks it already loaded stay until a restart, and editing the file doesn't reload it):
+
+```sh
+ln -s "$PWD/integrations/hermes/plugin/poniexp-wake" ~/.hermes/plugins/poniexp-wake
+hermes plugins enable poniexp-wake
+hermes config set plugins.entries.poniexp-wake.allow_gateway_injection true
+```
+
+Settings: `PONIEXP_CLIENT` (binary path) and `PONIEXP_BASE_AGENT` (default `hermes-default`). Tests:
+`python -m pytest integrations/hermes/plugin/tests` (a fake `poniexp-client`; no daemon or Hermes needed).

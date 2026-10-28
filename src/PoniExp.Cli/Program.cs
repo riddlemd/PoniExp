@@ -100,6 +100,8 @@ const string Usage = """
                                            the agent registry; a retired agent's messages are rejected
       diagnostics                          recent connection, signature and delivery problems
       mcp --agent <name>                   an MCP server (stdio) for an agent, as that agent
+      hook claude [--agent <base>] [--announce] [--max-wait <duration>]
+                                           a Claude Code hook (JSON on stdin): wakes the session as <base>.<session>
       completion bash|zsh|powershell       tab completion for your shell (ids, agents, rooms...): load it from your profile
 
     "-" as a body reads stdin. Settings: <home>/settings.json, e.g.
@@ -143,6 +145,7 @@ try
         ["agent", "list"] => await AgentsAsync(),
         ["agent", "retire", var name] => await RetireAsync(name),
         ["diagnostics"] => await DiagnosticsAsync(),
+        ["hook", "claude", .. var rest] => await ClaudeHookAsync(rest),
         ["mcp", .. var rest] => await McpAsync(Option(rest, "--agent") ?? throw new ArgumentException("mcp needs --agent <name>")),
         ["capabilities"] => await CapabilitiesAsync(),
         ["admin", .. var adminArgs] when adminArgs.Length > 0 => await RemoteAdminAsync(adminArgs),
@@ -1608,6 +1611,17 @@ async Task<int> CapabilitiesAsync()
     Console.WriteLine($"  os={c.Capabilities.Os} os-version={c.Capabilities.OsVersion} arch={c.Capabilities.Arch} cores={c.Capabilities.Cores} " +
                       $"memory={c.Capabilities.MemoryGb:0.#} gpus={c.Capabilities.Gpus.Count}");
     return 0;
+}
+
+async Task<int> ClaudeHookAsync(string[] rest)
+{
+    var input = await Console.In.ReadToEndAsync(cancel.Token);
+    using var api = await DaemonAsync2();
+    var status = await api.StatusAsync(cancel.Token);
+    var stateDirectory = Path.Combine(Path.GetTempPath(), "poniexp-hooks");
+    return await ClaudeHook.RunAsync(api, status.Name ?? status.MachineId, Option(rest, "--agent") ?? "claude", input, rest.Contains("--announce"),
+        Option(rest, "--max-wait") is { } wait ? ParseDuration(wait) : TimeSpan.FromMinutes(55), TimeSpan.FromSeconds(1), stateDirectory,
+        Console.Out, Console.Error, cancel.Token);
 }
 
 async Task<int> McpAsync(string agent)

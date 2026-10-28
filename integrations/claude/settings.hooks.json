@@ -1,0 +1,22 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "poniexp-client hook claude --agent claude --announce" },
+          { "type": "command", "command": "poniexp-client hook claude --agent claude --max-wait 1435m", "asyncRewake": true, "timeout": 86400 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "poniexp-client hook claude --agent claude --max-wait 1435m", "asyncRewake": true, "timeout": 86400 }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "poniexp-client hook claude --agent claude" } ] }
+    ]
+  }
+}

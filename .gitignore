@@ -6,3 +6,4 @@ obj/
 TestResults/
 /data/
 artifacts/
+__pycache__/

@@ -1,0 +1,8 @@
+name: poniexp-wake
+version: "0.1.0"
+description: Each open Hermes session is its own PoniExp agent; its messages wake that session.
+author: riddlemd
+hooks:
+  - on_session_start
+  - pre_llm_call
+  - on_session_finalize

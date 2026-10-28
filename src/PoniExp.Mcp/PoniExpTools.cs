@@ -33,8 +33,8 @@ public sealed class PoniExpTools(McpAgent me)
         [Description("How long it lives, e.g. '30m', '2h', '3d' (default and maximum are the machine's settings).")] string? expiresIn = null,
         [Description("To retry a request safely, send it again with the first message's operationId (one recipient only): the other side " +
                      "won't do it twice, and answers with 'still running' or the result it already gave.")] string? operationId = null,
-        CancellationToken cancellationToken = default) =>
-        Json(await me.Api.SendAsync(new LocalSendRequest(me.Agent, to, body, subject, ParseId(conversationId), OperationId: ParseId(operationId),
+        [Description(AgentParameter)] string? agent = null, CancellationToken cancellationToken = default) =>
+        Json(await me.Api.SendAsync(new LocalSendRequest(As(agent), to, body, subject, ParseId(conversationId), OperationId: ParseId(operationId),
             ContentType: contentType, Metadata: metadata, ExpiresIn: ParseDuration(expiresIn)), cancellationToken));
 
     [McpServerTool(Name = "attach"), Description(
@@ -46,24 +46,24 @@ public sealed class PoniExpTools(McpAgent me)
         [Description("The message text.")] string body,
         [Description("A short title (optional).")] string? subject = null,
         [Description("Continue this conversation (one recipient only).")] string? conversationId = null,
-        CancellationToken cancellationToken = default) =>
-        Json(await me.Api.SendAsync(new LocalSendRequest(me.Agent, to, body, subject, ParseId(conversationId),
+        [Description(AgentParameter)] string? agent = null, CancellationToken cancellationToken = default) =>
+        Json(await me.Api.SendAsync(new LocalSendRequest(As(agent), to, body, subject, ParseId(conversationId),
             Attachments: [.. files.Select(Path.GetFullPath)]), cancellationToken));
 
     [McpServerTool(Name = "fetch"), Description(
         "Download a message's files to this machine, verified against the message, and get their local paths. Fetching once is enough " +
         "even if other agents here got the same file. Call 'release' when you are done with them.")]
     public async Task<string> FetchAsync([Description(MessageIdOrPrefix + " of the message with the files.")] string messageId,
-        [Description("Just this file (its blobId); default all.")] string? blobId = null, CancellationToken cancellationToken = default) =>
-        Json(await me.Api.FetchAsync(me.Agent, new LocalFileRequest(Required(messageId, nameof(messageId)),
+        [Description("Just this file (its blobId); default all.")] string? blobId = null, [Description(AgentParameter)] string? agent = null, CancellationToken cancellationToken = default) =>
+        Json(await me.Api.FetchAsync(As(agent), new LocalFileRequest(Required(messageId, nameof(messageId)),
             ParseId(blobId)), cancellationToken));
 
     [McpServerTool(Name = "release"), Description(
         "You are done with a message's files: the local copy is deleted once every agent here that received them has released them. " +
         "Acknowledging a message doesn't release its files.")]
     public async Task<string> ReleaseAsync([Description(MessageIdOrPrefix + " of the message with the files.")] string messageId,
-        [Description("Just this file (its blobId); default all.")] string? blobId = null, CancellationToken cancellationToken = default) =>
-        Json(await me.Api.ReleaseAsync(me.Agent, new LocalFileRequest(Required(messageId, nameof(messageId)),
+        [Description("Just this file (its blobId); default all.")] string? blobId = null, [Description(AgentParameter)] string? agent = null, CancellationToken cancellationToken = default) =>
+        Json(await me.Api.ReleaseAsync(As(agent), new LocalFileRequest(Required(messageId, nameof(messageId)),
             ParseId(blobId)), cancellationToken));
 
     [McpServerTool(Name = "reply"), Description(
@@ -75,35 +75,35 @@ public sealed class PoniExpTools(McpAgent me)
         [Description("progress, done or failed (optional).")] string? status = null,
         [Description("Free-form key/value metadata.")] Dictionary<string, string>? metadata = null,
         [Description("Paths of files to send back (optional).")] string[]? files = null,
-        CancellationToken cancellationToken = default) =>
-        Json(await me.Api.ReplyAsync(me.Agent, new LocalReplyRequest(Required(messageId, nameof(messageId)),
+        [Description(AgentParameter)] string? agent = null, CancellationToken cancellationToken = default) =>
+        Json(await me.Api.ReplyAsync(As(agent), new LocalReplyRequest(Required(messageId, nameof(messageId)),
             body, status, Metadata: metadata, Attachments: files is { Length: > 0 } ? [.. files.Select(Path.GetFullPath)] : null), cancellationToken));
 
     [McpServerTool(Name = "ack"), Description(
         "Acknowledge a message: tell its sender you have taken it on. Do this when you start on it (replying acknowledges too).")]
-    public async Task<string> AckAsync([Description(MessageIdOrPrefix + ".")] string messageId, CancellationToken cancellationToken = default) =>
-        Json(await me.Api.AckAsync(me.Agent, Required(messageId, nameof(messageId)), cancellationToken));
+    public async Task<string> AckAsync([Description(MessageIdOrPrefix + ".")] string messageId, [Description(AgentParameter)] string? agent = null, CancellationToken cancellationToken = default) =>
+        Json(await me.Api.AckAsync(As(agent), Required(messageId, nameof(messageId)), cancellationToken));
 
     [McpServerTool(Name = "inbox", ReadOnly = true), Description(
         "Messages for you that you haven't acknowledged yet, oldest first. Fetching doesn't acknowledge them.")]
-    public async Task<string> InboxAsync(CancellationToken cancellationToken = default) =>
-        Json(await me.Api.InboxAsync(me.Agent, cancellationToken));
+    public async Task<string> InboxAsync([Description(AgentParameter)] string? agent = null, CancellationToken cancellationToken = default) =>
+        Json(await me.Api.InboxAsync(As(agent), cancellationToken));
 
     [McpServerTool(Name = "conversations", ReadOnly = true), Description(
         "Your conversations, most recent first: who with, the subject, and whether each is open or finished (its last reply was done or failed). " +
         "Use it to pick up where you left off after a restart, then 'conversation' for the messages.")]
-    public async Task<string> ConversationsAsync(CancellationToken cancellationToken = default) =>
-        Json(await me.Api.ConversationsAsync(me.Agent, cancellationToken));
+    public async Task<string> ConversationsAsync([Description(AgentParameter)] string? agent = null, CancellationToken cancellationToken = default) =>
+        Json(await me.Api.ConversationsAsync(As(agent), cancellationToken));
 
     [McpServerTool(Name = "conversation", ReadOnly = true), Description("Every message you sent and received in a conversation, oldest first.")]
     public async Task<string> ConversationAsync([Description("The conversation id, or a unique start of it (4 characters or more).")] string conversationId,
-        CancellationToken cancellationToken = default) =>
-        Json(await me.Api.ConversationAsync(me.Agent, Required(conversationId, nameof(conversationId)), cancellationToken));
+        [Description(AgentParameter)] string? agent = null, CancellationToken cancellationToken = default) =>
+        Json(await me.Api.ConversationAsync(As(agent), Required(conversationId, nameof(conversationId)), cancellationToken));
 
     [McpServerTool(Name = "message", ReadOnly = true), Description(
         "One message you sent or received, with its delivery history (for a message you sent: relayed, received, acknowledged, or rejected).")]
-    public async Task<string> MessageAsync([Description(MessageIdOrPrefix + ".")] string messageId, CancellationToken cancellationToken = default) =>
-        Json(await me.Api.MessageAsync(me.Agent, Required(messageId, nameof(messageId)), cancellationToken));
+    public async Task<string> MessageAsync([Description(MessageIdOrPrefix + ".")] string messageId, [Description(AgentParameter)] string? agent = null, CancellationToken cancellationToken = default) =>
+        Json(await me.Api.MessageAsync(As(agent), Required(messageId, nameof(messageId)), cancellationToken));
 
     [McpServerTool(Name = "jobs", ReadOnly = true), Description(
         "The job board: work any agent on any approved machine posted, open for all to see (don't put secrets on it). " +
@@ -243,6 +243,23 @@ public sealed class PoniExpTools(McpAgent me)
         Json(new { agent = me.Agent, machine = await me.Api.StatusAsync(cancellationToken) });
 
     private static string Json(object value) => JsonSerializer.Serialize(value, WireProtocol.Json);
+
+    private const string AgentParameter =
+        "Act as this session's own agent (e.g. 'claude.8b1d44e2') when a PoniExp nudge or announcement names one; omit it otherwise.";
+
+    /// <summary>The agent a call acts as: this server's, or one of its session agents (never an unrelated one).</summary>
+    internal string As(string? agent)
+    {
+        if (string.IsNullOrWhiteSpace(agent))
+        {
+            return me.Agent;
+        }
+
+        agent = agent.Trim();
+        return SessionWake.IsSelfOrSession(me.Agent, agent)
+            ? agent
+            : throw new ArgumentException($"agent '{agent}' isn't '{me.Agent}' or one of its sessions ('{me.Agent}.<id>')");
+    }
 
     /// <summary>Message ids are resolved by the daemon: the whole id, or a prefix that matches only one of your messages.</summary>
     private const string MessageIdOrPrefix = "The message id, or a unique start of it (4 characters or more)";
