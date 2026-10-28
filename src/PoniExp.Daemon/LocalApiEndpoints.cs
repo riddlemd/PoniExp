@@ -332,7 +332,19 @@ public static class LocalApiEndpoints
         {
             if (!d.Relay.IsReachable)
             {
-                throw new InvalidOperationException("the daemon can't reach the router yet; see 'poniexp-client doctor'");
+                try
+                {
+                    await d.Relay.EnsureReachableAsync(ct);
+                }
+                catch (Exception e) when (e is not OperationCanceledException)
+                {
+                    throw new InvalidOperationException($"the daemon can't reach the router: {e.Message}; see 'poniexp-client doctor'");
+                }
+
+                if (!d.Relay.IsReachable)
+                {
+                    throw new InvalidOperationException("the daemon can't reach the router yet; see 'poniexp-client doctor'");
+                }
             }
 
             var status = d.Relay.Status == MembershipStatus.Approved ? MembershipStatus.Approved

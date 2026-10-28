@@ -336,6 +336,18 @@ public sealed class RelayClient : IAsyncDisposable
         return await AuthenticateAsync(cancellationToken);
     }
 
+    /// <summary>
+    /// Connects again if the link is closed. The router closes a machine it doesn't know and nothing restarts that
+    /// link (a removed machine shouldn't keep knocking), so a join has to open it itself.
+    /// </summary>
+    public async Task EnsureReachableAsync(CancellationToken cancellationToken = default)
+    {
+        if (_connection.State == HubConnectionState.Disconnected)
+        {
+            await ConnectAsync(cancellationToken);
+        }
+    }
+
     /// <summary>Asks to join. The router shows the owner a join code; compare it with <see cref="JoinCode"/>.</summary>
     public async Task<MembershipStatus> RequestJoinAsync(string name, MachineDescription description, CancellationToken cancellationToken = default)
     {

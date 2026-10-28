@@ -438,6 +438,24 @@ public class DaemonTests
         Assert.NotEqual(a, LocalAddress.ForHome(Path.Combine(Path.GetTempPath(), "b")));
     }
 
+    // ---- joining ----
+
+    [Fact]
+    public async Task Given_ANewMachineWhoseLinkTheRouterClosed_When_ItRunsJoin_Then_TheRequestReachesTheRouterAsPending()
+    {
+        // Given
+        await using var router = await RouterFixture.StartAsync(settings: new Dictionary<string, string?> { ["PoniExp:AuthenticationTimeout"] = "00:00:00.300" });
+        await using var blinky = await DaemonFixture.StartUnjoinedAsync(router, "blinky");
+        await RouterFixture.Eventually(() => !blinky.Daemon.Relay.IsReachable);
+
+        // When
+        var joined = await blinky.Api.JoinAsync("blinky", "a fresh machine");
+
+        // Then
+        Assert.Equal("pending", joined.Membership);
+        Assert.True(blinky.Daemon.Relay.IsReachable);
+    }
+
     // ---- helpers ----
 
     private static async Task RegisterAndLeaveAsync(DaemonFixture daemon, string agent)
