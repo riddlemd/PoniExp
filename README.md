@@ -77,6 +77,35 @@ docker exec -i poniexp-server poniexp admin restore - < poniexp-backup.json
 docker restart poniexp-server            # if the restored certificate differs from the one in use
 ```
 
+## The dashboard (optional)
+
+A web page on the router for its state and admin changes: machines and presence, join requests, queues, files, the job
+board, rooms and groups, the traffic log. No message contents (the router doesn't have them). Turn it on with
+`PoniExp__DashboardPort` and publish that port on the host's loopback only, then serve it over HTTPS with Tailscale:
+
+```yaml
+    ports:
+      - "5443:5443"
+      - "127.0.0.1:5444:5444"
+    environment:
+      PoniExp__DashboardPort: "5444"
+      PoniExp__DashboardBindAddress: "0.0.0.0"   # inside the container; the host publishes it on loopback only
+```
+
+```sh
+tailscale serve --bg --https=443 http://127.0.0.1:5444   # https://<host>.<tailnet>.ts.net
+```
+
+Sign in from a machine whose SSH agent holds the owner key (one prompt; the address is remembered):
+
+```sh
+poniexp-client dashboard --url https://<host>.<tailnet>.ts.net
+poniexp-client dashboard                                   # later
+```
+
+The sign-in lasts `PoniExp__DashboardSessionLifetime` (1 hour) and ends when the router restarts. While it lasts, changes
+need no further signature; revoke, owner and group changes and backups stay `poniexp-client admin` (docs/security.md).
+
 ## Set up a machine
 
 Build the client: `scripts/publish.sh <rid>` makes a self-contained single file (no .NET needed) in

@@ -27,6 +27,20 @@ public sealed class RouterOptions
     public int? AdminPort { get; set; } = 5081;
 
     /// <summary>
+    /// Plain-HTTP dashboard listener (phase 13), meant to sit behind <c>tailscale serve</c> for HTTPS. Null to skip it. Startup only.
+    /// </summary>
+    public int? DashboardPort { get; set; }
+
+    /// <summary>Where the dashboard listens: 0.0.0.0 in the container, published on the host's loopback only. Startup only.</summary>
+    public string DashboardBindAddress { get; set; } = "127.0.0.1";
+
+    /// <summary>How long a dashboard sign-in lasts; then <c>poniexp-client dashboard</c> signs in again.</summary>
+    public TimeSpan DashboardSessionLifetime { get; set; } = TimeSpan.FromHours(1);
+
+    /// <summary>How often the dashboard redraws from the router's state.</summary>
+    public TimeSpan DashboardRefreshInterval { get; set; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>
     /// The longest a message is delivered for, counted from when the router received it. A later
     /// <c>expiresOn</c> is treated as this.
     /// </summary>
@@ -176,6 +190,17 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
         if (options.SharedAddresses.Any(a => !System.Net.IPAddress.TryParse(a, out _)))
         {
             errors.Add("PoniExp:SharedAddresses must be IP addresses.");
+        }
+
+        if (options.DashboardPort is < 1 or > 65535 || !System.Net.IPAddress.TryParse(options.DashboardBindAddress, out _))
+        {
+            errors.Add("PoniExp:DashboardPort must be 1-65535 (the gate tells its requests by port), and DashboardBindAddress an IP address.");
+        }
+
+        if (options.DashboardSessionLifetime <= TimeSpan.Zero || options.DashboardSessionLifetime > TimeSpan.FromDays(1)
+            || options.DashboardRefreshInterval < TimeSpan.FromMilliseconds(250))
+        {
+            errors.Add("PoniExp:DashboardSessionLifetime must be positive and at most a day, and DashboardRefreshInterval at least 250 ms.");
         }
 
         return errors.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(errors);

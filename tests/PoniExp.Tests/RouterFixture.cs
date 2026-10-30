@@ -70,7 +70,7 @@ public sealed class RouterFixture : IAsyncDisposable
 
     /// <param name="settings">Router settings ("PoniExp:MaxExpiry", ...), changeable later with <see cref="SetSetting"/>.</param>
     public static async Task<RouterFixture> StartAsync(bool useHttps = false, string? dataDirectory = null,
-        IDictionary<string, string?>? settings = null, int port = 0, int? adminPort = null)
+        IDictionary<string, string?>? settings = null, int port = 0, int? adminPort = null, int? dashboardPort = null)
     {
         dataDirectory ??= Path.Combine(Path.GetTempPath(), "poniexp-tests", Guid.NewGuid().ToString("N"));
         var app = RouterHost.Build(["--Logging:LogLevel:Default=None"], o =>
@@ -80,6 +80,8 @@ public sealed class RouterFixture : IAsyncDisposable
             o.Port = port;
             o.AdminPort = adminPort; // on for remote admin (it runs the admin commands through it)
             o.UseHttps = useHttps;
+            o.DashboardPort = dashboardPort;
+            o.DashboardBindAddress = "127.0.0.1";
         }, configuration => configuration.AddInMemoryCollection(settings ?? new Dictionary<string, string?>()));
         try
         {

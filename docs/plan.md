@@ -999,20 +999,45 @@ is already reading. (a) alone failed in practice: the agent never opened `conver
 
 None right now; each workshop phase lists its own.
 
-## Phase 13: Web interface (workshop; deferred)
+## Phase 13: Web interface (workshop, done)
 
-Deferred by the owner: after waking agents (phase 12), before the tray app. A proposal is on record: served
-by each machine's daemon on localhost (not the router), so it can sign through the SSH agent; Blazor
-components shared later with the Oriel tray app.
+A dashboard served by the router (not each daemon: the owner wanted one place), Blazor Server, for the router's state
+and its admin changes. Message contents never show: the router doesn't have them.
 
+- **Where:** its own plain-HTTP port (`PoniExp:DashboardPort`, off by default), published on the router host's loopback
+  only and served over HTTPS by `tailscale serve` (a real certificate at `https://<host>.<tailnet>.ts.net`). Dashboard
+  endpoints answer only on that port, and nothing else does there: the relay port shows no dashboard, and the dashboard
+  port reaches neither the hub, the blob endpoints, `/health` nor the admin API.
+- **Sign-in:** `poniexp-client dashboard [--url <url>]` has the SSH agent sign a one-time sign-in (its id, the router's id,
+  the time; purpose `poniexp-dashboard-signin`) and opens the link. The router checks the owner signature, that it names
+  this router, is within the clock skew and after the router started, and that its id is new; then it sets a JWT (HS256)
+  cookie: HttpOnly, Secure, SameSite=Strict, for `PoniExp:DashboardSessionLifetime` (1 hour, at most a day).
+- **Nothing is stored:** the JWT's HMAC key, and the data protection keys Blazor and antiforgery use, live in memory only.
+  A router restart signs every browser out; a token also stops working when the owner key changes.
+- **Changes ride on the sign-in,** not a signature each (the owner's choice: one prompt per session, not per click):
+  approve, reject, forget (remove) machines; forget all join requests; release a machine's files; take a job off the
+  board; turn the traffic log on or off. They run the same `AdminService` code docker exec does and are logged with the
+  key's fingerprint. Not there, because daemons check the owner's signature on them or they hold private keys: revoke,
+  owner set, group set, backup, restore (`poniexp-client admin`).
+- **Shows:** machines (presence, last seen, capabilities, what's queued for each), join requests (with the join code to
+  compare), the job board, files, rooms and groups, the traffic log (newest 200). It redraws every
+  `PoniExp:DashboardRefreshInterval` (2 s) from the router's snapshots; Blazor pushes the changes.
 
-A web interface served by the router: the job board as a dashboard (phase 8), and the router's state
-(machines and presence, rooms and their statistics, the traffic log, files). Read-only views first;
-admin actions in it are signed with the owner key (phases 9 and 11). Open, for the workshop:
-- who may open it, and how they sign in (the owner key, an approved machine, a token);
-- where it listens (the relay port, the admin port, both);
-- the stack (server-rendered pages, or a small static app over the router's JSON);
-- live updates (polling or a push stream).
+**Done when:** tests show:
+- an owner-signed sign-in sets the cookie and the page shows the router; without one the page asks for it;
+- a reused, other-key, stale or other-router sign-in is refused; a tampered token is refused; a token ends when the
+  owner key changes; an ended session can't change anything;
+- approving a waiting machine from the dashboard admits it; forgetting the join requests clears them; the traffic log
+  toggle records;
+- dashboard paths 404 on the relay port (whose `/` still says "PoniExp router"), and relay, hub and admin paths 404 on
+  the dashboard port; the live page's circuit needs the cookie.
+
+Live: `poniexp-client dashboard` from Ise with the real Bitwarden prompt, through `tailscale serve` on Hestia.
+
+**As built:** Core `DashboardSignIn`. Router `Dashboard/`: `DashboardSessions` (sign-in, JWT), `DashboardActions`
+(reads and changes), `DashboardEndpoints` (the port gate, `/signin`, `/signout`, the Razor components), components
+`App`, `Home` (static: reads the cookie) and `DashboardPage` (interactive server). Client `dashboard` command; the URL
+is remembered in settings.json (`Dashboard:Url`).
 
 ## Phase 14: Tray app (workshop; waits for Oriel)
 

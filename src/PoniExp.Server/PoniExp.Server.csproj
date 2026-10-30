@@ -3,6 +3,8 @@
     <RootNamespace>PoniExp.Server</RootNamespace>
     <AssemblyName>poniexp</AssemblyName>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- The Dockerfile restores from the .csproj alone; without this the SDK sees no .razor files then and leaves out blazor.web.js. -->
+    <RequiresAspNetWebAssets>true</RequiresAspNetWebAssets>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" />

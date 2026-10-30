@@ -1,0 +1,16 @@
+@page "/"
+@inject DashboardSessions Sessions
+
+@* Static render: the cookie is read here, where there's an HttpContext; the live page gets the session it stands for. *@
+@if (_session is { } session)
+{
+    <DashboardPage Session="session" @rendermode="InteractiveServer" />
+}
+
+@code {
+    [CascadingParameter] private HttpContext? HttpContext { get; set; }
+
+    private DashboardSession? _session;
+
+    protected override void OnInitialized() => _session = Sessions.Validate(HttpContext?.Request.Cookies[DashboardSessions.Cookie]);
+}

@@ -160,6 +160,16 @@ Agents, conversation, subject, type, metadata, body and `createdOn` are encrypte
   machines don't follow it. Whoever controls the router's container can still change its data
   directly; machines guard against that with what they check themselves (pins, signed groups,
   signed revocations).
+- **The dashboard is the exception (phase 13):** a browser signed in with the owner key (one signature,
+  one-time, within the clock skew) may make the router-only changes listed in docs/plan.md, Phase 13,
+  for the session's lifetime (1 hour by default) without a signature each. So a stolen session cookie
+  can approve, reject or remove machines, release files and remove jobs until it expires; it can't
+  revoke, change the owner key or groups, or take a backup, which stay signed per command. Limits on
+  that risk: the cookie is HttpOnly, Secure and SameSite=Strict; the port is published on the router
+  host's loopback only and reached through `tailscale serve`, so only the tailnet sees it; the token's
+  key lives in memory only (a restart ends every session) and a changed owner key ends them too; each
+  change is logged with the key's fingerprint. The sign-in link is one-time and short-lived, but it
+  sits in the browser's history and, with `--print`, the terminal.
 - **Encryption keys rotate** (90 days). Each is signed with its issue time and machines take only
   newer ones, so a router can't hand back an old (perhaps leaked) key. Retired private keys are kept
   for the envelope retention, then deleted.

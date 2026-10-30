@@ -1,0 +1,507 @@
+@implements IAsyncDisposable
+@inject DashboardActions Actions
+@inject IOptionsMonitor<PoniExp.Server.RouterOptions> Options
+@inject IJSRuntime JS
+@inject TimeProvider Time
+
+<header class="top">
+    <h1>PoniExp router</h1>
+    @if (_state is { } top)
+    {
+        <span class="meta">owner <code>@Short(top.Owner.Fingerprint, 18)</code></span>
+        <span class="meta">desk <b>@(top.Owner.Desk ?? "none")</b>@(top.Owner.DeskUntil is { } until ? $" until {Local(until)}" : "")</span>
+        <span class="meta">certificate <code>@Short(top.CertificateSha256, 16)</code></span>
+    }
+    <span class="spacer"></span>
+    @if (_live)
+    {
+        <span class="meta">signed in until @Local(Session.ExpiresOn)</span>
+    }
+    else
+    {
+        <span class="meta warn">signed out: run <code>poniexp-client dashboard</code></span>
+    }
+    <form method="post" action="/signout"><button class="ghost">Sign out</button></form>
+</header>
+
+<nav class="tabs">
+    @foreach (var (tab, label) in Tabs())
+    {
+        <button class="@(tab == _tab ? "on" : "")" @onclick="() => _tab = tab">@label</button>
+    }
+</nav>
+
+@if (_message is { } message)
+{
+    <div class="note @(_messageIsError ? "error" : "")" @onclick="() => _message = null">@message</div>
+}
+
+@if (_state is null)
+{
+    <p class="muted">Reading the router...</p>
+}
+else
+{
+    var s = _state;
+    switch (_tab)
+    {
+        case Tab.Machines:
+            <table>
+                <thead><tr><th></th><th>Name</th><th>Status</th><th>System</th><th>Last seen</th><th class="num">Queued</th><th>Id</th><th></th></tr></thead>
+                <tbody>
+                @foreach (var m in s.Machines.Where(m => m.Machine.Status != MembershipStatus.Pending))
+                {
+                    var v = m.Machine;
+                    <tr class="@(v.Status == MembershipStatus.Rejected ? "dim" : "")">
+                        <td><span class="dot @(v.Online ? "online" : "")" title="@(v.Online ? "online" : "offline")"></span></td>
+                        <td><b>@v.Name</b></td>
+                        <td>@v.Status.ToString().ToLowerInvariant()</td>
+                        <td>@(v.Capabilities?.Summary() ?? $"{v.Description.OperatingSystem} {v.Description.Architecture}")<div class="muted">@v.Description.HostName</div></td>
+                        <td>@(v.Online ? "now" : v.LastSeenOn is { } seen ? Ago(seen) : "never")</td>
+                        <td class="num">@(m.QueuedMessages == 0 ? "" : $"{m.QueuedMessages} ({Bytes(m.QueuedBytes)})")</td>
+                        <td><code>@v.Id[..8]</code></td>
+                        <td class="actions">
+                            @if (v.Status == MembershipStatus.Approved)
+                            {
+                                <button class="danger" disabled="@(!_live)" @onclick="() => RemoveMachineAsync(v)">Remove</button>
+                            }
+                            else
+                            {
+                                <button disabled="@(!_live)" @onclick="() => ForgetAsync(v)">Forget</button>
+                            }
+                        </td>
+                    </tr>
+                }
+                </tbody>
+            </table>
+            <p class="muted">Revoking a machine (its key refused for good) stays a signed command: <code>poniexp-client admin revoke &lt;name&gt;</code>.</p>
+            break;
+
+        case Tab.Joins:
+            var pending = s.Machines.Where(m => m.Machine.Status == MembershipStatus.Pending).ToList();
+            @if (pending.Count == 0)
+            {
+                <p class="muted">No machine is waiting to join.</p>
+            }
+            else
+            {
+                <table>
+                    <thead><tr><th>Name</th><th>Join code</th><th>System</th><th>Notes</th><th>Asked</th><th></th></tr></thead>
+                    <tbody>
+                    @foreach (var m in pending)
+                    {
+                        var v = m.Machine;
+                        <tr>
+                            <td><b>@v.Name</b></td>
+                            <td><code class="code">@v.JoinCode</code></td>
+                            <td>@v.Description.OperatingSystem @v.Description.Architecture<div class="muted">@v.Description.HostName</div></td>
+                            <td>@v.Description.Notes</td>
+                            <td>@Ago(v.RequestedOn)</td>
+                            <td class="actions">
+                                <button class="go" disabled="@(!_live)" @onclick="() => ApproveAsync(v)">Approve</button>
+                                <button disabled="@(!_live)" @onclick="() => ForgetAsync(v)">Forget</button>
+                                <button class="danger" disabled="@(!_live)" @onclick="() => RejectAsync(v)">Reject</button>
+                            </td>
+                        </tr>
+                    }
+                    </tbody>
+                </table>
+                <button class="danger" disabled="@(!_live)" @onclick="() => ClearPendingAsync(pending.Count)">Forget all</button>
+            }
+            break;
+
+        case Tab.Jobs:
+            <label class="check"><input type="checkbox" @bind="_finishedJobs" @bind:after="RefreshAsync" /> show finished</label>
+            @if (s.Jobs.Count == 0)
+            {
+                <p class="muted">The board is empty.</p>
+            }
+            else
+            {
+                <table>
+                    <thead><tr><th>Title</th><th>Column</th><th>Poster</th><th>Claimant</th><th>Needs</th><th>Updated</th><th>Id</th><th></th></tr></thead>
+                    <tbody>
+                    @foreach (var j in s.Jobs.OrderBy(j => j.IsFinished).ThenByDescending(j => j.UpdatedOn))
+                    {
+                        <tr class="@(j.IsFinished ? "dim" : "")">
+                            <td><b>@j.Title</b>@if (j.Result is { Length: > 0 } result) { <div class="muted">@result</div> }</td>
+                            <td><span class="pill @j.Column.ToString().ToLowerInvariant()">@j.Column.ToString().ToLowerInvariant()</span></td>
+                            <td>@j.Poster@(j.PosterRevoked ? " (revoked)" : "")</td>
+                            <td>@j.Claimant@if (j.LeaseExpiresOn is { } lease) { <div class="muted">lease @Local(lease)</div> }</td>
+                            <td>@string.Join(", ", j.Requirements.Select(r => r.ToString()))</td>
+                            <td>@Ago(j.UpdatedOn)</td>
+                            <td><code>@j.Id.ToString()[..8]</code></td>
+                            <td class="actions"><button class="danger" disabled="@(!_live)" @onclick="() => RemoveJobAsync(j)">Remove</button></td>
+                        </tr>
+                    }
+                    </tbody>
+                </table>
+            }
+            break;
+
+        case Tab.Files:
+            @if (s.Blobs.Count == 0)
+            {
+                <p class="muted">No files on the router.</p>
+            }
+            else
+            {
+                <p class="muted">@s.Blobs.Count files, @Bytes(s.Blobs.Where(b => b.State is BlobState.Uploading or BlobState.Sealed).Sum(b => b.Bytes)) held.</p>
+                <table>
+                    <thead><tr><th>Id</th><th>From</th><th>State</th><th class="num">Size</th><th>For</th><th>Fetched by</th><th>Expires</th></tr></thead>
+                    <tbody>
+                    @foreach (var b in s.Blobs.OrderByDescending(b => b.CreatedOn))
+                    {
+                        <tr class="@(b.State is BlobState.Cancelled or BlobState.Expired ? "dim" : "")">
+                            <td><code>@b.Id.ToString()[..8]</code></td>
+                            <td>@b.Sender</td>
+                            <td>@b.State.ToString().ToLowerInvariant()@(b.EndReason is { } why ? $" ({why})" : "")</td>
+                            <td class="num">@Bytes(b.Bytes)</td>
+                            <td>@string.Join(", ", b.SharedWith)</td>
+                            <td>@string.Join(", ", b.ReleasedBy)</td>
+                            <td>@Local(b.ExpiresOn)</td>
+                        </tr>
+                    }
+                    </tbody>
+                </table>
+            }
+            <div class="row">
+                Release everything waiting for
+                <select @bind="_clearFor">
+                    <option value="">a machine...</option>
+                    @foreach (var m in s.Machines.Where(m => m.Machine.Status == MembershipStatus.Approved))
+                    {
+                        <option value="@m.Machine.Id">@m.Machine.Name</option>
+                    }
+                </select>
+                <button class="danger" disabled="@(!_live || string.IsNullOrEmpty(_clearFor))" @onclick="ClearFilesAsync">Release</button>
+            </div>
+            break;
+
+        case Tab.Rooms:
+            <h2>Rooms</h2>
+            @if (s.Rooms.Count == 0)
+            {
+                <p class="muted">No live rooms.</p>
+            }
+            else
+            {
+                <table>
+                    <thead><tr><th>Name</th><th>Members</th><th>Invited</th><th class="num">Messages</th><th>Opened</th><th>Last activity</th></tr></thead>
+                    <tbody>
+                    @foreach (var r in s.Rooms.OrderByDescending(r => r.LastActivityOn))
+                    {
+                        <tr>
+                            <td><b>@r.Name</b></td>
+                            <td>@string.Join(", ", r.Members)</td>
+                            <td>@string.Join(", ", r.Invited)</td>
+                            <td class="num">@r.Messages</td>
+                            <td>@Local(r.OpenedOn)</td>
+                            <td>@Ago(r.LastActivityOn)</td>
+                        </tr>
+                    }
+                    </tbody>
+                </table>
+            }
+            <h2>Groups</h2>
+            @if (s.Groups.Count == 0)
+            {
+                <p class="muted">No groups.</p>
+            }
+            else
+            {
+                <table>
+                    <thead><tr><th>Name</th><th>Members</th><th>Signed</th></tr></thead>
+                    <tbody>
+                    @foreach (var g in s.Groups)
+                    {
+                        <tr><td><b>@g.Name</b></td><td>@string.Join(", ", g.Members)</td><td>@(g.Signed is null ? "no" : "owner")</td></tr>
+                    }
+                    </tbody>
+                </table>
+            }
+            <p class="muted">Groups change through signed commands: <code>poniexp-client admin group set ...</code></p>
+            break;
+
+        case Tab.Traffic:
+            <div class="row">
+                The traffic log is <b>@(s.TrafficLogOn ? "on" : "off")</b>
+                <button disabled="@(!_live)" @onclick="() => SetTrafficLogAsync(!s.TrafficLogOn)">@(s.TrafficLogOn ? "Turn off" : "Turn on")</button>
+                <span class="muted">newest @DashboardActions.TrafficRows</span>
+            </div>
+            <p class="muted">What the router can see: which machines, when, the size and the message's id. Types and contents are sealed inside
+                the encryption, so a message, an automatic receipt (sent back when a message arrives and again when it's acknowledged) and a file
+                look alike here.</p>
+            <div class="row">
+                <label title="Rows sent by or to this machine">Machine
+                    <select @bind="_trafficMachine">
+                        <option value="">all</option>
+                        @foreach (var name in s.Traffic.SelectMany(t => new[] { t.From, t.To }).OfType<string>().Where(n => n.Length > 0).Distinct().Order(StringComparer.OrdinalIgnoreCase))
+                        {
+                            <option value="@name">@name</option>
+                        }
+                    </select>
+                </label>
+                <label title="Which kind of rows to show">Show
+                    <select @bind="_trafficShow">
+                        @foreach (var (value, label) in TrafficFilters)
+                        {
+                            <option value="@value">@label</option>
+                        }
+                    </select>
+                </label>
+            </div>
+            var rows = s.Traffic.Where(TrafficShown).ToList();
+            var anyAddress = rows.Any(t => t.Address is not null);
+            @if (rows.Count == 0)
+            {
+                <p class="muted">@(s.Traffic.Count == 0 ? "Nothing recorded yet." : "No rows match.")</p>
+            }
+            else
+            {
+                <table>
+                    <thead><tr>
+                        <th title="When the router first saw it (your local time)">When</th>
+                        <th title="The machine that sent it">From</th>
+                        <th title="The machine it's for">To</th>
+                        <th class="num" title="Encrypted size on the wire, including the envelope">Size</th>
+                        <th title="Where it ended up, and how long from the router taking it to the recipient storing it; hover a row for each step">Trip</th>
+                        <th title="The message's id; hover for the full id and the sender's sequence number">Message</th>
+                        @if (anyAddress)
+                        {
+                            <th title="Network address of the connection: only kept for refusals and join requests">Address</th>
+                        }
+                    </tr></thead>
+                    <tbody>
+                    @foreach (var t in rows)
+                    {
+                        <tr class="@(t.IsProblem ? "problem" : t.Outcome is TrafficOutcome.Waiting or TrafficOutcome.HandedOver ? "waiting" : "")">
+                            <td title="@t.StartedOn.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss.fff")">@Local(t.StartedOn)</td>
+                            <td>@t.From</td>
+                            <td>@t.To</td>
+                            <td class="num">@(t.Size is { } size ? Bytes(size) : "")</td>
+                            <td title="@TripDetail(t)">@Trip(t)</td>
+                            <td>
+                                @if (t.MessageId is { } id)
+                                {
+                                    <code title="@($"id {id:D}" + (t.Sequence is { } q ? $", sequence {q} from {t.From}" : ""))">@id.ToString()[..8]</code>
+                                }
+                            </td>
+                            @if (anyAddress)
+                            {
+                                <td>@t.Address</td>
+                            }
+                        </tr>
+                    }
+                    </tbody>
+                </table>
+            }
+            break;
+    }
+    <footer class="muted">read @Local(s.ReadOn), every @Options.CurrentValue.DashboardRefreshInterval.TotalSeconds.ToString("0.#") s</footer>
+}
+
+@code {
+    private enum Tab { Machines, Joins, Jobs, Files, Rooms, Traffic }
+
+    [Parameter, EditorRequired] public DashboardSession Session { get; set; } = null!;
+
+    private DashboardState? _state;
+    private Tab _tab = Tab.Machines;
+    private bool _finishedJobs;
+    private bool _live = true;
+    private string? _clearFor;
+    private string _trafficMachine = "";
+    private string _trafficShow = "all";
+    private string? _message;
+    private bool _messageIsError;
+    private CancellationTokenSource? _stop;
+
+    protected override void OnInitialized() => Read();
+
+    protected override void OnAfterRender(bool firstRender)
+    {
+        if (firstRender && RendererInfo.IsInteractive)
+        {
+            _stop = new CancellationTokenSource();
+            _ = RefreshLoopAsync(_stop.Token);
+        }
+    }
+
+    private IEnumerable<(Tab, string)> Tabs()
+    {
+        var waiting = _state?.Machines.Count(m => m.Machine.Status == MembershipStatus.Pending) ?? 0;
+        var online = _state?.Machines.Count(m => m.Machine.Online) ?? 0;
+        yield return (Tab.Machines, $"Machines ({online} online)");
+        yield return (Tab.Joins, waiting == 0 ? "Join requests" : $"Join requests ({waiting})");
+        yield return (Tab.Jobs, $"Jobs ({_state?.Jobs.Count(j => !j.IsFinished) ?? 0})");
+        yield return (Tab.Files, $"Files ({_state?.Blobs.Count ?? 0})");
+        yield return (Tab.Rooms, "Rooms & groups");
+        yield return (Tab.Traffic, "Traffic");
+    }
+
+    private void Read()
+    {
+        _state = Actions.Read(_finishedJobs);
+        _live = Actions.IsLive(Session);
+    }
+
+    private Task RefreshAsync()
+    {
+        Read();
+        return Task.CompletedTask;
+    }
+
+    private async Task RefreshLoopAsync(CancellationToken ct)
+    {
+        using var timer = new PeriodicTimer(Options.CurrentValue.DashboardRefreshInterval);
+        try
+        {
+            while (await timer.WaitForNextTickAsync(ct))
+            {
+                await InvokeAsync(() =>
+                {
+                    Read();
+                    StateHasChanged();
+                });
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private async Task RunAsync<T>(string confirm, Func<Task<T>> change, string done)
+    {
+        if (!await JS.InvokeAsync<bool>("confirm", confirm))
+        {
+            return;
+        }
+
+        try
+        {
+            await change();
+            (_message, _messageIsError) = (done, false);
+        }
+        catch (RouterException e)
+        {
+            (_message, _messageIsError) = (e.Message, true);
+        }
+
+        Read();
+    }
+
+    private Task RemoveMachineAsync(AdminMachineView v) =>
+        RunAsync($"Remove {v.Name}? It may ask to join again.", () => Actions.RemoveAsync(Session, v.Id), $"removed {v.Name}");
+
+    private Task ForgetAsync(AdminMachineView v) =>
+        RunAsync($"Forget {v.Name}? It may ask to join again.", () => Actions.RemoveAsync(Session, v.Id), $"forgot {v.Name}");
+
+    private Task ApproveAsync(AdminMachineView v) =>
+        RunAsync($"Approve {v.Name}? Its join code must read {v.JoinCode} on that machine.", () => Actions.ApproveAsync(Session, v.Id), $"approved {v.Name}");
+
+    private Task RejectAsync(AdminMachineView v) =>
+        RunAsync($"Reject {v.Name}? Its key stays refused until removed.", () => Actions.RejectAsync(Session, v.Id), $"rejected {v.Name}");
+
+    private Task ClearPendingAsync(int count) =>
+        RunAsync($"Forget all {count} join requests?", () => Actions.ClearPendingAsync(Session), "cleared the join requests");
+
+    private Task RemoveJobAsync(Job j) =>
+        RunAsync($"Take \"{j.Title}\" off the board?", () => Actions.RemoveJobAsync(Session, j.Id), $"removed \"{j.Title}\"");
+
+    private Task SetTrafficLogAsync(bool on) =>
+        RunAsync(on ? "Record traffic (who, when, sizes) for the retention period?" : "Stop recording traffic?", () => Actions.SetTrafficLogAsync(Session, on),
+            on ? "traffic log on" : "traffic log off");
+
+    private Task ClearFilesAsync()
+    {
+        var id = _clearFor!;
+        var name = _state?.Machines.FirstOrDefault(m => m.Machine.Id == id)?.Machine.Name ?? id[..8];
+        return RunAsync($"Release every file waiting for {name}?", () => Actions.ClearBlobsForAsync(Session, id), $"released the files waiting for {name}");
+    }
+
+    private static readonly (string Value, string Label)[] TrafficFilters =
+    [
+        ("all", "everything"),
+        ("messages", "messages only"),
+        ("waiting", "not stored yet"),
+        ("problems", "problems (refused, expired, dropped)"),
+        ("joins", "join requests"),
+    ];
+
+    private bool TrafficShown(TrafficRow t) =>
+        (_trafficMachine.Length == 0 || t.From == _trafficMachine || t.To == _trafficMachine) && _trafficShow switch
+        {
+            "messages" => t.MessageId is not null,
+            "waiting" => t.Outcome is TrafficOutcome.Waiting or TrafficOutcome.HandedOver,
+            "problems" => t.IsProblem,
+            "joins" => t.Outcome == TrafficOutcome.JoinRequest,
+            _ => true,
+        };
+
+    // Short enough to scan down the column; the steps and their timings are in the hover.
+    private static string Trip(TrafficRow t) => t.Outcome switch
+    {
+        TrafficOutcome.Stored => t.RelayedOn is { } r && t.ConfirmedOn is { } c ? $"stored · {TrafficView.Duration(c - r)}" : "stored",
+        TrafficOutcome.HandedOver => t.Deliveries > 1 ? $"not stored · {t.Deliveries} tries" : "not stored",
+        TrafficOutcome.Waiting => "waiting",
+        TrafficOutcome.Expired => "expired",
+        TrafficOutcome.Dropped => "dropped",
+        TrafficOutcome.Refused => "refused",
+        TrafficOutcome.JoinRequest => "join request",
+        _ => "",
+    };
+
+    private string TripDetail(TrafficRow t)
+    {
+        if (t.MessageId is null)
+        {
+            return t.Summary;
+        }
+
+        var steps = new List<string> { t.RelayedOn is { } r ? $"relayed {Precise(r)}" : "not relayed" };
+        if (t.DeliveredOn is not null)
+        {
+            steps.Add($"delivered{(t.ToDeliver is { } d ? $" +{TrafficView.Duration(d)}" : "")}{(t.Deliveries > 1 ? $" ({t.Deliveries} tries)" : "")}");
+        }
+
+        if (t.ConfirmedOn is not null)
+        {
+            steps.Add($"stored{(t.ToStore is { } c ? $" +{TrafficView.Duration(c)}" : "")}");
+        }
+
+        return $"{t.Summary}\n{string.Join(" → ", steps)}";
+    }
+
+    private static string Precise(DateTimeOffset on) => on.ToLocalTime().ToString("HH:mm:ss.fff");
+
+    private string Local(DateTimeOffset on) => on.ToLocalTime().ToString(on.Date == Time.GetLocalNow().Date ? "HH:mm:ss" : "MM-dd HH:mm");
+
+    private string Ago(DateTimeOffset on)
+    {
+        var span = Time.GetUtcNow() - on;
+        return span.TotalSeconds < 60 ? $"{Math.Max(0, (int)span.TotalSeconds)} s ago"
+            : span.TotalMinutes < 60 ? $"{(int)span.TotalMinutes} min ago"
+            : span.TotalHours < 48 ? $"{(int)span.TotalHours} h ago"
+            : $"{(int)span.TotalDays} days ago";
+    }
+
+    private static string Short(string? text, int length) => text is null ? "none" : text.Length <= length ? text : text[..length] + "...";
+
+    private static string Bytes(long bytes) => bytes switch
+    {
+        < 1024 => $"{bytes} B",
+        < 1024 * 1024 => $"{bytes / 1024.0:0.#} KB",
+        < 1024L * 1024 * 1024 => $"{bytes / 1024.0 / 1024:0.#} MB",
+        _ => $"{bytes / 1024.0 / 1024 / 1024:0.##} GB",
+    };
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_stop is not null)
+        {
+            await _stop.CancelAsync();
+            _stop.Dispose();
+        }
+    }
+}

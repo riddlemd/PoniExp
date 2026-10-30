@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.Options;
 using PoniExp.Core.Protocol;
 using PoniExp.Server.Admin;
+using PoniExp.Server.Dashboard;
 using PoniExp.Server.Hubs;
 using PoniExp.Server.Machines;
 using PoniExp.Server.Security;
@@ -45,6 +46,11 @@ public static class RouterHost
             {
                 kestrel.Listen(IPAddress.Loopback, adminPort);
             }
+
+            if (options.DashboardPort is { } dashboardPort)
+            {
+                kestrel.Listen(IPAddress.Parse(options.DashboardBindAddress), dashboardPort);
+            }
         });
 
         builder.Services.AddOptions<RouterOptions>()
@@ -73,6 +79,7 @@ public static class RouterHost
         builder.Services.AddSingleton(Owner.RouterKeys.LoadOrCreate(options.DataDirectory));
         builder.Services.AddSingleton<Owner.RemoteAdmin>();
         builder.Services.AddSingleton<Owner.AdminApprovals>();
+        builder.Services.AddDashboard();
         builder.Services.AddSignalR(signalR =>
             {
                 signalR.MaximumReceiveMessageSize = Limits.MaxContentBytes * 2 + 64 * 1024;
@@ -81,10 +88,20 @@ public static class RouterHost
             .AddJsonProtocol(json => WireProtocol.Configure(json.PayloadSerializerOptions));
 
         var app = builder.Build();
+        app.UseRouting();
+        app.UseDashboardGate(options.DashboardPort);
+        app.UseAntiforgery();
         app.MapHub<RelayHub>(HubMethods.Path);
         app.MapAdmin();
         Blobs.BlobEndpoints.MapBlobs(app);
-        app.MapGet("/", () => Results.Text("PoniExp router\n"));
+        if (options.DashboardPort is not null)
+        {
+            app.MapDashboard(); // its "/" also answers the relay port's "PoniExp router" (the gate does)
+        }
+        else
+        {
+            app.MapGet("/", () => Results.Text("PoniExp router\n"));
+        }
         // Says only whether the router works: no counts or names, since the relay port may face the internet.
         app.MapGet("/health", (RouterStore store) => store.IsHealthy()
             ? Results.Json(new { status = "healthy" })

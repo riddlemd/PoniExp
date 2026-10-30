@@ -78,6 +78,8 @@ const string Usage = """
                                            rooms: named conversations everyone in sees; invitees accept, members leave
       admin <command> [args]               a router admin command from here, signed with your owner key (one prompt):
                                            any `poniexp admin` command (list, approve <code>, group set ..., backup <file>, ...)
+      dashboard [--url <url>] [--print]    sign in to the router's dashboard with your owner key (one prompt) and open it;
+                                           --url is remembered in settings.json (Dashboard:Url); --print shows the link instead
       wake                                 wake targets: agents that only use MCP (e.g. Hermes) get a nudge when messages arrive
       wake set <agent> --a2a <url> [--token]
                                            nudge an A2A gateway (Hermes); --token asks for its peer token (kept in the secret store)
@@ -151,6 +153,7 @@ try
         ["mcp", .. var rest] => await McpAsync(Option(rest, "--agent") ?? throw new ArgumentException("mcp needs --agent <name>")),
         ["capabilities"] => await CapabilitiesAsync(),
         ["admin", .. var adminArgs] when adminArgs.Length > 0 => await RemoteAdminAsync(adminArgs),
+        ["dashboard", .. var rest] => await DashboardAsync(Option(rest, "--url"), rest.Contains("--print")),
         ["wake"] => await WakeListAsync(),
         ["wake", "set", var wakeAgent, .. var wakeRest] => await WakeSetAsync(wakeAgent, wakeRest),
         ["wake", "test", var wakeAgent] => await WakeTestAsync(wakeAgent),
@@ -1386,6 +1389,65 @@ async Task<int> RunSignedAdminAsync(LocalApiClient api, string[] args, PoniExp.C
     return result.ExitCode;
 }
 
+/// <summary>`dashboard`: a one-time sign-in signed by the owner key, opened in the browser (docs/plan.md, Phase 13).</summary>
+async Task<int> DashboardAsync(string? given, bool print)
+{
+    var saved = new ConfigurationBuilder().AddJsonFile(ClientConfig.SettingsPath, optional: true, reloadOnChange: false).Build()["Dashboard:Url"];
+    if ((given ?? saved) is not { } text)
+    {
+        return Fail("give the dashboard's address once: poniexp-client dashboard --url https://<router-host>.<tailnet>.ts.net");
+    }
+
+    if (!Uri.TryCreate(text, UriKind.Absolute, out var dashboard) || dashboard.Scheme is not ("https" or "http"))
+    {
+        return Fail($"'{text}' isn't an http(s) address");
+    }
+
+    using var api = await DaemonAsync2();
+    var owner = await api.OwnerAsync(cancel.Token);
+    if (owner.RouterId is null)
+    {
+        return Fail("the daemon isn't connected to the router");
+    }
+
+    if (owner.PinnedKey is null || await AgentHoldsAsync(owner.PinnedKey) is not { } key)
+    {
+        return Fail(owner.PinnedKey is null ? "no owner key is pinned here: poniexp-client owner pin"
+            : $"the SSH agent here doesn't hold the owner key {owner.PinnedFingerprint} (is Bitwarden unlocked, with its SSH agent on?)");
+    }
+
+    var id = Guid.NewGuid();
+    var issued = PoniExp.Core.Protocol.Signatures.Truncate(DateTimeOffset.UtcNow);
+    Console.Error.WriteLine("Approve the signing request in your SSH agent (e.g. Bitwarden)...");
+    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancel.Token);
+    timeout.CancelAfter(TimeSpan.FromMinutes(2));
+    string signature;
+    try
+    {
+        signature = await new PoniExp.Core.Crypto.SshAgent().SignAsync(key, PoniExp.Core.Protocol.DashboardSignIn.Payload(id, owner.RouterId, issued), timeout.Token);
+    }
+    catch (PoniExp.Core.Crypto.OwnerKeyUnavailableException e)
+    {
+        return Fail($"not signed: {e.Message}");
+    }
+
+    if (given is not null && given != saved)
+    {
+        SaveSetting("Dashboard", "Url", given);
+        Console.WriteLine($"remembered the dashboard address in {ClientConfig.SettingsPath}");
+    }
+
+    var link = new PoniExp.Core.Protocol.DashboardSignIn(id, owner.RouterId, issued, signature).Link(dashboard).AbsoluteUri;
+    if (print || !OpenInBrowser(link))
+    {
+        Console.WriteLine($"Open this once, within a few minutes (it signs in as the owner):\n  {link}");
+        return 0;
+    }
+
+    Console.WriteLine($"Opened {dashboard.GetLeftPart(UriPartial.Authority)} in your browser.");
+    return 0;
+}
+
 async Task<int> AnswerAsync(string id, bool approve, bool always, string? reason)
 {
     using var api = await DaemonAsync2();
@@ -1725,6 +1787,37 @@ static string? Option(string[] rest, string name)
 {
     var i = Array.IndexOf(rest, name);
     return i >= 0 && i + 1 < rest.Length ? rest[i + 1] : null;
+}
+
+/// <summary>Sets <paramref name="section"/>:<paramref name="name"/> in settings.json, keeping everything else in it.</summary>
+static void SaveSetting(string section, string name, string value)
+{
+    var path = ClientConfig.SettingsPath;
+    var root = File.Exists(path) ? System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path)) as System.Text.Json.Nodes.JsonObject ?? [] : [];
+    if (root[section] is not System.Text.Json.Nodes.JsonObject part)
+    {
+        root[section] = part = [];
+    }
+
+    part[name] = value;
+    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+    File.WriteAllText(path, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+}
+
+static bool OpenInBrowser(string url)
+{
+    try
+    {
+        // Not UseShellExecute on macOS and Linux: there it runs the URL as a program.
+        using var process = OperatingSystem.IsWindows()
+            ? Process.Start(new ProcessStartInfo(url) { UseShellExecute = true })
+            : Process.Start(new ProcessStartInfo(OperatingSystem.IsMacOS() ? "open" : "xdg-open", [url]) { UseShellExecute = false });
+        return process is not null;
+    }
+    catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException)
+    {
+        return false;
+    }
 }
 
 static string[] TakeHome(string[] args)
