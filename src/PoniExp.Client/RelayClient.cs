@@ -78,8 +78,13 @@ public sealed class RelayClient : IAsyncDisposable
 
                         return handler;
                     };
-                    http.WebSocketConfiguration = socket =>
-                        socket.RemoteCertificateValidationCallback = (_, cert, _, _) => cert is not null && Matches(cert, pin);
+                }
+
+                if (http.Transports == HttpTransportType.WebSockets)
+                {
+                    var pinned = options.PinnedCertificateSha256;
+                    var timeout = options.ConnectTimeout;
+                    http.WebSocketFactory = (context, cancellationToken) => OpenWebSocketAsync(context, pinned, timeout, cancellationToken);
                 }
             })
             .WithAutomaticReconnect(new ForeverRetry(options.ReconnectDelays))
@@ -1295,6 +1300,42 @@ public sealed class RelayClient : IAsyncDisposable
         CryptographicOperations.FixedTimeEquals(
             SHA256.HashData(cert.GetRawCertData()),
             Convert.FromHexString(pin.Replace(":", string.Empty, StringComparison.Ordinal)));
+
+    /// <summary>
+    /// Opens the WebSocket, giving up after <paramref name="timeout"/>. SignalR's own factory has no limit, and
+    /// its reconnect loop awaits each attempt, so one that a dead path never answers stops reconnecting for good.
+    /// </summary>
+    private static async ValueTask<System.Net.WebSockets.WebSocket> OpenWebSocketAsync(
+        Microsoft.AspNetCore.Http.Connections.Client.WebSocketConnectionContext context, string? pin, TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        var socket = new System.Net.WebSockets.ClientWebSocket();
+        try
+        {
+            if (pin is not null)
+            {
+                socket.Options.RemoteCertificateValidationCallback = (_, cert, _, _) => cert is not null && Matches(cert, pin);
+            }
+
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            limit.CancelAfter(timeout);
+            try
+            {
+                await socket.ConnectAsync(context.Uri, limit.Token);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new TimeoutException($"the router didn't answer within {timeout.TotalSeconds:0.#} s");
+            }
+
+            return socket;
+        }
+        catch
+        {
+            socket.Dispose();
+            throw;
+        }
+    }
 
     private sealed class ForeverRetry(IReadOnlyList<TimeSpan> delays) : IRetryPolicy
     {

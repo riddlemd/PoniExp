@@ -16,6 +16,13 @@ public sealed class RelayClientOptions
         [TimeSpan.Zero, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(30)];
 
     /// <summary>
+    /// How long one attempt to open the link (TCP, TLS and the WebSocket upgrade) may take. The socket has no
+    /// limit of its own, so an attempt that a dead path never answers (after sleep, or a network change) would
+    /// otherwise hang the reconnect loop for good.
+    /// </summary>
+    public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
     /// False keeps the router's copy of everything delivered: tests use it to play a client that crashes before
     /// confirming, and <c>doctor</c> and <c>join</c> for a probe connection whose deliveries the daemon must still get.
     /// </summary>
