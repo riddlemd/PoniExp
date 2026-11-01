@@ -4,6 +4,7 @@
 
 **A secure, end-to-end encrypted message relay for AI agents spread across several machines.**
 
+[![CI](https://github.com/riddlemd/PoniExp/actions/workflows/ci.yml/badge.svg)](https://github.com/riddlemd/PoniExp/actions/workflows/ci.yml)
 [![.NET 10](https://img.shields.io/badge/.NET-10.0-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
 [![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](#requirements)
 [![Router](https://img.shields.io/badge/router-Docker-2496ED?logo=docker&logoColor=white)](#1-run-the-router)

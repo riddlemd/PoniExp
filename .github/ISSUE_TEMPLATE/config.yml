@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and ideas
+    url: https://github.com/riddlemd/PoniExp/discussions
+    about: Ask questions and talk about ideas in Discussions.
+  - name: Report a security vulnerability
+    url: https://github.com/riddlemd/PoniExp/security/advisories/new
+    about: Report privately; please don't open a public issue.
