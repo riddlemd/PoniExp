@@ -58,7 +58,9 @@ public sealed class DashboardSessions(OwnerDesk desk, RouterKeys keys, IOptionsM
             throw new RouterException("That sign-in link was already used; run poniexp-client dashboard again.");
         }
 
-        var session = new DashboardSession(owner.Fingerprint, now + options.CurrentValue.DashboardSessionLifetime);
+        // The token carries whole seconds, so round the end up: truncating it would cut up to a second off the lifetime.
+        var ends = now + options.CurrentValue.DashboardSessionLifetime;
+        var session = new DashboardSession(owner.Fingerprint, DateTimeOffset.FromUnixTimeSeconds((ends.ToUnixTimeMilliseconds() + 999) / 1000));
         logger.LogInformation("Dashboard signed in with the owner key {Fingerprint}, until {Until:u}", owner.Fingerprint, session.ExpiresOn);
         return (Issue(session), session);
     }

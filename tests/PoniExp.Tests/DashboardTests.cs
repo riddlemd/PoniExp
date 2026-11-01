@@ -124,6 +124,20 @@ public class DashboardTests
     }
 
     [Fact]
+    public async Task Given_a_sign_in_When_its_token_is_read_back_Then_it_lasts_at_least_the_configured_lifetime()
+    {
+        // Given
+        await using var setup = await Setup.StartAsync();
+        var before = DateTimeOffset.UtcNow;
+
+        // When
+        var token = CookieOf(await setup.Dashboard.GetAsync(setup.SignIn().Link(setup.DashboardUrl)));
+
+        // Then
+        Assert.True(setup.Sessions.Validate(token)!.ExpiresOn >= before + TimeSpan.FromHours(1));
+    }
+
+    [Fact]
     public async Task Given_a_signed_in_token_When_it_is_tampered_with_Then_it_is_refused()
     {
         // Given
@@ -162,12 +176,12 @@ public class DashboardTests
     public async Task Given_a_signed_in_token_When_its_lifetime_passes_Then_it_is_refused()
     {
         // Given
-        await using var setup = await Setup.StartAsync(new Dictionary<string, string?> { ["PoniExp:DashboardSessionLifetime"] = "00:00:01" });
+        await using var setup = await Setup.StartAsync(new Dictionary<string, string?> { ["PoniExp:DashboardSessionLifetime"] = "00:00:02" });
         var token = CookieOf(await setup.Dashboard.GetAsync(setup.SignIn().Link(setup.DashboardUrl)));
         Assert.Equal(HttpStatusCode.OK, (await setup.GetWithCookieAsync("/", token)).StatusCode);
 
         // When
-        await Task.Delay(TimeSpan.FromSeconds(2.1));
+        await Task.Delay(TimeSpan.FromSeconds(3.1));
 
         // Then
         Assert.Equal(HttpStatusCode.Unauthorized, (await setup.GetWithCookieAsync("/", token)).StatusCode);
