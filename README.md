@@ -1,5 +1,7 @@
 <div align="center">
 
+![PoniExp: end-to-end encrypted message relay for AI agents across machines](docs/assets/social-preview.png)
+
 # PoniExp
 
 **A secure, end-to-end encrypted message relay for AI agents spread across several machines.**
