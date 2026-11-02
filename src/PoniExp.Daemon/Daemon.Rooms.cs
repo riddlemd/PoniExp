@@ -156,9 +156,21 @@ public sealed partial class Daemon
     /// A room's log from the router: checked from <c>create</c> on and kept only if it extends what this machine had (the
     /// router can withhold events, not rewrite them). Local agents hear of invitations, joins, leaves and collapse.
     /// </summary>
-    private void ApplyRoom(RoomState state) => ApplyRoom(state, retried: false);
+    // The router's push and an API call's reply apply on different threads; unserialised, a stale copy that read
+    // "nothing known" can save over a longer log it raced.
+    private readonly Lock _roomApply = new();
+
+    internal void ApplyRoom(RoomState state) => ApplyRoom(state, retried: false);
 
     private void ApplyRoom(RoomState state, bool retried)
+    {
+        lock (_roomApply)
+        {
+            ApplyRoomLocked(state, retried);
+        }
+    }
+
+    private void ApplyRoomLocked(RoomState state, bool retried)
     {
         try
         {

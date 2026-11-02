@@ -158,6 +158,38 @@ public class RoomTests
     }
 
     [Fact]
+    public async Task Given_AStaleCopyOfANewRoom_When_ItRacesTheNewerCopy_Then_TheStoredLogNeverShrinks()
+    {
+        // Given: rooms whose create event alone (the stale copy) and create+invite (the newer copy) are both valid logs
+        await using var router = await RouterFixture.StartAsync();
+        await using var ise = await DaemonFixture.StartAsync(router, "ise");
+        await using var wojtek = await DaemonFixture.StartAsync(router, "wojtek");
+        var relay = ise.Daemon.Relay;
+        var me = $"{ise.Keys.MachineId}/ops";
+        var pairs = Enumerable.Range(0, 1000).Select(_ =>
+        {
+            var now = DateTimeOffset.UtcNow;
+            var draft = relay.SignRoomEvent(new RoomEvent(Guid.NewGuid(), Guid.Empty, RoomEventKind.Create, me, null, "race", null, now, null, "", ""));
+            var create = relay.SignRoomEvent(draft with { RoomId = RoomLog.RoomIdOf(draft) });
+            var invite = relay.SignRoomEvent(new RoomEvent(Guid.NewGuid(), create.RoomId, RoomEventKind.Invite, me, $"{wojtek.Keys.MachineId}/agent",
+                null, null, now, now.AddDays(1), "", ""));
+            return (Stale: new RoomState(create.RoomId, "race", [create]), Newer: new RoomState(create.RoomId, "race", [create, invite]));
+        }).ToList();
+
+        // When: each pair is applied from two threads at once, as a router push and an API reply can be
+        await Task.WhenAll(pairs.Select(async pair =>
+        {
+            using var start = new Barrier(2);
+            await Task.WhenAll(
+                Task.Run(() => { start.SignalAndWait(); ise.Daemon.ApplyRoom(pair.Stale); }),
+                Task.Run(() => { start.SignalAndWait(); ise.Daemon.ApplyRoom(pair.Newer); }));
+        }));
+
+        // Then: every room kept the longer log
+        Assert.All(pairs, pair => Assert.Equal(2, ise.Store.GetRoom(pair.Newer.RoomId)!.Events.Count));
+    }
+
+    [Fact]
     public async Task ASenderThatMissedALeaveIsRefusedAndSealsAgain()
     {
         await using var router = await RouterFixture.StartAsync();
