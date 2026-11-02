@@ -80,7 +80,7 @@ only has to build on the ones before it; a protection that arrives in a later ph
 | Naming | What was called an endpoint is an **agent**: addresses are `machine/agent`, flags `--agent`, the automatic announcement type `agent`. Agent names are labels, not identities. |
 | Job board | An open forum for every approved machine: jobs are in the clear on the router (signed changes, approved machines only) so a dashboard can show them. Any agent posts and comments; an agent on a machine meeting the job's requirements claims it under a lease its daemon renews, and moves it through backlog, ready, claimed, running, done / failed. Live jobs are in `admin backup`, and posters' daemons re-post their open jobs. GitHub issues stay outside PoniExp. |
 | Web interface | Deferred: its own workshop phase (13), after waking agents (phase 12), before the tray app. |
-| Tray app | Built on Oriel (the user's Electron for .NET), not Avalonia; the last phase (14), waiting for Oriel to ship and finish `Notification`. |
+| Tray app | Built on Riftway (the user's .NET desktop framework on CEF), not Avalonia; the last phase (14), waiting for Riftway to finish `Notification`. |
 | Rooms | Named (unique on the router while live), created by any agent; members invite, invitees accept, members leave; no admins, no removals. Membership is a log of signed events the router keeps and orders and can see (agents included); each message's key is wrapped for exactly the current members' machines, checked by the router. A room collapses when empty or idle (`RoomIdleExpiry`); the router then keeps only stats, per machine (no subjects, bodies or sending agents). |
 | Groups | Owner-defined lists of addresses on the router (`admin group`), resolved by the sender's daemon into separate messages. |
 | Local trust | Every local process running as the machine's user is trusted; it could read the user's keys anyway. The daemon scopes what each agent is shown, but that is convenience, not a security boundary. |
@@ -926,7 +926,7 @@ that comes later does nothing. Both gateway restarts on 2026-10-23 failed this w
 ### A notification on the desk
 
 **Today:** a request shows only in `poniexp-client approvals`. Notifications are planned for the
-phase-14 tray app, which waits on Oriel.
+phase-14 tray app, which waits on Riftway.
 
 **Proposal:** a minimal interim notifier in the daemon, replaced by the tray app later.
 - When a request becomes pending on this desk (another machine's request, a join, an admin change, or
@@ -1039,14 +1039,14 @@ Live: `poniexp-client dashboard` from Ise with the real Bitwarden prompt, throug
 `App`, `Home` (static: reads the cookie) and `DashboardPage` (interactive server). Client `dashboard` command; the URL
 is remembered in settings.json (`Dashboard:Url`).
 
-## Phase 14: Tray app (workshop; waits for Oriel)
+## Phase 14: Tray app (workshop; waits for Riftway)
 
-Built on Oriel (riddlemd/Oriel: Electron for .NET on CEF), not Avalonia, once Oriel is far enough
-along; last because it waits on Oriel and nothing depends on it. Oriel already has `Tray` on all
-three OSes; it still needs to ship (M4: runtime packages, layouts, installers) and finish
-`Notification` (Windows toasts with buttons work; Linux has no actions, macOS none yet).
+Built on Riftway (riddlemd/Riftway: a .NET desktop framework on CEF with an Electron-style API),
+not Avalonia, once Riftway is far enough along; last because it waits on Riftway and nothing depends
+on it. Riftway already has `Tray` on all three OSes and its packages are on nuget.org (0.1.0-preview.1);
+it still needs layouts and installers (M4) and to finish `Notification` (Windows toasts with buttons work; Linux has no actions, macOS none yet).
 
 A small PoniExp tray app on each machine: shows approval requests on the desk (Approve / Deny /
-Always, as an Oriel window card or a native notification), the desk state (`here` / `away`), and the
+Always, as a Riftway window card or a native notification), the desk state (`here` / `away`), and the
 daemon's health. Open, for the workshop: card or notification, how it's installed and started with
 the daemon, and what else it shows.
